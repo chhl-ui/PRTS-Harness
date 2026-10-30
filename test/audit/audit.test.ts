@@ -33,7 +33,7 @@ test('append 各类 kind + query 过滤', () => {
     a.append(sys('stop'), { kind: 'stop.completed', level: 'S2', durationMs: 900 })
     a.append(owner, { kind: 'plugin.approved', pluginId: 'p1', contentSha256: 'a'.repeat(64) })
     a.append(owner, { kind: 'plugin.rejected', pluginId: 'p2', contentSha256: 'b'.repeat(64), reason: 'r' })
-    a.append(owner, { kind: 'approval.decided', sessionId: 's1', tool: 'pwsh', outcome: 'allowed-once', grantId: 'g2' })
+    a.append(owner, { kind: 'approval.decided', sessionId: 's1', callId: 'c9', tool: 'pwsh', capabilities: ['exec:shell'], outcome: 'allowed-once', grantId: 'g2' })
     a.append(owner, { kind: 'undo.performed', target: { kind: 'file', id: 'f1' }, detail: 'restored' })
 
     const all = a.query()
@@ -114,7 +114,7 @@ test('每 kind 至少一个非法输入 → INVALID_INPUT', () => {
       { kind: 'grant.issued', grantId: '', subject: 's', capability: 'c', expiresAt: null } as AuditEvent,
       { kind: 'grant.revoked', grantId: 'g', reason: '' } as AuditEvent,
       { kind: 'tool.denied', sessionId: '', tool: 't', reason: 'r' } as AuditEvent,
-      { kind: 'approval.decided', sessionId: 's', tool: 't', outcome: 'bogus' as never },
+      { kind: 'approval.decided', sessionId: 's', callId: 'c', tool: 't', capabilities: ['x'], outcome: 'bogus' as never },
       { kind: 'stop.requested', level: 'S9' as never },
       { kind: 'stop.completed', level: 'S1', durationMs: 'x' as never },
       { kind: 'plugin.approved', pluginId: 'p', contentSha256: '' } as AuditEvent,

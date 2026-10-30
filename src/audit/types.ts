@@ -13,7 +13,8 @@ export type AuditEvent =
   | { kind: 'grant.issued'; grantId: string; subject: string; capability: Capability; expiresAt: number | null }
   | { kind: 'grant.revoked'; grantId: string; reason: string }
   | { kind: 'tool.denied'; sessionId: string; tool: string; reason: string }
-  | { kind: 'approval.decided'; sessionId: string; tool: string; outcome: 'allowed-once' | 'allowed-always' | 'denied' | 'cancelled' | 'unavailable'; grantId?: string }
+  | { kind: 'approval.decided'; sessionId: string; callId: string; tool: string; capabilities: string[]; outcome: 'allowed-once' | 'allowed-always' | 'denied' | 'cancelled' | 'unavailable'; grantId?: string }
+  | { kind: 'approval.consumed'; callId: string }
   | { kind: 'stop.requested'; level: 'S0' | 'S1' | 'S2' | 'S3' }
   | { kind: 'stop.completed'; level: 'S0' | 'S1' | 'S2' | 'S3'; durationMs: number; escalatedTo?: 'S3' }
   | { kind: 'plugin.approved'; pluginId: string; contentSha256: string }

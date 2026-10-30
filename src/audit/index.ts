@@ -1,4 +1,5 @@
 export { AuditLog } from './audit.ts'
+export { SCHEMA as AUDIT_SCHEMA } from './audit.ts'
 export { AuditError } from './errors.ts'
 export { applyAuditEvent } from './fold.ts'
 export type { AuditErrorCode } from './errors.ts'
