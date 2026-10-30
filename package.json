@@ -1,0 +1,15 @@
+{
+  "name": "prts-system",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "PRTS 受保护核心：K1 任务账本（纯 TypeScript 库，node:sqlite 存储）",
+  "scripts": {
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc -p ."
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3"
+  }
+}
