@@ -23,6 +23,10 @@ export interface SupervisorConfig {
   restart?: { maxRestarts: number; windowMs: number }
   /** K5：提供时，启动检查之后、spawn 之前执行完整性校验；失败不启动运行时。 */
   integrity?: { installRoot: string; manifestPath: string; entries: () => ComposedEntry[] }
+  /** 运行时工作区（写进 PRTS_WORKSPACE）；未给时退回 dataRoot。 */
+  workspace?: string
+  /** 组合文件路径（写进 PRTS_CONFIG）。 */
+  configPath?: string
 }
 
 type State = 'running' | 'stopped-by-owner' | 'restarting' | 'failed'
@@ -153,6 +157,9 @@ export class Supervisor {
         PRTS_CONTROL_TOKEN: this.controlToken,
         PRTS_DB: this.dbPath,
         PRTS_MODE: this.mode,
+        PRTS_DATA_ROOT: this.config.dataRoot,
+        PRTS_WORKSPACE: this.config.workspace ?? this.config.dataRoot,
+        PRTS_CONFIG: this.config.configPath ?? '',
       } as Record<string, string>,
       stdoutPath: out,
       stderrPath: err,

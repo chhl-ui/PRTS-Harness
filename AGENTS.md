@@ -58,3 +58,15 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   `Supervisor` 配 `integrity` 时校验失败不启动运行时。
 - 预算：`blocked_json` 记 `by`（owner/model/system）；model 只能 unblock 自己造成的阻塞，
   且 `resume`/`unblock` 时 usage 已超 budget 抛 `BUDGET_EXCEEDED`（判定走 `fold.ts` 的 `usageExceeded`）。
+
+## K6（运行时集成 2a）：真实组合与运行时入口
+
+- `config/prts.yml`：sdk-minimal 展开蓝本，去掉 sdk-app/jsonrpc 与账户链（credentials-local/authorization/account-platform/llm-deepseek-account）；`sandbox-policy` workspace-write + `!!js process.env.PRTS_WORKSPACE`；`user-approval` policy=ask。
+- `src/runtime/start.ts` `startRuntime()`：boot 前设 `DSH_HOME=<dataRoot>/dsh-home`、`PRTS_WORKSPACE`；`prepare` 里 `provideCmdline` + `ctx.provide('credentials',{resolve})`（key 仅内存）。
+- `src/runtime/main.ts`：真实入口，**connectControl 先于一切派生**，读 PRTS_* env + `<dataRoot>/secrets/deepseek.key`，boot 后挂完整 StopController。
+- 测试支撑（test/）：`scripted-llm.ts` 按脚本应答的 llm adapter（registerAdapter(['deepseek-official'],a)）；`drive.ts` runTurn 发 followup 等 idle。**事件订阅走 `ctx.events.on`，`ctx.on` 是生命周期钩子**；boot() 返回 Runtime 包装对象，Context 经 `ctx.get('agents')`/`ctx.events` 取用。
+- 会话持久化落在 `<dataRoot>/dsh-home/sessions/--<cwd>--/<sessionId>/session.v4.jsonl`。
+- `ctx.jobs` 作业接口：`start(spec)` 需先 `attachController(name)`；`JobSpec={kind,label,owner?,run(job):JobHooks}`，`JobHooks={cancel(reason?),done:Promise<JobOutcome>}`（done 必须 resolve 不能 reject）；`kill(id,caller?,reason?)`、`wait(id,ms)` 按 JobId 操作，`list()` 返回视图（无 kill 方法）。
+- `agent.cancel({kind:'user'})` 同步方法；`agent.whenIdle()` 等回合收敛；turn 内错误被 kick 吞掉不出现在 agent/error。
+- credentials `resolve(ref)`：`credentialRef()` 返回品牌字符串（ref 即 'DEEPSEEK_API_KEY'）；适配器取 `hit.value`；DeepSeek 请求头是 `x-api-key`（无 Authorization）。
+- llm 消息 `content` 是块数组 `[{type:'text',text}]`；`baseURL` 经 patch `config:{baseURL}` 可指向假端点（请求路径 `/v1/messages`）。

@@ -1,0 +1,163 @@
+# PRTS 运行时组合树（设计 02 §2）
+# 蓝本：PRTS-spike-01 prts.yml（sdk-minimal 展开）
+# 改动：去 sdk-app-startup/sdk-jsonrpc-server 与账户链四行；
+#       sandbox-policy mode → workspace-write，workspaceRoot → PRTS_WORKSPACE；
+#       新增 user-approval(policy: ask)。
+
+- id: deepseek-llm-api-extensions
+  name: '@deepseek-ai/dsh-deepseek-llm-api-extensions'
+
+- id: session-log-deepseek
+  name: '@deepseek-ai/dsh-session-log-deepseek'
+
+- id: plugin-package-inventory-deepseek
+  name: '@deepseek-ai/dsh-plugin-package-inventory-deepseek'
+
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek-api-key'
+  config:
+    apiKeyEnv: DEEPSEEK_API_KEY
+    defaultContextWindow: !!js Number(process.env.DSH_CONTEXT_WINDOW ?? 1000000)
+    streamIdleTimeoutMs: 172800000
+
+- id: sandbox
+  name: '@deepseek-ai/dsh-sandbox-local'
+
+- id: filesystem
+  name: '@deepseek-ai/dsh-fs-local'
+
+- id: attachment-local
+  name: '@deepseek-ai/dsh-attachment-local'
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+  config:
+    read: true
+    readImage: true
+    write: true
+    edit: true
+
+- id: working-directory
+  name: '@deepseek-ai/dsh-working-directory'
+
+- id: tool-working-directory
+  name: '@deepseek-ai/dsh-tool-working-directory'
+
+- id: session-projection
+  name: '@deepseek-ai/dsh-session-projection'
+
+- id: token-meter
+  name: '@deepseek-ai/dsh-token-meter'
+
+- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+
+- id: image-offload
+  name: '@deepseek-ai/dsh-compaction-image-offload'
+
+- id: sandbox-policy
+  name: '@deepseek-ai/dsh-sandbox-policy'
+  config:
+    mode: workspace-write
+    workspaceRoot: !!js process.env.PRTS_WORKSPACE
+
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess-local'
+
+- id: pty
+  name: '@deepseek-ai/dsh-terminal'
+
+- id: terminal-bash
+  name: '@deepseek-ai/dsh-terminal-bash'
+  disabled: !!js process.platform === 'win32'
+  config:
+    timeoutMs: 300000
+
+- id: terminal-pwsh
+  name: '@deepseek-ai/dsh-terminal-bash'
+  disabled: !!js process.platform !== 'win32'
+  config:
+    shellDialect: pwsh
+    timeoutMs: 300000
+
+- id: timer
+  name: '@deepseek-ai/cordis-plugin-timer'
+
+- id: llm
+  name: '@deepseek-ai/dsh-llm'
+
+- id: session
+  name: '@deepseek-ai/dsh-session'
+
+- id: session-title
+  name: '@deepseek-ai/dsh-session-title'
+  config:
+    fallbackMaxWords: 5
+    fallbackMaxBytes: 40
+    maxTitleBytes: 80
+
+- id: system-prompt
+  name: '@deepseek-ai/dsh-system-prompt'
+  config:
+    includeHarnessIdentity: false
+    includeRuntimeContext: false
+    personaPrefix: "你是 PRTS（Primitive Rhodes Island Terminal Service），罗德岛的终端系统。回答冷静、精确、简洁，使用简体中文。"
+
+- id: tools
+  name: '@deepseek-ai/dsh-tools'
+
+- id: mcp-resources
+  name: '@deepseek-ai/dsh-mcp-resources'
+
+- id: agent
+  name: '@deepseek-ai/dsh-agent'
+
+- id: llm-retry
+  name: '@deepseek-ai/dsh-llm-retry'
+
+- id: jobs
+  name: '@deepseek-ai/dsh-jobs-local'
+
+- id: agent-loop
+  name: '@deepseek-ai/dsh-agent-loop'
+  config:
+    agents: []
+
+- id: user-approval
+  name: '@deepseek-ai/dsh-user-approval'
+  config:
+    policy: ask
+
+- id: persistent-bash
+  name: '@deepseek-ai/dsh-tool-bash-persistent'
+  disabled: !!js process.platform === 'win32'
+  config:
+    timeoutMs: 300000
+    description: |-
+      Run commands in a bash shell
+      * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
+      * Network access depends on the task environment. Prefer configured mirrors/proxies when they are available.
+      * State is persistent across command calls and discussions with the user.
+      * To inspect a particular line range of a file, e.g. lines 10-25, try 'sed -n 10,25p /path/to/the/file'.
+      * Please avoid commands that may produce a very large amount of output.
+      * Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background.
+
+- id: persistent-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh-persistent'
+  disabled: !!js process.platform !== 'win32'
+  config:
+    timeoutMs: 300000
+    description: |-
+      Run commands in a PowerShell shell
+      * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
+      * You don't have access to the internet via this tool.
+      * State is persistent across command calls and discussions with the user.
+      * Use native Windows paths (C:\...) and $env:NAME variables; this is PowerShell, not bash.
+      * Please avoid commands that may produce a very large amount of output.
+      * Please run long lived commands in the background, e.g. 'Start-Job' or start a server in the background.
+
+- id: sessions
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: !!js dshHomePath('sessions')
+    compression: none
