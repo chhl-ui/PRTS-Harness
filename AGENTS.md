@@ -42,5 +42,14 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   返回理由串即拒绝）——**守卫是唯一强制点**，pre-execute 瀑布与审批应答可被前置插件伪造；
   decide 每次直查 SQLite（无进程内缓存），跨进程撤销即时生效。
   pwsh 命令体内的写/删操作守卫无法识别，shell 写入范围留待 K2b 沙箱处理。
+- K3 停止权与守护进程（`src/stop/`、`src/supervisor/`，仅 Windows）：
+  `StopController` 执行运行时内分级停止；`Supervisor` 在进程外把运行时放进
+  kill-on-close Job，S0–S2 经控制管道转发、超时升级 S3 强杀整树；
+  运行时意外退出按限额自动重启。**所有者命名管道只接受 `stop` 和 `status`**，
+  其他消息一律 `UNSUPPORTED`，畸形 JSON 不崩守护进程。
+  控制管道连接须 2s 内发送 `{type:'hello',pid,token}` 认证（token 每次重启换新、
+  timingSafeEqual 比对、pid 必须等于 Job 内运行时 pid，先认证者胜）；
+  **真实运行时必须在派生任何子进程之前调用 `connectControl`**（读 env 即删），
+  防止模型 shell 经继承的 `PRTS_CONTROL_*` 冒充运行时。
 - 预算：`blocked_json` 记 `by`（owner/model/system）；model 只能 unblock 自己造成的阻塞，
   且 `resume`/`unblock` 时 usage 已超 budget 抛 `BUDGET_EXCEEDED`（判定走 `fold.ts` 的 `usageExceeded`）。

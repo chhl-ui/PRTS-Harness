@@ -1,0 +1,5 @@
+export { Supervisor } from './supervisor.ts'
+export type { SupervisorConfig, SupervisorStopLevel, StopResult } from './supervisor.ts'
+export { spawnInJob } from './job-host.ts'
+export type { JobProcess } from './job-host.ts'
+export { runtimePipeName, ownerPipeName, pipeConnect, encode } from './protocol.ts'
