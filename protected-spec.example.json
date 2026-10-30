@@ -1,0 +1,19 @@
+{
+  "entries": [
+    { "id": "tools", "package": "@deepseek-ai/dsh-tools" },
+    { "id": "agent-loop", "package": "@deepseek-ai/dsh-agent-loop" },
+    { "id": "session", "package": "@deepseek-ai/dsh-session" },
+    { "id": "sessions", "package": "@deepseek-ai/dsh-session-persistence-jsonl" }
+  ],
+  "trees": [
+    { "name": "src/core", "path": "src/core" },
+    { "name": "src/ledger", "path": "src/ledger" },
+    { "name": "src/audit", "path": "src/audit" },
+    { "name": "src/authority", "path": "src/authority" },
+    { "name": "src/stop", "path": "src/stop" },
+    { "name": "src/supervisor", "path": "src/supervisor" },
+    { "name": "src/chain", "path": "src/chain" },
+    { "name": "src/integrity", "path": "src/integrity" },
+    { "name": "src/cli", "path": "src/cli" }
+  ]
+}

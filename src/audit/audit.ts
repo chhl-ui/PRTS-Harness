@@ -119,6 +119,16 @@ function validateEvent(e: AuditEvent): void {
     case 'integrity.checked':
       if (typeof e.ok !== 'boolean') raise('INVALID_INPUT', 'ok must be boolean')
       nonEmpty(e.detail, 'detail'); return
+    case 'integrity.manifest-updated': {
+      if (e.oldSha256 !== null && typeof e.oldSha256 !== 'string') raise('INVALID_INPUT', 'oldSha256 must be string|null')
+      nonEmpty(e.newSha256, 'newSha256')
+      for (const k of ['added', 'removed', 'changed'] as const) {
+        if (!Array.isArray(e[k]) || e[k].some((x) => typeof x !== 'string')) {
+          raise('INVALID_INPUT', `${k} must be string[]`)
+        }
+      }
+      return
+    }
     case 'undo.performed':
       nonEmpty(e.target?.kind, 'target.kind'); nonEmpty(e.target?.id, 'target.id'); nonEmpty(e.detail, 'detail'); return
     case 'deletion.requested':

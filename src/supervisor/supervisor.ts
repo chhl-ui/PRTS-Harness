@@ -8,6 +8,9 @@ import { initCoreDb } from '../core/init.ts'
 import { startupCheck } from '../core/startup-check.ts'
 import { Ledger } from '../ledger/index.ts'
 import { AuditLog } from '../audit/index.ts'
+import { verifyIntegrity } from '../integrity/index.ts'
+import type { ComposedEntry } from '../integrity/index.ts'
+import { IntegrityError } from '../integrity/errors.ts'
 import { spawnInJob } from './job-host.ts'
 import type { JobProcess } from './job-host.ts'
 import { encode, lineParser, listenPipe, ownerPipeName, runtimePipeName } from './protocol.ts'
@@ -18,6 +21,8 @@ export interface SupervisorConfig {
   ownerPipeName: string
   timeouts?: { s2Ms?: number; s3Ms?: number }
   restart?: { maxRestarts: number; windowMs: number }
+  /** K5：提供时，启动检查之后、spawn 之前执行完整性校验；失败不启动运行时。 */
+  integrity?: { installRoot: string; manifestPath: string; entries: () => ComposedEntry[] }
 }
 
 type State = 'running' | 'stopped-by-owner' | 'restarting' | 'failed'
@@ -71,6 +76,37 @@ export class Supervisor {
       s.alert(`startupCheck read-only: ${check.problems.join('; ')}`)
     } else {
       initCoreDb(s.dbPath)
+    }
+
+    // K5：完整性校验，失败不启动运行时
+    if (config.integrity) {
+      const r = verifyIntegrity({
+        installRoot: config.integrity.installRoot,
+        manifestPath: config.integrity.manifestPath,
+        dbPath: s.dbPath,
+        entries: config.integrity.entries(),
+      })
+      if (!r.ok) {
+        s.state = 'failed'
+        for (const f of r.failures) s.alert(`integrity: ${f.code} ${f.detail}`)
+        if (s.mode === 'normal') {
+          const audit = AuditLog.open(s.dbPath)
+          try {
+            audit.append({ kind: 'system', component: 'integrity' }, {
+              kind: 'integrity.checked', ok: false,
+              detail: r.failures.map((f) => `${f.code}:${f.detail}`).join('; ').slice(0, 500),
+            })
+          } finally { audit.close() }
+        }
+        throw new IntegrityError('INTEGRITY_FAILED',
+          `integrity check failed: ${r.failures.map((f) => f.code).join(', ')}`, r.failures)
+      }
+      if (s.mode === 'normal') {
+        const audit = AuditLog.open(s.dbPath)
+        try {
+          audit.append({ kind: 'system', component: 'integrity' }, { kind: 'integrity.checked', ok: true, detail: r.manifestSha256 })
+        } finally { audit.close() }
+      }
     }
 
     // 所有者管道：只接受 stop / status

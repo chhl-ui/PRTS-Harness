@@ -51,5 +51,10 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   timingSafeEqual 比对、pid 必须等于 Job 内运行时 pid，先认证者胜）；
   **真实运行时必须在派生任何子进程之前调用 `connectControl`**（读 env 即删），
   防止模型 shell 经继承的 `PRTS_CONTROL_*` 冒充运行时。
+- K5 启动完整性（`src/integrity/`、`src/cli/prts.ts`）：受保护包与源码树哈希进清单，
+  清单文件的 sha256 由审计链最新 `integrity.manifest-updated` 锚定——清单只能经
+  `node src/cli/prts.ts upgrade --install-root <d> --manifest <f> --db <f> --spec <f> [--init] [--yes]`
+  修改（`--init` 仅首装、`--yes` 原子覆盖+写事件，否则 dry-run 退出码 2）。
+  `Supervisor` 配 `integrity` 时校验失败不启动运行时。
 - 预算：`blocked_json` 记 `by`（owner/model/system）；model 只能 unblock 自己造成的阻塞，
   且 `resume`/`unblock` 时 usage 已超 budget 抛 `BUDGET_EXCEEDED`（判定走 `fold.ts` 的 `usageExceeded`）。

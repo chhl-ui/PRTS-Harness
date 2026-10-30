@@ -20,6 +20,7 @@ export type AuditEvent =
   | { kind: 'plugin.approved'; pluginId: string; contentSha256: string }
   | { kind: 'plugin.rejected'; pluginId: string; contentSha256: string; reason: string }
   | { kind: 'integrity.checked'; ok: boolean; detail: string }
+  | { kind: 'integrity.manifest-updated'; oldSha256: string | null; newSha256: string; added: string[]; removed: string[]; changed: string[] }
   | { kind: 'undo.performed'; target: { kind: string; id: string }; detail: string }
   | { kind: 'deletion.requested'; deletionId: string; target: { kind: string; id: string }; derivatives: { kind: string; ref: string }[] }
   | { kind: 'deletion.derivative-done'; deletionId: string; index: number }
