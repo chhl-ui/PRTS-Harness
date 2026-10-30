@@ -1,34 +1,32 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { Ledger } from '../../src/ledger/index.ts'
+import { makeTmp } from '../support/tmp.ts'
 import { openTmp, owner, model } from './helpers.ts'
 
 test('链篡改：直接 UPDATE 事件 payload 后 verifyChain 报断点', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'prts-ledger-tamper-'))
-  const dbPath = join(dir, 'ledger.sqlite')
+  const t = makeTmp('prts-ledger-tamper-')
+  const dbPath = t.db('ledger.sqlite')
+  const l = Ledger.open(dbPath)
+  const raw = new DatabaseSync(dbPath)
   try {
-    const l = Ledger.open(dbPath)
-    const t = l.create(owner, { title: 'T', objective: 'O', acceptance: { kind: 'owner-confirm' } })
-    l.activate(owner, { id: t.id, revision: t.revision })
-    l.note(model(), { id: t.id, revision: 2 }, 'n1')
-    l.note(model(), { id: t.id, revision: 3 }, 'n2')
+    const task = l.create(owner, { title: 'T', objective: 'O', acceptance: { kind: 'owner-confirm' } })
+    l.activate(owner, { id: task.id, revision: task.revision })
+    l.note(model(), { id: task.id, revision: 2 }, 'n1')
+    l.note(model(), { id: task.id, revision: 3 }, 'n2')
     const before = l.verifyChain()
     assert.equal(before.ok, true)
 
-    const raw = new DatabaseSync(dbPath)
     raw.exec("UPDATE ledger_events SET payload_json = '{\"evil\":1}' WHERE seq = 3")
-    raw.close()
 
     const after = l.verifyChain()
     assert.equal(after.ok, false)
     if (!after.ok) assert.equal(after.brokenAtSeq, 3)
-    l.close()
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    t.cleanup(l, raw)
   }
 })
 

@@ -27,7 +27,16 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 ## 工作方式
 
 - 先写失败测试，再实现。测试用 `os.tmpdir()` 下独立临时目录，结束删除。
-- 数据规则：`ledger_events` 是唯一事实来源（只追加、sha256 链）；`tasks`/`task_steps`/`evidence`
-  只能由 `fold.ts` 的 `applyEvent` 更新；每个变更在一个 SQLite 事务内「追加事件 + 应用投影」。
+- 数据规则：`ledger_events` / `audit_events` 各自是事实来源（只追加、sha256 链）；
+  `tasks`/`task_steps`/`evidence` 只能由 `fold.ts` 的 `applyEvent` 更新，
+  `audit_deletions` 只能由 `audit/fold.ts` 的 `applyAuditEvent` 更新；
+  每个变更在一个 SQLite 事务内「追加事件 + 应用投影」。
+- 共享链原语在 `src/chain/`（canonicalJson/sha256hex/ZERO_HASH + chainHash/appendChained/verifyChainRows）；
+  新组件复用它，不要各自实现哈希链。
+- K4 审计：`src/audit/`（同一 SQLite 文件、独立表独立链）；`deletion.completed` 只允许库内部
+  在最后一个派生项完成的同事务自动追加；`src/core/startup-check.ts` 用只读连接双链校验。
+- Ledger/AuditLog 均支持 `{ readOnly: true }` 打开：所有写方法抛 `READ_ONLY`。
+- 运行时启动顺序：`startupCheck` → 正常则 `initCoreDb` → 打开 Ledger/AuditLog；
+  `startupCheck` 返回 `read-only`（断链或缺表）时不得调用 `initCoreDb`，只能只读打开。
 - 预算：`blocked_json` 记 `by`（owner/model/system）；model 只能 unblock 自己造成的阻塞，
   且 `resume`/`unblock` 时 usage 已超 budget 抛 `BUDGET_EXCEEDED`（判定走 `fold.ts` 的 `usageExceeded`）。

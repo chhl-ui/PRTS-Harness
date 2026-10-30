@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { Ledger } from '../../src/ledger/index.ts'
+import { makeTmp } from '../support/tmp.ts'
 import type { Actor } from '../../src/ledger/index.ts'
 
 export const owner: Actor = { kind: 'owner' }
@@ -16,14 +15,13 @@ export interface TmpCtx {
 }
 
 export function openTmp(): TmpCtx {
-  const dir = mkdtempSync(join(tmpdir(), 'prts-ledger-'))
-  const ledger = Ledger.open(join(dir, 'ledger.sqlite'))
+  const t = makeTmp('prts-ledger-')
+  const ledger = Ledger.open(join(t.dir, 'ledger.sqlite'))
   return {
-    dir,
+    dir: t.dir,
     ledger,
     cleanup() {
-      try { ledger.close() } catch { /* 已关 */ }
-      rmSync(dir, { recursive: true, force: true })
+      t.cleanup(ledger)
     },
   }
 }

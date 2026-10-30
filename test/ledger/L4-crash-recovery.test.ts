@@ -1,18 +1,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { Ledger } from '../../src/ledger/index.ts'
+import { makeTmp } from '../support/tmp.ts'
 import { owner, model, expectCode } from './helpers.ts'
 
 const fixture = fileURLToPath(new URL('./fixtures/crash-child.ts', import.meta.url))
 
 test('L4: 进程被 SIGKILL 后重开——已完成步骤不重跑，进行中步骤 unknown', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'prts-ledger-l4-'))
-  const dbPath = join(dir, 'ledger.sqlite')
+  const t = makeTmp('prts-ledger-l4-')
+  const dbPath = t.db('ledger.sqlite')
+  let ledger: Ledger | undefined
   try {
     // 1) 子进程：建任务、完成步骤 1、开始步骤 2，打印 READY 后挂起
     const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', fixture, dbPath])
@@ -29,7 +28,7 @@ test('L4: 进程被 SIGKILL 后重开——已完成步骤不重跑，进行中�
     })
 
     // 2) 重开：recoverOnStartup 把 started → unknown
-    const ledger = Ledger.open(dbPath)
+    ledger = Ledger.open(dbPath)
     const task = ledger.list()[0]
     const recovered = ledger.recoverOnStartup()
     assert.equal(recovered.length, 1)
@@ -46,7 +45,7 @@ test('L4: 进程被 SIGKILL 后重开——已完成步骤不重跑，进行中�
     assert.equal(r2.kind, 'unknown')
 
     // 5) 非幂等 unknown：model 不能重试，owner 可以
-    expectCode(() => ledger.retryUnknownStep(model(), task.id, 2), 'FORBIDDEN')
+    expectCode(() => ledger!.retryUnknownStep(model(), task.id, 2), 'FORBIDDEN')
     ledger.retryUnknownStep(owner, task.id, 2)
     assert.equal(ledger.steps(task.id).find(s => s.stepNo === 2)?.status, 'started')
     ledger.endStep(owner, task.id, 2, { status: 'succeeded' })
@@ -64,9 +63,7 @@ test('L4: 进程被 SIGKILL 后重开——已完成步骤不重跑，进行中�
 
     const chain = ledger.verifyChain()
     assert.equal(chain.ok, true)
-
-    ledger.close()
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    t.cleanup(...(ledger ? [ledger] : []))
   }
 })

@@ -1,9 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { Ledger } from '../../src/ledger/index.ts'
+import { makeTmp } from '../support/tmp.ts'
 import { openTmp, owner, model, expectCode } from './helpers.ts'
 
 test('L5: 导出→导入空白库，投影逐项一致；篡改 payload → CHAIN_BROKEN 且不落行', async () => {
@@ -34,33 +34,32 @@ test('L5: 导出→导入空白库，投影逐项一致；篡改 payload → CHA
     const doc = l.exportDoc()
 
     // 正常导入
-    const dir2 = mkdtempSync(join(tmpdir(), 'prts-ledger-imp-'))
-    const db2 = join(dir2, 'ledger.sqlite')
+    const t2 = makeTmp('prts-ledger-imp-')
+    const db2 = join(t2.dir, 'ledger.sqlite')
+    const l2 = Ledger.importDoc(db2, doc)
     try {
-      const l2 = Ledger.importDoc(db2, doc)
       assert.deepEqual(l2.list(), want.tasks)
       assert.deepEqual(l2.steps(t.id), want.steps)
       assert.deepEqual(l2.evidence(t.id), want.evidence)
       const chain = l2.verifyChain()
       assert.equal(chain.ok, true)
       if (chain.ok) assert.equal(chain.events, want.events.length)
-      l2.close()
     } finally {
-      rmSync(dir2, { recursive: true, force: true })
+      t2.cleanup(l2)
     }
 
     // 篡改事件 payload → CHAIN_BROKEN，目标库无行
     const bad = JSON.parse(JSON.stringify(doc))
     bad.events[3].payload = { tampered: true }
-    const dir3 = mkdtempSync(join(tmpdir(), 'prts-ledger-imp2-'))
-    const db3 = join(dir3, 'ledger.sqlite')
+    const t3 = makeTmp('prts-ledger-imp2-')
+    const db3 = join(t3.dir, 'ledger.sqlite')
+    let l3: Ledger | undefined
     try {
       expectCode(() => Ledger.importDoc(db3, bad), 'CHAIN_BROKEN')
-      const l3 = Ledger.open(db3)
+      l3 = Ledger.open(db3)
       assert.equal(l3.exportDoc().events.length, 0)
-      l3.close()
     } finally {
-      rmSync(dir3, { recursive: true, force: true })
+      t3.cleanup(...(l3 ? [l3] : []))
     }
 
     // 非空目标库拒绝

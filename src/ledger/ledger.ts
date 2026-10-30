@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 
-import { ZERO_HASH, canonicalJson, eventHash, sha256hex } from './canonical.ts'
+import { ZERO_HASH, appendChained, canonicalJson, chainHash, eventHash, sha256hex, verifyChainRows } from '../chain/index.ts'
 import { raise } from './errors.ts'
 import { applyEvent, usageExceeded } from './fold.ts'
 import type {
@@ -24,7 +24,7 @@ import type {
   LedgerExportDoc,
 } from './types.ts'
 
-const SCHEMA = `
+export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS ledger_events (
   seq INTEGER PRIMARY KEY,
   task_id TEXT NOT NULL,
@@ -140,19 +140,27 @@ function eventOf(row: EventDbRow): LedgerEventRow {
 export class Ledger {
   private readonly db: DatabaseSync
   private readonly now: () => number
+  private readonly readOnly: boolean
 
-  private constructor(db: DatabaseSync, now: () => number) {
+  private constructor(db: DatabaseSync, now: () => number, readOnly: boolean) {
     this.db = db
     this.now = now
+    this.readOnly = readOnly
   }
 
-  static open(dbPath: string, opts?: { now?: () => number }): Ledger {
+  static open(dbPath: string, opts?: { now?: () => number; readOnly?: boolean }): Ledger {
+    if (opts?.readOnly) {
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      db.exec('PRAGMA foreign_keys = ON')
+      db.exec('PRAGMA busy_timeout = 5000')
+      return new Ledger(db, opts.now ?? (() => Date.now()), true)
+    }
     const db = new DatabaseSync(dbPath)
     db.exec('PRAGMA journal_mode = WAL')
     db.exec('PRAGMA foreign_keys = ON')
     db.exec('PRAGMA busy_timeout = 5000')
     db.exec(SCHEMA)
-    return new Ledger(db, opts?.now ?? (() => Date.now()))
+    return new Ledger(db, opts?.now ?? (() => Date.now()), false)
   }
 
   close(): void {
@@ -162,6 +170,7 @@ export class Ledger {
   // ---------- 事务与事件追加 ----------
 
   private tx<T>(fn: () => T): T {
+    if (this.readOnly) raise('READ_ONLY', 'ledger opened read-only')
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const r = fn()
@@ -175,16 +184,24 @@ export class Ledger {
 
   /** 必须在事务内调用：追加一条事件并把投影折叠进去。 */
   private appendEvent(taskId: string, revision: number, kind: string, actor: Actor, payload: unknown): void {
-    const seq = (this.db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS s FROM ledger_events').get() as { s: number }).s
-    const last = this.db.prepare('SELECT hash FROM ledger_events ORDER BY seq DESC LIMIT 1').get() as { hash: string } | undefined
-    const prevHash = last?.hash ?? ZERO_HASH
     const ts = this.now()
-    const hash = eventHash({ seq, task_id: taskId, revision, kind, actor, payload, ts }, prevHash)
-    this.db.prepare(
-      `INSERT INTO ledger_events (seq, task_id, revision, kind, actor_json, payload_json, ts, prev_hash, hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(seq, taskId, revision, kind, JSON.stringify(actor), canonicalJson(payload), ts, prevHash, hash)
-    applyEvent(this.db, { seq, task_id: taskId, revision, kind, actor, payload, ts, prev_hash: prevHash, hash })
+    const { seq, prev_hash, hash } = appendChained(
+      this.db,
+      'ledger_events',
+      { task_id: taskId, revision, kind, actor, payload, ts },
+      (f) => ({
+        seq: f.seq as number,
+        task_id: taskId,
+        revision,
+        kind,
+        actor_json: JSON.stringify(actor),
+        payload_json: canonicalJson(payload),
+        ts,
+        prev_hash: f.prev_hash as string,
+        hash: f.hash as string,
+      }),
+    )
+    applyEvent(this.db, { seq, task_id: taskId, revision, kind, actor, payload, ts, prev_hash, hash })
   }
 
   // ---------- 读侧 ----------
@@ -501,6 +518,7 @@ export class Ledger {
   // ---------- 验收 ----------
 
   async verify(ref: TaskRef): Promise<TaskSnapshot> {
+    if (this.readOnly) raise('READ_ONLY', 'ledger opened read-only')
     const pre = this.mustTask(ref.id)
     if (pre.phase !== 'verifying') {
       raise('INVALID_TRANSITION', `verify: task ${ref.id} is '${pre.phase}', not 'verifying'`)
@@ -718,25 +736,15 @@ export class Ledger {
 
   verifyChain(): VerifyChainResult {
     const rows = this.db.prepare('SELECT * FROM ledger_events ORDER BY seq').all() as unknown as EventDbRow[]
-    let prev = ZERO_HASH
-    for (const r of rows) {
-      if (r.prev_hash !== prev) return { ok: false, brokenAtSeq: r.seq }
-      const expect = eventHash(
-        {
-          seq: r.seq,
-          task_id: r.task_id,
-          revision: r.revision,
-          kind: r.kind,
-          actor: JSON.parse(r.actor_json),
-          payload: JSON.parse(r.payload_json),
-          ts: r.ts,
-        },
-        prev,
-      )
-      if (expect !== r.hash) return { ok: false, brokenAtSeq: r.seq }
-      prev = r.hash
-    }
-    return { ok: true, events: rows.length }
+    return verifyChainRows(rows, (r) => ({
+      seq: r.seq,
+      task_id: r.task_id,
+      revision: r.revision,
+      kind: r.kind,
+      actor: JSON.parse(r.actor_json),
+      payload: JSON.parse(r.payload_json),
+      ts: r.ts,
+    })) as VerifyChainResult
   }
 
   rebuildProjections(): void {

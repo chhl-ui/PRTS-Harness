@@ -1,9 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { Ledger } from '../../src/ledger/index.ts'
+import { makeTmp } from '../support/tmp.ts'
 import { openTmp, owner, model, expectCode } from './helpers.ts'
 
 test('预算门禁：model 不能 unblock budget-exceeded / owner 阻塞；可以解自己 block', () => {
@@ -83,12 +81,11 @@ test('路径校验：check.path 与 artifactPath 必须绝对；sha256 必须 64
 })
 
 test('多进程：两个 Ledger 实例交替写同一文件，链完整、seq 连续无重复', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'prts-ledger-mp-'))
-  const db = join(dir, 'ledger.sqlite')
+  const td = makeTmp('prts-ledger-mp-')
+  const db = td.db('ledger.sqlite')
+  const l1 = Ledger.open(db)
+  const l2 = Ledger.open(db)
   try {
-    const l1 = Ledger.open(db)
-    const l2 = Ledger.open(db)
-    try {
       const t = l1.create(owner, { title: 'T', objective: 'O', acceptance: { kind: 'owner-confirm' } })
       l1.activate(owner, { id: t.id, revision: 1 })
       // l2 写同一任务：先 get 拿新 revision
@@ -112,11 +109,7 @@ test('多进程：两个 Ledger 实例交替写同一文件，链完整、seq �
       if (c1.ok && c2.ok) assert.equal(c1.events, c2.events)
       // 两个实例投影一致
       assert.deepEqual(l1.get(t.id), l2.get(t.id))
-    } finally {
-      l1.close()
-      l2.close()
-    }
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    td.cleanup(l1, l2)
   }
 })

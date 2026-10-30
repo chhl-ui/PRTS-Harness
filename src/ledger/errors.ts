@@ -9,6 +9,7 @@ export type LedgerErrorCode =
   | 'EVIDENCE_MISSING'
   | 'CHAIN_BROKEN'
   | 'BUDGET_EXCEEDED'
+  | 'READ_ONLY'
   | 'INVALID_INPUT'
 
 export class LedgerError extends Error {

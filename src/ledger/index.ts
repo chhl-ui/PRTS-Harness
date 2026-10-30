@@ -17,7 +17,7 @@
  */
 export { Ledger } from './ledger.ts'
 export { LedgerError } from './errors.ts'
-export { canonicalJson, eventHash, sha256hex, ZERO_HASH } from './canonical.ts'
+export { canonicalJson, eventHash, sha256hex, ZERO_HASH } from '../chain/index.ts'
 export { applyEvent, usageExceeded } from './fold.ts'
 export type { BudgetShape, UsageShape } from './fold.ts'
 export type { LedgerErrorCode } from './errors.ts'
