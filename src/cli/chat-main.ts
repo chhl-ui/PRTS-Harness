@@ -9,8 +9,8 @@
  */
 import { createInterface } from 'node:readline'
 import type { Interface as ReadlineInterface } from 'node:readline'
-import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { loadApiKey } from './secret.ts'
 import { startRuntime } from '../runtime/start.ts'
 import { runChat, describeOpenTasks } from './chat.ts'
 
@@ -22,13 +22,16 @@ if (!dataRoot || !workspace || !configPath) {
   process.exit(2)
 }
 
-let credentials: { DEEPSEEK_API_KEY?: string } | undefined
-const keyFile = join(dataRoot, 'secrets', 'deepseek.key')
-if (existsSync(keyFile)) {
-  credentials = { DEEPSEEK_API_KEY: readFileSync(keyFile, 'utf8').trim() }
-} else {
-  console.error(`prts chat: 未找到 ${keyFile}，将以无 key 状态启动（模型调用会失败）`)
-}
+// 密钥来源按「被随手读到的门槛」排序：凭据管理器 → 环境变量（读到即清除）→ 文件。
+// 文件路径会给出警告——那是模型 shell 用 Get-Content 就能读走的位置。
+const loaded = loadApiKey({
+  target: 'PRTS/DeepSeek',
+  keyFile: join(dataRoot, 'secrets', 'deepseek.key'),
+  envName: 'DEEPSEEK_API_KEY',
+})
+for (const warning of loaded.warnings) console.error(`prts chat: ${warning}`)
+const credentials: { DEEPSEEK_API_KEY?: string } | undefined =
+  loaded.key === undefined ? undefined : { DEEPSEEK_API_KEY: loaded.key }
 
 /**
  * 行源：readline 一建立就收集行，而不是等 runChat 开始迭代时才消费。

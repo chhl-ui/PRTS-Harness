@@ -9,7 +9,7 @@ PRTS 受保护核心：任务账本、授权、停止、审计、启动完整性
 
 ```sh
 npm install       # 依赖：@deepseek-ai/dsh-* 0.2.1-rc.2（RC 版本，升级需复验接口）
-npm test          # node --test，90 例，约 33 秒
+npm test          # node --test，97 例，约 33 秒
 npm run typecheck # tsc -p .（strict + noEmit + erasableSyntaxOnly）
 npm run chat      # 所有者终端：进程内 REPL（需下面三个环境变量）
 ```
@@ -21,7 +21,15 @@ PRTS_DATA_ROOT=C:\prts-data PRTS_WORKSPACE=C:\prts-workspace \
 PRTS_CONFIG=C:\prts-system\config\prts.yml npm run chat
 ```
 
-输入消息开始对话，`/exit` 退出，Ctrl-C 中断当前轮次。**当前没有审批提示**——原因见「已知限制」。
+输入消息开始对话，`/exit` 退出，Ctrl-C 中断当前轮次。工作区外的越界操作会弹审批提示（见「E3 审批」）。
+
+**API key 存哪**——按「被随手读到的门槛」从高到低取第一个可用的：
+
+1. **Windows 凭据管理器**（推荐，磁盘上无明文）：`npm run secret:set` 交互输入（不回显），`npm run secret:del` 删除。存好后可删掉明文密钥文件。
+2. **环境变量** `DEEPSEEK_API_KEY`：读到后立刻从本进程环境删除，防派生子进程继承。
+3. **明文文件** `<dataRoot>\secrets\deepseek.key`：向后兼容保留，启动时打印警告——模型 shell 用 `Get-Content` 就能读走它。
+
+诚实边界：同用户下的任何持久化存储都可能被同用户的恶意进程提取。本方案消除的是「明文文件可被随手读」，不是「同用户主动提取」。
 
 ## 目录
 
@@ -37,7 +45,7 @@ src/
   cli/          prts upgrade（清单只能经它修改）
   runtime/      K6 运行时入口 main.ts + start.ts（boot 组合 + 内存 credentials）
 config/prts.yml 组合树（sdk-minimal 展开，自 sdk-app/jsonrpc 与账户链中剥离）
-test/           90 例；test/support/ 是驱动、脚本化模型替身、临时目录
+test/           97 例；test/support/ 是驱动、脚本化模型替身、临时目录
 .scratch/       一次性诊断探针（gitignore，不参与测试）
 ```
 
