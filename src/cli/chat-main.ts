@@ -12,7 +12,7 @@ import type { Interface as ReadlineInterface } from 'node:readline'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { startRuntime } from '../runtime/start.ts'
-import { runChat } from './chat.ts'
+import { runChat, describeOpenTasks } from './chat.ts'
 
 const dataRoot = process.env.PRTS_DATA_ROOT
 const workspace = process.env.PRTS_WORKSPACE
@@ -74,6 +74,9 @@ const app = await startRuntime({
   credentials,
 })
 
+// 启动线索：把未结任务列出来，让博士自己决定接不接——不自动恢复执行。
+const openTasksHint = describeOpenTasks(app.ledger)
+if (openTasksHint !== '') process.stdout.write(openTasksHint + '\n')
 process.stdout.write('prts chat — 输入消息开始对话，/exit 退出，Ctrl-C 中断\nprts> ')
 try {
   const result = await runChat({

@@ -119,6 +119,23 @@ export interface ChatResult {
  * 跑一次 REPL 会话。返回后调用方负责 dispose。
  * 不含审批应答：本组合下审批不可达（见文件头）。
  */
+/**
+ * 列出未结任务作为启动线索：draft（待批准）、active、blocked。
+ * **只列出，不自动恢复**——恢复必须由博士显式动作（对应前瞻记忆的线索触发，
+ * 而不是后台轮询）。已终结的（done / cancelled / stopped-by-owner）不出现。
+ */
+export function describeOpenTasks(ledger: Ledger): string {
+  const phases = ['draft', 'active', 'blocked'] as const
+  const open = phases.flatMap((phase) => ledger.list({ phase }))
+  if (open.length === 0) return ''
+  const lines = [`[prts] 未结任务 ${open.length} 个：`]
+  for (const t of open) {
+    lines.push(`  ${t.phase.padEnd(8)} ${t.id}  ${t.title}`)
+  }
+  lines.push('  用 /task-approve <id> 批准草案；恢复执行请显式操作。')
+  return lines.join('\n') + '\n'
+}
+
 /** `/task <目标>`：建任务 → 激活 → 绑定当前会话，全程 owner 通道。 */
 async function runTaskCommand(deps: ChatDeps, sessionId: string, objective: string): Promise<void> {
   if (deps.ledger === undefined) {
