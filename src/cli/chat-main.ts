@@ -8,6 +8,7 @@
  * 缺少任一环境变量直接退出（不猜默认值）。
  */
 import { createInterface } from 'node:readline'
+import type { Interface as ReadlineInterface } from 'node:readline'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { startRuntime } from '../runtime/start.ts'
@@ -29,6 +30,42 @@ if (existsSync(keyFile)) {
   console.error(`prts chat: 未找到 ${keyFile}，将以无 key 状态启动（模型调用会失败）`)
 }
 
+/**
+ * 行源：readline 一建立就收集行，而不是等 runChat 开始迭代时才消费。
+ *
+ * 必须在 startRuntime 之前调用——startRuntime 要几秒，这期间若 stdin 没有消费者，
+ * 已写入的行会丢（Windows 管道实测：`printf 'hi\n/exit\n' | node src/cli/chat-main.ts`
+ * 曾出现只收到 `/exit`、`hi` 静默丢失，表现为「共 0 轮」）。
+ * 迭代器在 close 之后仍会 drain 掉已缓冲的行，不吞末尾输入。
+ */
+function lineSource(rl: ReadlineInterface): AsyncIterable<string> {
+  const pending: string[] = []
+  const waiters: ((r: IteratorResult<string>) => void)[] = []
+  let closed = false
+  rl.on('line', (line) => {
+    const wake = waiters.shift()
+    if (wake !== undefined) wake({ value: line, done: false })
+    else pending.push(line)
+  })
+  rl.on('close', () => {
+    closed = true
+    for (const wake of waiters.splice(0)) wake({ value: undefined as never, done: true })
+  })
+  return {
+    [Symbol.asyncIterator]: () => ({
+      next(): Promise<IteratorResult<string>> {
+        if (pending.length > 0) return Promise.resolve({ value: pending.shift() as string, done: false })
+        if (closed) return Promise.resolve({ value: undefined as never, done: true })
+        return new Promise((resolve) => { waiters.push(resolve) })
+      },
+    }),
+  }
+}
+
+const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY === true })
+// 先建立行收集，再拉起运行时——顺序反了就会丢早到的输入。
+const lines = lineSource(rl)
+
 const app = await startRuntime({
   configPath,
   dataRoot,
@@ -37,21 +74,17 @@ const app = await startRuntime({
   credentials,
 })
 
-const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY === true })
-
-async function* stdinLines(): AsyncIterable<string> {
-  for await (const line of rl) yield line
-}
-
 process.stdout.write('prts chat — 输入消息开始对话，/exit 退出，Ctrl-C 中断\nprts> ')
 try {
   const result = await runChat({
     ctx: app.ctx,
-    lines: stdinLines(),
-    out: (text) => process.stdout.write(text + '\n'),
+    lines,
+    // out 只写原文：增量输出时每片都是半句，换行由回合边界（onIdle）负责。
+    out: (text) => process.stdout.write(text),
     cwd: workspace,
     dataRoot,
-    onIdle: () => process.stdout.write('prts> '),
+    // 回合结束先换行再打提示符，保证提示符另起一行（流式文本本身不带尾换行）。
+    onIdle: () => process.stdout.write('\nprts> '),
   })
   process.stdout.write(`\n[prts] 共 ${result.turns} 轮\n`)
 } finally {

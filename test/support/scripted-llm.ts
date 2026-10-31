@@ -3,6 +3,10 @@ import type { Context } from '@deepseek-ai/cordis'
 
 export type ScriptedStep =
   | { text: string }
+  /** 碎片化文本：每片各发一条 text-delta（同一 index），用于验证增量输出被调用多次。 */
+  | { textChunks: string[] }
+  /** 只发完整 block、不发 text-delta：用于验证「事件无文本」时会话日志兜底仍然生效。 */
+  | { blockOnlyText: string }
   | { toolCalls: { name: string; arguments: Record<string, unknown> }[]; text?: string }
 
 interface Chunk {
@@ -37,12 +41,14 @@ export function scriptedLlmPlugin(script: ScriptedStep[]) {
           if (!step) throw new Error(`scripted-llm: script exhausted (call #${cursor + 1})`)
           cursor++
           const chunks: Chunk[] = []
-          const text = 'text' in step ? step.text : (step.text ?? '')
+          const pieces = 'textChunks' in step ? step.textChunks : ('text' in step ? [step.text] : [])
+          const text = 'blockOnlyText' in step ? step.blockOnlyText : pieces.join('')
+          const deltaPieces = 'blockOnlyText' in step ? [] : pieces
           const calls = 'toolCalls' in step ? step.toolCalls : []
           let idx = 0
           if (text) {
             chunks.push({ type: 'block-start', index: idx, blockType: 'text' })
-            chunks.push({ type: 'text-delta', index: idx, text })
+            for (const piece of deltaPieces) chunks.push({ type: 'text-delta', index: idx, text: piece })
             chunks.push({ type: 'block-end', index: idx, block: { type: 'text', text } })
             idx++
           }

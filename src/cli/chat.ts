@@ -14,22 +14,35 @@
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 
 const NL = String.fromCharCode(10)
 
-/** 从 assistant-stream 的 payload 里递归捞可见文本（形状未在类型里固定）。 */
-function collectText(value: unknown, sink: string[]): void {
-  if (typeof value === 'string') { sink.push(value); return }
-  if (Array.isArray(value)) { for (const v of value) collectText(v, sink); return }
-  if (value === null || typeof value !== 'object') return
-  const rec = value as Record<string, unknown>
-  if (rec.type === 'reasoning' || rec.type === 'thinking' || rec.type === 'signature_delta') return
-  if (rec.type === 'text' && typeof rec.text === 'string') { sink.push(rec.text); return }
-  for (const key of ['chunks', 'delta', 'message', 'content']) {
-    if (key in rec) collectText(rec[key], sink)
-  }
+/**
+ * `agent/assistant-stream` 的 payload 契约：`{ agent, frame: AssistantStreamFrame }`
+ * （node_modules/@deepseek-ai/dsh-agent/lib/types/runtime-types.d.ts:107-140，
+ *   事件声明同文件 :366-369；类型入口 index.d.ts:11 `export * from './runtime-types.ts'`）。
+ * frame.type ∈ {start, chunk, end}；文本增量在 chunk 帧的 `chunk: StreamChunk`
+ * （dsh-llm/lib/types/types.d.ts:434-441）里以 `{ type: 'text-delta', index, text }` 到达。
+ */
+function streamFrame(payload: unknown): AssistantStreamFrame | undefined {
+  if (payload === null || typeof payload !== 'object') return undefined
+  return (payload as { frame?: AssistantStreamFrame }).frame
+}
+
+/**
+ * 取一帧的增量文本：只认 chunk 帧里的 text-delta。
+ * 特意不放宽到 block-end 的 `block: { type: 'text', text }`——那样同一次回复会被算两遍
+ * （text-delta 一遍 + 组装后的 block 又一遍），终端上就是重复输出。
+ */
+function extractStreamText(payload: unknown): string {
+  const frame = streamFrame(payload)
+  if (frame === undefined || frame.type !== 'chunk') return ''
+  const chunk = frame.chunk
+  if (chunk.type !== 'text-delta') return ''
+  return chunk.text
 }
 
 function sessionFiles(dataRoot: string, sessionId: string): string[] {
@@ -120,32 +133,55 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
   })
 
   const replies: string[] = []
-  let buf: string[] = []
+  /** 本回合已写到终端的流式文本（跨 attempt 只增不减，用来判断要不要走日志兜底）。 */
+  let streamed = ''
+  /** 当前 attempt 累积到的完整文本；换 attempt 即重置（重试会从头重发 delta）。 */
+  let attemptText = ''
+  let attemptId: AssistantStreamFrame['attemptId'] | undefined
   let seenSeq = 0
-  const off = events?.on('agent/assistant-stream', (e: unknown) => collectText(e, buf))
+  // 增量直写终端：文本按 delta 到达即 out，不等回合收敛。
+  // 已知限制：重试会起新 attempt 从头重发 delta，而已写入的终端内容撤不回来，
+  // 此时终端上可能看到重复片段——本轮不做终端回滚。
+  const off = events?.on('agent/assistant-stream', (e: unknown) => {
+    const frame = streamFrame(e)
+    if (frame === undefined) return
+    if (frame.attemptId !== attemptId) {
+      attemptId = frame.attemptId
+      attemptText = ''
+    }
+    const delta = extractStreamText(e)
+    if (delta === '') return
+    attemptText += delta
+    streamed += delta
+    deps.out(delta)
+  })
   try {
     for await (const raw of deps.lines) {
       const line = raw.trim()
       if (line === '') continue
       if (line === '/exit' || line === '/quit') break
-      buf = []
+      streamed = ''
+      attemptText = ''
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: line }],
         source: { kind: 'user' },
       }))
       const settled = await waitIdle(agent)
       if (!settled) deps.out('[prts] 回合未在时限内收敛，已放弃等待')
-      // 事件有文本就用事件，否则从会话日志兜底
-      // 会话日志的 assistant/message 可能晚于 status 变 idle 落盘：重试到拿到文本或超时
+      // 日志兜底：某 provider 只发完整 block 不发 text-delta 时全靠它。
+      // 会话日志的 assistant/message 可能晚于 status 变 idle 落盘，所以要多试几次；
+      // 但已经流式写过终端就不空等（原来无条件等满 3 秒，是纯延迟）。
       let fromLog = assistantAfterSeq(deps.dataRoot, sessionId, seenSeq)
-      for (let i = 0; i < 30 && buf.length === 0 && fromLog.text === ''; i++) {
+      for (let i = 0; i < 30 && streamed === '' && fromLog.text === ''; i++) {
         await new Promise((r) => setTimeout(r, 100))
         fromLog = assistantAfterSeq(deps.dataRoot, sessionId, seenSeq)
       }
       seenSeq = fromLog.seq
-      const text = buf.join('') || fromLog.text
+      // 仅当一个 delta 都没写出去时，才把日志文本打到终端；两者都空就不输出空行。
+      if (streamed === '' && fromLog.text.length > 0) deps.out(fromLog.text)
+      // replies 仍存整段（不是逐片）：最后一次 attempt 的文本优先，其次终端所见，再其次日志。
+      const text = attemptText || streamed || fromLog.text
       replies.push(text)
-      if (text.length > 0) deps.out(text)
       deps.onIdle?.()
     }
   } finally {

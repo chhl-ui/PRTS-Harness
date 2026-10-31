@@ -55,6 +55,7 @@ test/           63 例；test/support/ 是驱动、脚本化模型替身、临�
 - 最近的功能提交是 `b3cb34b`（2026-10-30）"Runtime integration 2a"：真实 DSH 组合在自有守护进程下跑通，模型由脚本替身驱动。之后只有文档与工作树整理提交，取准看 `git log`。
 - O1 已修（2026-10-31）：驱动路径改用 `createUserMessage()` 构造消息，真实适配器经 agent 轮次能发出请求；回归见 `test/runtime/o1-real-adapter.test.ts`。
 - **E1 已通（2026-10-31）**：真实 key、真实 `api.deepseek.com`、出厂默认配置（`reasoningEffort` 缺省 = `high`，未改 `config/prts.yml`），连跑 4 次全部成功，`assistant/message` 含 `reasoning` + `text` 块，`turn/end` 为 `completed`，单次约 1580ms，`agent/error` 0 条。thinking block 被正确映射为 `reasoning`，不需要关掉推理。
+- **`prts chat` 已流式输出（2026-10-31）**：`agent/assistant-stream` 的 payload 是 `{ frame: AssistantStreamFrame }`（`dsh-agent/lib/types/runtime-types.d.ts:107-140`，事件声明 `:366-369`）；可见文本只在 `frame.type === 'chunk'` 且 `frame.chunk.type === 'text-delta'` 的 `chunk.text` 里（`dsh-llm/lib/types/types.d.ts:434-441`，emit 站点 `dsh-agent-loop/lib/index.js:1080`）。`src/cli/chat.ts` 按此契约取增量、逐片写终端；真实 key 实测首片比回合结束早约 250ms 到达。某 provider 只发完整 block 不发 `text-delta` 时，仍走 `<dataRoot>/dsh-home/sessions/**` 的 `assistant/message` 兜底——两条路径互斥，不会重复。
 - Devin 留下的孤儿脚本 `enum-tools.ts` 已移入 `.scratch\`（一次性探针，不参与测试）。
 
 ## 已知缺陷
@@ -65,6 +66,7 @@ test/           63 例；test/support/ 是驱动、脚本化模型替身、临�
 
 ## 已知限制
 
+- **请求重试会重复输出片段**：`frame` 带 `attemptId` / `revision`，模型请求失败重试会起新 attempt 从头重发 delta，而已经写进终端的片段撤不回来。`chat.ts` 按 `attemptId` 变化重置游标，但不做终端回滚——重试路径下用户可能看到重复片段。正常对话（无错误、无工具重试）不触发。
 - **审批在组合内不可达（E3 待办）**。文件工具的工作区外写入不会触发审批：`dsh-tool-fs/lib/index.js:1134-1150` 的 `resolvePolicy` 在未带 `sandbox_permissions` / `justification` 时直接返回 standing policy，根本不发审批；带参数重试则要求 `escalationModes.length > 0`，即组合里必须有 confining fs backend，而 `config/prts.yml:27` 用的是 `@deepseek-ai/dsh-fs-local`。所以 `prts chat` 不提供审批提示，工作区外写入直接按 sandbox-policy 处理。要补 E3，需先接入 confining fs backend（独立里程碑）。
 - ~~dispose 后进程不退出~~（2026-10-31 复测不复现）：`startRuntime` → `dispose` 与 `startRuntime` → 一次完整 turn → `dispose` 两个场景，结束后 `_getActiveHandles()` 只剩 stdin/stdout/stderr（fd 0/1/2）、`_getActiveRequests()` 为空，不加 `--test-force-exit` 也正常 `exit 0`。若日后在 supervisor / job 路径上再观察到挂住，按那条路径单独记，不能笼统写成「dispose 后不退出」。
 
