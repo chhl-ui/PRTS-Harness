@@ -24,6 +24,57 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 的 actor 由库内固定，属于所有者/系统通道。面向模型的工具适配层必须把传入 actor 固定为
 `{ kind: 'model', sessionId }`，且不得暴露上述方法；本库不验证 actor 的真实来源。
 
+## 工具层接线事实（2026-11-01 核对）
+
+写工具、改接线、动绑定之前先读这节。行号会随提交漂移，**符号名与 `grep` 才是锚点**，文中行号只对应核对时的快照（HEAD `39bfbb7` + D1/D2 在办工作区）。
+
+### 工具面 ↔ `MODEL_OPS`：谁能做什么，闸在哪一层
+
+- **注册点**：PRTS 自有工具经 `tools.register` 注册——`src\runtime\start.ts`（`prts_task_create`）与 `src\runtime\task-tools.ts`（D2 起收拢 `prts_task_*` 工具集）。权威清单是 `grep -rn "name: 'prts_task_" src`，不抄文档。其余工具全部来自 DSH 插件（`config\prts.yml`：`tool-fs` 的 `read`/`read_image`/`write`/`edit`、`working_directory`、`pwsh`（win32）/`bash`（非 win32，两者互斥））。
+- **actor 固定发生在工具内部**：`execute` 里写死 `{ kind: 'model', sessionId }`，`sessionId` 取 `exec.agent?.session?.id`；参数 schema 没有 actor 字段，模型无从传入。
+- **固定 actor 通道没有工具封装**：`verify` / `ownerAccept` / `ownerReject` / `setBudget` / `stopByOwner` / `resumeFromStop` / `chargeUsage` / `recoverOnStartup` 在工具面不存在入口，它们由库内常量 actor 驱动（`src\ledger\ledger.ts` 的 `OWNER` / `VERIFIER` / `BUDGET` / `STOP` / `RECOVERY`）。
+- **第二道闸在库层**：`MODEL_OPS`（`ledger.ts:121`）是 model actor 的白名单，`perm()`（`ledger.ts:304`）对 model 只放名单内的 op、其余抛 `FORBIDDEN`，对 `system` 一律 `FORBIDDEN`（system 只能走固定 actor 路径），owner 全放。名单外的方法即使日后被工具包起来，model 调用也会被库拒。
+- **已知缺口：「模型永不绑定」只在工具面成立**：`MODEL_OPS` 里仍有 `bindSession`（`ledger.ts:123`）——工具面没暴露它，但库层允许 model actor 绑定，任何新工具或内部调用走到那里就会静默失去这条不变量。收紧方案是从白名单删掉并补库层负向断言（工具面已有负向①断言工具名不含 bind 语义，那验的是工具面，不是库层）。**本轮未做，记为遗留。**
+
+### 账本工具集（D2 落地）与两处未接/取舍
+
+- **工具面**：`src\runtime\task-tools.ts` 的 `createTaskTools()` 注册 13 个 `prts_task_*` 工具（create / list / get / note / set_resume / step_begin / step_end / add_evidence / claim_done / block / unblock / pause / resume）。返回的 `names` 是**注册回执**，`startRuntime()` 以 `toolNames` 透出——工具面清单不手抄常量，避免与注册漂移。
+- **draft 指针**：`draftTaskForSession(sessionId)` 是进程内易失提示（`Map`），只为无参 `/task-approve` 寻址。**它不是绑定**：draft 仍不属于任何会话（`task-tool.test.ts:70` 钉住这条）。重启丢指针只影响便利性，显式 id 路径仍可用。
+- **会话绑定的唯一入口是 owner 通道**：`/task <目标>`（开即绑），或 `/task-approve` 批准模型 draft 时的 `bindSession → activate`。顺序不能反：`bindSession` 允许 draft，失败时任务停在 draft、无半途副作用；反序会在 bind 失败时留下「已 active 但无人推进」，而 `activate` 要求 draft、无法回退。
+- **归属校验在工具层**：`ledger.perm` 只判 `actor.kind`，不判「这个任务是不是你的」（`ledger.ts:303-312`）。`taskIdOf()` 要求显式 `taskId` 必须等于 `taskForSession(sessionId)`，否则拒——没有这一步，模型拿到任意 taskId 就能改写别人的任务。
+- **`/accept` 不要求证据：这是取舍，不是缺陷**：`claimDone → verifying` 不校验证据（`fold.ts:104-108`），`ownerAccept` 只查 phase，所以零证据的任务也能被验收。门在博士，账本只负责让人知情——`/accept` 会打印步骤/证据摘要，零证据时额外提示「无证据支撑」。**不要把它"修"成硬门槛**：那会把「帮我查个资料」这类没有文件产物的任务判成永远无法完成。验收用例负向⑦同时钉住两侧：零证据 accept 必须成功，且必须打出提示。
+- **`chargeUsage` 未接线（D5 未完成）**：`ledger.chargeUsage` 存在且至今无人调用。接线点应是回合结束事件里的 usage，但**事件名与载荷形状本轮未实测**，不凭记忆写死。后续接线前先写探针打印回合结束事件的实际载荷，再落代码——猜错事件名会得到一条永远不触发的死代码，而它不会以任何方式报错。
+
+### stepNo 单一分配器 / 账本工具排除名单 / active 相位门
+
+三件是同一处设计的三面：自动记账钩子（`tools\execute` → `beginStep`）与模型侧任务工具写的是同一张 `task_steps`，发号与记账必须各自只有一个决定点。
+
+- **stepNo 单一分配器**：`src\runtime\task-tools.ts` 的 `createStepAllocator(ledger).next(taskId)` 是唯一发号点。冷启动取账本投影的 `max(step_no) + 1`，**不是 `steps().length + 1`**——`step_no` 允许空洞（owner retry unknown、上一进程发号后写失败），`length+1` 在空洞场景会撞已有行。进程内 Map 只是可重建缓存，事实是账本里的 `(task_id, step_no)`。**新增任何记账路径都要走这个分配器**：自己推导必撞号，`ledger.beginStep` 对同号不同名抛 `UNEXPECTED_STEP`。跨进程各自冷启动不协调，当前写入路径单进程，不引入跨进程发号。
+- **账本工具排除名单**：`task-tools.ts` 的 `LEDGER_TOOL_NAMES`（显式集合，每项要写排除理由）+ `isLedgerTool()`；`start.ts` 的 `tools\execute` 钩子进门第一件事是 `if (typeof exec.name === 'string' && isLedgerTool(exec.name)) return next()`。存在理由：账本工具自身要写 K1，它的调用若再被自动记账，stepNo 序列会被「模型调了几次任务工具」驱动，模型显式 `step_begin` 还会与钩子自动发号撞同一 `stepNo`。名字带 `prts_task_` 前缀但漏登记仍按前缀排除，但该名字首次出现会打一条 stderr——这是防名单静默漂移的告警，**不是许可：加了工具必须补登记**。
+- **active 相位门**：`start.ts` 钩子仅在 `task.phase === 'active'` 时 `beginStep`；库层另有 `checkStepGate`（`ledger.ts:328`）兜底——非 active 抛 `INVALID_TRANSITION`，`cancelled` / `stopped-by-owner` 抛 `TASK_STOPPED`，`beginStep` 与 `retryUnknownStep` 都过它。理由：step 是「模型在 active 任务上的执行痕迹」，`draft` 期没有执行权。**代价已显式化**：非 active 的调用不入账，但按 `(taskId, phase)` 打一次 `console.warn`（`warnedPhaseSkips`）——账本从「拒绝记录」退化成「无记录」时不能无声。放宽为「记录 paused-work step」属未做项。
+
+### 绑定归属：只由 owner 通道建立，模型永不绑定
+
+- **绑定的唯一建立点是 owner 通道**。当前 `/task` 走 `create(owner) → activate(owner) → bindSession(owner, …, sessionId)`（`src\cli\chat.ts` 的 `runTaskCommand`）；`/task-approve`（`runTaskApprove`）只 `activate`、**不绑定**——模型 draft 批准后是「active 但不属于会话」，后续工具调用不会被记 step（`start.ts` 的 `taskForSession` 查不到）。复核方式：`grep -rn bindSession src`，非测试调用点以它为准，文档过时算文档输。
+- **draft 不绑定会话**：`bindSession` 的相位白名单本身含 `draft`（`ledger.ts:467`），但没有任何路径会对 draft 调它。改顺序前先想清后果：`activate` 只接受 `draft`（`ledger.ts:453`），若改成 `bind → activate`，绑定成功而 activate 失败后重跑会因 `phase=active` 抛 `INVALID_TRANSITION`——**不自愈**，必须先读 `taskForSession` / `get().phase` 再决定是 bind 还是只 activate。同一会话绑到另一个未结任务被拒（`ledger.ts:468`）；绑到同一任务幂等（投影是 `ON CONFLICT(task_id) DO UPDATE`，`src\ledger\fold.ts` 的 `task.session-bound` 分支）。
+- `/task` 自身是 `activate → bind`，绑定失败会留下「active 但无归属」的任务，`describeOpenTasks` 里与正常任务看不出差别。两条 owner 通道对同一类失败给出不同后果，要改就一起改。
+
+### 两类边界：授权判定 ≠ 输入域校验
+
+| | 授权判定 | 输入域校验 |
+|---|---|---|
+| 在哪 | `Authority.decide` / `Authority.guard`（`src\authority\authority.ts`） | 工具自己的入参检查 |
+| 依据 | `classify()` 给出的 capability + 审计链里的 grant / once 事实 | 参数形状与范围（绝对路径？在工作区内？文件存在？） |
+| 有状态 | 有：`audit_grants` 投影 + 一次性批准（`getOnce` / `consumeOnce`） | 无 |
+| 强制点 | DSH `tools.guard`（唯一强制点）；`tools\pre-execute` 只决定「问不问人」 | 工具内部，失败直接 `raise` |
+| 拒绝什么 | 一次调用 | 一次入参 |
+
+**中间有一条旁路，它是叠加结果、不是设计**：`classify`（`src\authority\classify.ts`）对未登记的工具名走 `default`，返回 `tool:<name>`；而 `start.ts` 给 `guard` 与 `pre-execute` 的过滤只认 `fs.read:` / `fs.write:` / `fs.delete:` 前缀。两者叠加 → 任何带文件路径参数但不叫 `read`/`write`/`edit` 的工具，capability 被整体丢弃，guard 与 E3 都不碰它。**「账本工具不走 guard」不代表「被授权豁免」，它只是没被分类覆盖 + 过滤没命中。**
+
+所以路径域收敛必须由工具自己承担：D2 的 `prts_task_add_evidence` 用 `isWithin(realpathBestEffort(...))` 做「工作区包含 + dataRoot 排除」的双重硬判（`realpathBestEffort` / `isWithin` 在 `src\authority\paths.ts`；规范化必须与 authority 同源，否则比较域不一致会产生假阴性）。库侧 `ledger.addEvidence` 只校验「非空 + 绝对路径 + 文件存在」，**不做域判定**——库不持有 workspace/dataRoot 配置，那是运行时的知识。
+
+**硬规则**：新增任何带文件路径参数的工具，都要在这条工具里自建路径域收敛（工作区包含 + protectedRoots/dataRoot 排除），不得假定「账本工具不走 guard」是安全的——它不安全，只是还没人传越界路径。这条同时要写进实现文件的头注释，不能只留在本文档里。
+
 ## 工作方式
 
 - 先写失败测试，再实现。测试用 `os.tmpdir()` 下独立临时目录，结束删除。

@@ -4,6 +4,7 @@ import { boot } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import type { Context } from '@deepseek-ai/cordis'
 import { attachErrorReporter } from './error-report.ts'
+import { createStepAllocator, createTaskTools, isLedgerTool } from './task-tools.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
@@ -63,7 +64,17 @@ const createAppReady = () => {
   }
 }
 
-export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Context; ledger: Ledger; authority: Authority; approvalBridge: ApprovalBridge; dispose(): Promise<void> }> {
+export async function startRuntime(o: StartRuntimeOptions): Promise<{
+  ctx: Context
+  ledger: Ledger
+  authority: Authority
+  approvalBridge: ApprovalBridge
+  /** 本次实际注册的 prts_task_* 工具名（注册回执，不是手写常量）。 */
+  toolNames: readonly string[]
+  /** 本会话最近一次模型创建的 draft；进程内易失提示，不是账本事实。 */
+  draftTaskForSession(sessionId: string): TaskId | undefined
+  dispose(): Promise<void>
+}> {
   process.env.DSH_HOME = join(o.dataRoot, 'dsh-home')
   process.env.PRTS_WORKSPACE = o.workspace
   const appReady = createAppReady()
@@ -203,7 +214,10 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
   // 崩溃观测粒度。
   //
   // 记账失败绝不否决工具执行：钩子内全程 try/catch，失败只写 stderr。
-  const stepNumbers = new Map<string, number>()
+  /** T2：stepNo 单点分配器——自动记账与模型侧 prts_task_begin_step 共用，避免撞号。 */
+  const stepAllocator = createStepAllocator(ledger)
+  /** 非 active 相位跳过自动记账的告警去重键（taskId:phase）：只提示一次，不刷屏。 */
+  const warnedPhaseSkips = new Set<string>()
   /** callId → 本进程已 begin 的 step；被守卫拒绝的调用不会进这张表。 */
   const startedSteps = new Map<string, { taskId: TaskId; stepNo: number }>()
   const events = (ctx as unknown as {
@@ -219,23 +233,31 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
   // 拒绝不是「执行失败」，它压根没执行。
   //
   // 必须调 next()：cordis 的 waterfall 里不调 next 会 veto 整条链（cordis/lib/index.js:310-316）。
+  //
+  // 三道门，顺序即语义：
+  //  T1 账本工具自身的调用不记账——否则 stepNo 序列被工具自己的写操作驱动；
+  //  T2 stepNo 由分配器单点发号，与模型侧显式 beginStep 共用同一号源；
+  //  T3 只有 active 相位才记账——bindSession 允许 draft/paused/blocked（ledger.ts:466），
+  //     而 beginStep 的 checkStepGate 只放行 active（ledger.ts:328-337），
+  //     不挡这道门，表现就是每次工具调用一行 stderr 噪音。
   const offToolExecute = (ctx as unknown as {
     on(name: string, fn: (exec: unknown, next: () => unknown) => unknown): () => void
   }).on('tools/execute', async (execution: unknown, next: () => unknown) => {
+    const exec = execution as {
+      readonly callId: unknown
+      readonly name: string
+      readonly agent?: { session?: { id?: string } }
+    }
+    // T1：判定在 try 之外，但只读名字、带类型防御——「记账失败绝不否决执行」这条
+    // 不变量不能因为一次 name 类型漂移被打破。
+    if (typeof exec.name === 'string' && isLedgerTool(exec.name)) return next()
     try {
-      const exec = execution as {
-        readonly callId: unknown
-        readonly name: string
-        readonly agent?: { session?: { id?: string } }
-      }
       const sessionId = exec.agent?.session?.id
       if (sessionId !== undefined && sessionId !== '') {
         const task = ledger.taskForSession(sessionId)
-        if (task !== undefined) {
-          // stepNo 用进程内缓存，首次从投影里的已完成数推得。这是可重建的缓存，不是事实。
-          const nextNo = stepNumbers.get(task.id) ?? ledger.steps(task.id).length
-          const stepNo = nextNo + 1
-          stepNumbers.set(task.id, stepNo)
+        if (task !== undefined && task.phase === 'active') {
+          // T2：初值取账本投影的 max(step_no)+1，之后进程内自增。可重建的缓存，不是事实。
+          const stepNo = stepAllocator.next(task.id)
           ledger.beginStep({ kind: 'model' as const, sessionId }, task.id, {
             stepNo,
             name: exec.name,
@@ -243,6 +265,16 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
             toolCallRef: String(exec.callId),
           })
           startedSteps.set(String(exec.callId), { taskId: task.id, stepNo })
+        } else if (task !== undefined) {
+          // T3：跳过要可见——账本从「拒绝记录」退化到「无记录」时不能无声。
+          // 每个 (task, phase) 只提示一次，长会话不会把 stderr 刷满。
+          const key = `${task.id}:${task.phase}`
+          if (!warnedPhaseSkips.has(key)) {
+            warnedPhaseSkips.add(key)
+            console.warn(
+              `[prts] 自动记账跳过：任务 ${task.id} 处于 '${task.phase}'，只有 active 相位的工具调用进账本`,
+            )
+          }
         }
       }
     } catch (error) {
@@ -272,51 +304,17 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
     }
   }) as never)
 
-  // W4b：模型侧任务入口。只能产出 draft，且 acceptance 强制 owner-confirm——
-  // 否则「建任务 → 写文件 → claimDone → verifier 全过」会从后门绕开
-  // 「完成判定不来自模型」这条不变量。
+  // W4b/D2：模型侧账本工具集。清单严格来自 MODEL_OPS（ledger.ts:122-125），
+  // 固定 actor 通道（activate/cancel/setBudget/resumeFromStop/verify/ownerAccept/
+  // ownerReject）不注册为工具。实现与路径域收敛见 src/runtime/task-tools.ts 头部。
   //
-  // 注：本工具不经过 guard 的文件能力判定（prts_task_create 不产生 fs.* 能力），
-  // 权限控制体现在三点：只能建 draft、只能 owner-confirm、不能自己 activate。
-  const offTaskTool = tools.register({
-    name: 'prts_task_create',
-    description:
-      '提出一个任务草案。草案进入 draft 状态，必须由博士用 /task-approve 批准后才生效；'
-      + '你不能自己批准，也不能为草案指定自动化验收条件。',
-    parameters: {
-      type: 'object',
-      properties: {
-        title: { type: 'string', description: '简短标题' },
-        objective: { type: 'string', description: '目标，写清楚要达成什么' },
-      },
-      required: ['title', 'objective'],
-      additionalProperties: false,
-    },
-    output: {
-      schema: {
-        type: 'object',
-        properties: { taskId: { type: 'string' }, phase: { type: 'string' } },
-        required: ['taskId', 'phase'],
-        additionalProperties: false,
-      },
-      render: (_args: unknown, value: unknown) => {
-        const v = value as { taskId: string; phase: string }
-        return [{ type: 'text', text: `已提交任务草案 ${v.taskId}（${v.phase}），等待博士批准。` }]
-      },
-    },
-    execute: async (args: unknown, exec: unknown): Promise<unknown> => {
-      const a = args as { title?: unknown; objective?: unknown }
-      const sessionId = (exec as { agent?: { session?: { id?: string } } }).agent?.session?.id
-      const created = ledger.create(
-        { kind: 'model', sessionId: sessionId ?? '' },
-        {
-          title: String(a.title ?? ''),
-          objective: String(a.objective ?? ''),
-          acceptance: { kind: 'owner-confirm' },
-        },
-      )
-      return { taskId: created.id, phase: created.phase }
-    },
+  // 这里传进去的 allocator 与上面自动记账用的是同一个实例——两条写入路径各自
+  // 推导 stepNo 必然撞号（ledger.beginStep 对同号不同 name 抛 UNEXPECTED_STEP）。
+  const taskTools = createTaskTools(tools, {
+    ledger,
+    allocator: stepAllocator,
+    workspace: o.workspace,
+    authority,
   })
 
   // turn 内失败只经 agent/error 上报：dsh-agent-loop 的 throwError() emit 后 throw，
@@ -328,12 +326,16 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
     ledger,
     authority,
     approvalBridge,
+    /** 本次实际注册的 prts_task_* 工具名（来自注册回执，不是手写常量）。 */
+    toolNames: taskTools.names,
+    /** 本会话最近一次模型创建的 draft；进程内易失提示，不是账本事实。 */
+    draftTaskForSession: (sessionId: string) => taskTools.draftTaskForSession(sessionId),
     dispose: async () => {
       detachGuard()
       offPreExecute()
       offToolExecute()
       offToolResult?.()
-      offTaskTool()
+      taskTools.dispose()
       // Ledger 与 Authority 各自持有 sqlite 连接，都不由 ctx 生命周期管理；
       // 不关会在 Windows 上锁住文件，临时目录清理报 EPERM。
       ledger.close()

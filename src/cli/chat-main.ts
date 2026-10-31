@@ -94,6 +94,8 @@ try {
     // E3 审批：授权句柄 + 能力桥都来自 startRuntime；缺任一则越界操作 fail-closed。
     authority: app.authority,
     approvalBridge: app.approvalBridge,
+    // 无参 /task-approve 的寻址：draft 不绑定会话，只能靠这条进程内指针。
+    draftTaskForSession: app.draftTaskForSession,
     // 回合结束先换行再打提示符，保证提示符另起一行（流式文本本身不带尾换行）。
     onIdle: () => process.stdout.write('\nprts> '),
   })

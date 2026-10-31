@@ -37,6 +37,22 @@ export class Authority {
     this.now = now
   }
 
+  /**
+   * 受保护根（已 realpath 归一，与 evalCap 判定用的是同一份数组实例内容）。
+   *
+   * 给「输入域校验」用：`prts_task_add_evidence` 这类工具需要判断某路径是否落进
+   * 受保护目录。判定必须与 guard 同源——另传一份 dataRoot 出去就成了两处真相，
+   * 迟早漂移。返回副本，调用方无法改到内部数组。
+   */
+  protectedRootPaths(): readonly string[] {
+    return [...this.protectedRoots]
+  }
+
+  /** 工作区根（同上，只读副本）。 */
+  workspaceRootPaths(): readonly string[] {
+    return [...this.workspaceRoots]
+  }
+
   static open(dbPath: string, config: AuthorityConfig, opts?: { now?: () => number }): Authority {
     return new Authority(AuditLog.open(dbPath), config, opts?.now ?? (() => Date.now()))
   }

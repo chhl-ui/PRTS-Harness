@@ -9,7 +9,7 @@ PRTS 受保护核心：任务账本、授权、停止、审计、启动完整性
 
 ```sh
 npm install       # 依赖：@deepseek-ai/dsh-* 0.2.1-rc.2（RC 版本，升级需复验接口）
-npm test          # node --test，97 例，约 33 秒
+npm test          # node --test，106 例，约 33 秒（2026-11-01 实测 106 pass / 0 fail，32.4s）
 npm run typecheck # tsc -p .（strict + noEmit + erasableSyntaxOnly）
 npm run chat      # 所有者终端：进程内 REPL（需下面三个环境变量）
 ```
@@ -43,11 +43,20 @@ src/
   supervisor/   K3 进程外守护：Job Object、控制管道认证、崩溃重启限额
   integrity/    K5 启动完整性：受保护包与源码树哈希，锚在审计链
   cli/          prts upgrade（清单只能经它修改）
-  runtime/      K6 运行时入口 main.ts + start.ts（boot 组合 + 内存 credentials）
+  runtime/      K6 运行时入口 main.ts + start.ts（boot 组合 + 内存 credentials + 守卫/审批/记账接线）
+                task-tools.ts：模型侧任务工具与 stepNo 单一分配器、账本工具排除名单
 config/prts.yml 组合树（sdk-minimal 展开，自 sdk-app/jsonrpc 与账户链中剥离）
-test/           97 例；test/support/ 是驱动、脚本化模型替身、临时目录
+test/           106 例；test/support/ 是驱动、脚本化模型替身、临时目录
 .scratch/       一次性诊断探针（gitignore，不参与测试）
 ```
+
+## 模型侧工具
+
+模型能调的工具 = DSH 插件提供的 + PRTS 自己注册的。下面只是索引，权威清单看代码：
+
+- **PRTS 自有工具**：经 `tools.register` 注册在 `src\runtime\start.ts` 与 `src\runtime\task-tools.ts`。起点是 `prts_task_create`——提一个 `draft` 任务，不能自己批准、不能自己激活；D2 在同一文件补齐 `prts_task_note` / `step_begin` / `step_end` / `add_evidence` / `claim_done`。权威清单：`grep -rn "name: 'prts_task_" src`，不要抄文档。
+- **DSH 插件工具**（`config\prts.yml`）：`read` / `read_image` / `write` / `edit`（`tool-fs`，经 K2a 守卫）、`working_directory`（只切会话 cwd，不产生能力）、`pwsh`（win32）/ `bash`（非 win32，两者互斥）。`pwsh`/`bash` 不归 K2a 也不归 E3——命令体内的写删识别不了，归 K2b。
+- **模型侧不接受 actor 入参**：actor 在工具内部写死为 `{ kind: 'model', sessionId }`；账本里属于 owner/system 的固定通道（`verify` / `ownerAccept` / `ownerReject` / `setBudget` / `stopByOwner` / `resumeFromStop` / `chargeUsage` / `recoverOnStartup`）没有任何工具封装。工具面与授权层的逐条对应见 `AGENTS.md` 的「工具层接线事实」。
 
 ## 必须守住的不变量（细节见 AGENTS.md）
 

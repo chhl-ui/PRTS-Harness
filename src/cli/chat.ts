@@ -117,6 +117,12 @@ export interface ChatDeps {
   authority?: Authority
   /** E3 审批桥：按 callId 取 pre-execute 暂存的 capabilities。 */
   approvalBridge?: ApprovalBridge
+  /**
+   * 本会话最近一次模型创建的 draft 任务（来自 startRuntime）。
+   * 无参 /task-approve 靠它寻址——draft 不绑定会话，指针是唯一入口。
+   * 未注入时 /task-approve 只接受显式 id，不崩。
+   */
+  draftTaskForSession?: (sessionId: string) => unknown
 }
 
 export interface ChatResult {
@@ -174,24 +180,161 @@ async function runTaskCommand(deps: ChatDeps, sessionId: string, objective: stri
 }
 
 /** `/task-approve <id>`：把模型建的 draft 激活。owner 通道，模型无权调用。 */
-async function runTaskApprove(deps: ChatDeps, id: string): Promise<void> {
+async function runTaskApprove(deps: ChatDeps, id: string, sessionId: string): Promise<void> {
   if (deps.ledger === undefined) {
     deps.out('[prts] 未配置 ledger，/task-approve 不可用\n')
     deps.onIdle?.()
     return
   }
-  if (id === '') {
-    deps.out('[prts] 用法：/task-approve <taskId>\n')
+  // 无参：从 draft 指针取本会话最近一次模型草案。draft 不绑定会话，
+  // 指针是唯一能「不先知道 taskId 就批准」的路径。
+  let target = id
+  if (target === '') {
+    const pointed = deps.draftTaskForSession?.(sessionId)
+    const ptr = typeof pointed === 'string'
+      ? pointed
+      : (pointed as { id?: unknown } | undefined)?.id
+    if (typeof ptr !== 'string' || ptr === '') {
+      deps.out('[prts] 本会话没有待批准的任务。用法：/task-approve <taskId>\n')
+      deps.onIdle?.()
+      return
+    }
+    target = ptr
+  }
+  try {
+    const owner = { kind: 'owner' } as const
+    const current = deps.ledger.get(target as never)
+    if (current.phase !== 'draft') {
+      throw new Error(`任务 ${current.id} 处于 '${current.phase}'，不是 draft，无需批准`)
+    }
+    // 顺序：先 bind 后 activate。
+    // bindSession 允许 draft（ledger.ts:466-480），失败（如会话已绑其他任务）时
+    // 任务仍停在 draft、无半途副作用；反序会在 bind 失败时留下「已 active 但无人
+    // 推进」的状态，而 activate 要求 draft、无法回退。
+    const bound = deps.ledger.bindSession(
+      owner,
+      { id: current.id, revision: current.revision },
+      sessionId,
+    )
+    const active = deps.ledger.activate(owner, { id: bound.id, revision: bound.revision })
+    deps.out(`[prts] 已批准任务 ${active.id}（${active.phase}），已绑定本会话\n`)
+  } catch (error) {
+    deps.out(`[prts] 批准失败：${error instanceof Error ? error.message : String(error)}\n`)
+  }
+  deps.onIdle?.()
+}
+
+/** 取目标任务的 ref；省略 id 时取本会话绑定任务。每次现读，不缓存 revision。 */
+function targetRef(deps: ChatDeps, id: string, sessionId: string): { id: never; revision: number } {
+  const ledger = deps.ledger
+  if (ledger === undefined) throw new Error('未配置 ledger')
+  const taskId = id !== '' ? (id as never) : ledger.taskForSession(sessionId)?.id
+  if (taskId === undefined) throw new Error('本会话没有进行中的任务，请显式给 taskId')
+  const snap = ledger.get(taskId)
+  return { id: snap.id as never, revision: snap.revision }
+}
+
+/**
+ * /accept：所有者裁决。
+ *
+ * 先打印任务摘要再裁决——ownerAccept 不要求任何证据（fold.ts:104-108 的
+ * claimDone→verifying 不校验证据，ownerAccept 只查 phase），所以博士可能在零证据
+ * 下把任务推成 done。这是所有者判断权的合理代价（「查个资料」类任务本就没有文件
+ * 产物），不在账本层设硬门槛；但必须让人在知情下决定，故无证据时额外提示。
+ */
+async function runAccept(deps: ChatDeps, id: string, sessionId: string): Promise<void> {
+  if (deps.ledger === undefined) {
+    deps.out('[prts] 未配置 ledger，/accept 不可用\n')
     deps.onIdle?.()
     return
   }
   try {
-    const owner = { kind: 'owner' } as const
-    const current = deps.ledger.get(id as never)
-    const active = deps.ledger.activate(owner, { id: current.id, revision: current.revision })
-    deps.out(`[prts] 已批准任务 ${active.id}（${active.phase}）\n`)
+    const ref = targetRef(deps, id, sessionId)
+    const snap = deps.ledger.get(ref.id)
+    const steps = deps.ledger.steps(snap.id)
+    const ok = steps.filter((s) => s.status === 'succeeded').length
+    const bad = steps.filter((s) => s.status === 'failed').length
+    const evidence = deps.ledger.evidence(snap.id)
+    deps.out(
+      `[prts] 任务 ${snap.id}（${snap.phase}）：步骤 ${steps.length}（成功 ${ok} / 失败 ${bad}），`
+      + `证据 ${evidence.length} 条\n`,
+    )
+    if (evidence.length === 0) {
+      deps.out('[prts] 注意：本任务无证据支撑，/accept 后即视为你已自行核实结果\n')
+    }
+    const accepted = deps.ledger.ownerAccept({ id: snap.id, revision: snap.revision })
+    deps.out(`[prts] 已验收 ${accepted.id}（${accepted.phase}）\n`)
   } catch (error) {
-    deps.out(`[prts] 批准失败：${error instanceof Error ? error.message : String(error)}\n`)
+    deps.out(`[prts] 验收失败：${error instanceof Error ? error.message : String(error)}\n`)
+  }
+  deps.onIdle?.()
+}
+
+async function runReject(deps: ChatDeps, id: string, reason: string, sessionId: string): Promise<void> {
+  if (deps.ledger === undefined) {
+    deps.out('[prts] 未配置 ledger，/reject 不可用\n')
+    deps.onIdle?.()
+    return
+  }
+  if (reason.trim() === '') {
+    deps.out('[prts] 用法：/reject <理由>\n')
+    deps.onIdle?.()
+    return
+  }
+  try {
+    const ref = targetRef(deps, id, sessionId)
+    const snap = deps.ledger.ownerReject(ref.id, reason.trim())
+    deps.out(`[prts] 已驳回 ${snap.id}（${snap.phase}）：${reason.trim()}\n`)
+  } catch (error) {
+    deps.out(`[prts] 驳回失败：${error instanceof Error ? error.message : String(error)}\n`)
+  }
+  deps.onIdle?.()
+}
+
+async function runCancel(deps: ChatDeps, id: string, sessionId: string): Promise<void> {
+  if (deps.ledger === undefined) {
+    deps.out('[prts] 未配置 ledger，/cancel 不可用\n')
+    deps.onIdle?.()
+    return
+  }
+  try {
+    const ref = targetRef(deps, id, sessionId)
+    const snap = deps.ledger.cancel({ kind: 'owner' } as const, ref as never)
+    deps.out(`[prts] 已取消 ${snap.id}（${snap.phase}）\n`)
+  } catch (error) {
+    deps.out(`[prts] 取消失败：${error instanceof Error ? error.message : String(error)}\n`)
+  }
+  deps.onIdle?.()
+}
+
+async function runBudget(deps: ChatDeps, id: string, json: string, sessionId: string): Promise<void> {
+  if (deps.ledger === undefined) {
+    deps.out('[prts] 未配置 ledger，/budget 不可用\n')
+    deps.onIdle?.()
+    return
+  }
+  try {
+    const ref = targetRef(deps, id, sessionId)
+    const parsed = json.trim() === '' ? {} : JSON.parse(json) as Record<string, unknown>
+    const snap = deps.ledger.setBudget(ref, parsed as never)
+    deps.out(`[prts] 预算已更新：${snap.id}\n`)
+  } catch (error) {
+    deps.out(`[prts] 设置预算失败：${error instanceof Error ? error.message : String(error)}\n`)
+  }
+  deps.onIdle?.()
+}
+
+async function runTasks(deps: ChatDeps): Promise<void> {
+  if (deps.ledger === undefined) {
+    deps.out('[prts] 未配置 ledger，/tasks 不可用\n')
+    deps.onIdle?.()
+    return
+  }
+  const tasks = deps.ledger.list()
+  if (tasks.length === 0) {
+    deps.out('[prts] 账本里还没有任务\n')
+  } else {
+    for (const t of tasks) deps.out(`  ${t.id}  ${t.phase}\n`)
   }
   deps.onIdle?.()
 }
@@ -295,7 +438,28 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
         continue
       }
       if (line.startsWith('/task-approve')) {
-        await runTaskApprove(deps, line.slice('/task-approve'.length).trim())
+        await runTaskApprove(deps, line.slice('/task-approve'.length).trim(), sessionId)
+        continue
+      }
+      // 所有者裁决命令：全部走 owner 通道，不经模型工具层。
+      if (line === '/accept' || line.startsWith('/accept ')) {
+        await runAccept(deps, line.slice('/accept'.length).trim(), sessionId)
+        continue
+      }
+      if (line.startsWith('/reject')) {
+        await runReject(deps, '', line.slice('/reject'.length).trim(), sessionId)
+        continue
+      }
+      if (line === '/cancel' || line.startsWith('/cancel ')) {
+        await runCancel(deps, line.slice('/cancel'.length).trim(), sessionId)
+        continue
+      }
+      if (line.startsWith('/budget')) {
+        await runBudget(deps, '', line.slice('/budget'.length).trim(), sessionId)
+        continue
+      }
+      if (line === '/tasks') {
+        await runTasks(deps)
         continue
       }
       streamed = ''
