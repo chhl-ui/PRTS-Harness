@@ -86,7 +86,10 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
   })
 
   const tools = ctx.get('tools') as
-    | { guard(guard: (execution: unknown) => string | undefined): () => void }
+    | {
+      guard(guard: (execution: unknown) => string | undefined): () => void
+      register(definition: unknown): () => void
+    }
     | undefined
   if (tools === undefined || typeof tools.guard !== 'function') {
     // fail closed：拿不到强制点就以无守卫状态启动，等于假装有授权层。
@@ -164,6 +167,53 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
     }
   }) as never)
 
+  // W4b：模型侧任务入口。只能产出 draft，且 acceptance 强制 owner-confirm——
+  // 否则「建任务 → 写文件 → claimDone → verifier 全过」会从后门绕开
+  // 「完成判定不来自模型」这条不变量。
+  //
+  // 注：本工具不经过 guard 的文件能力判定（prts_task_create 不产生 fs.* 能力），
+  // 权限控制体现在三点：只能建 draft、只能 owner-confirm、不能自己 activate。
+  const offTaskTool = tools.register({
+    name: 'prts_task_create',
+    description:
+      '提出一个任务草案。草案进入 draft 状态，必须由博士用 /task-approve 批准后才生效；'
+      + '你不能自己批准，也不能为草案指定自动化验收条件。',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: '简短标题' },
+        objective: { type: 'string', description: '目标，写清楚要达成什么' },
+      },
+      required: ['title', 'objective'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: { taskId: { type: 'string' }, phase: { type: 'string' } },
+        required: ['taskId', 'phase'],
+        additionalProperties: false,
+      },
+      render: (_args: unknown, value: unknown) => {
+        const v = value as { taskId: string; phase: string }
+        return [{ type: 'text', text: `已提交任务草案 ${v.taskId}（${v.phase}），等待博士批准。` }]
+      },
+    },
+    execute: async (args: unknown, exec: unknown): Promise<unknown> => {
+      const a = args as { title?: unknown; objective?: unknown }
+      const sessionId = (exec as { agent?: { session?: { id?: string } } }).agent?.session?.id
+      const created = ledger.create(
+        { kind: 'model', sessionId: sessionId ?? '' },
+        {
+          title: String(a.title ?? ''),
+          objective: String(a.objective ?? ''),
+          acceptance: { kind: 'owner-confirm' },
+        },
+      )
+      return { taskId: created.id, phase: created.phase }
+    },
+  })
+
   // turn 内失败只经 agent/error 上报：dsh-agent-loop 的 throwError() emit 后 throw，
   // kick() 的 catch 吞掉异常传播。不订阅则失败完全静默。
   const detachErrorReporter = attachErrorReporter(ctx)
@@ -174,6 +224,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
     dispose: async () => {
       detachGuard()
       offToolResult?.()
+      offTaskTool()
       // Ledger 与 Authority 各自持有 sqlite 连接，都不由 ctx 生命周期管理；
       // 不关会在 Windows 上锁住文件，临时目录清理报 EPERM。
       ledger.close()
