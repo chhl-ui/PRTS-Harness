@@ -5,6 +5,7 @@
   "type": "module",
   "description": "PRTS 受保护核心：K1 任务账本（纯 TypeScript 库，node:sqlite 存储）",
   "scripts": {
+    "chat": "node src/cli/chat-main.ts",
     "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\"",
     "typecheck": "tsc -p ."
   },

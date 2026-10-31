@@ -11,7 +11,17 @@ PRTS 受保护核心：任务账本、授权、停止、审计、启动完整性
 npm install       # 依赖：@deepseek-ai/dsh-* 0.2.1-rc.2（RC 版本，升级需复验接口）
 npm test          # node --test，63 例，约 33 秒
 npm run typecheck # tsc -p .（strict + noEmit + erasableSyntaxOnly）
+npm run chat      # 所有者终端：进程内 REPL（需下面三个环境变量）
 ```
+
+`prts chat` 的用法：
+
+```sh
+PRTS_DATA_ROOT=C:\prts-data PRTS_WORKSPACE=C:\prts-workspace \
+PRTS_CONFIG=C:\prts-system\config\prts.yml npm run chat
+```
+
+输入消息开始对话，`/exit` 退出，Ctrl-C 中断当前轮次。**当前没有审批提示**——原因见「已知限制」。
 
 ## 目录
 
@@ -52,6 +62,10 @@ test/           63 例；test/support/ 是驱动、脚本化模型替身、临�
 - **O1（已修，2026-10-31）**：根因是 `agent.followup()` 不归一化入参——传裸 `{content, source}` 的消息缺 `role`，`serialize` 里 `previous?.role === wireRole` 在首元素上双 `undefined` 相等，解引用 `previous.content` 抛 TypeError（`dsh-llm-deepseek/lib/index.js:1688:45`），被 `generate()` 兜底 catch 包成误导性的 `TRANSPORT`。修法：`agent.followup/steer/inject` 一律传 `createUserMessage()`（`dsh-llm`）；接线事实与各处 file:line 见 `AGENTS.md`。
 - **错误曾全程静默（随 O1 一并修掉）**：`agent/error` 是 turn 内失败的唯一上报通道（`throwError()` 先 emit 再 throw，`kick()` 的 catch 只吞异常传播）。此前无订阅方，失败在对话里表现为一直不回复。`src/runtime/error-report.ts` 现将其脱敏后写 stderr，由 `startRuntime()` 挂载、`dispose()` 解绑。
 - 复现脚本 `.scratch/o1-probe.test.ts` 仍自持裸对象调用，可复现原始症状，用于对照。
+
+## 已知限制
+
+- **审批在组合内不可达（E3 待办）**。文件工具的工作区外写入不会触发审批：`dsh-tool-fs/lib/index.js:1134-1150` 的 `resolvePolicy` 在未带 `sandbox_permissions` / `justification` 时直接返回 standing policy，根本不发审批；带参数重试则要求 `escalationModes.length > 0`，即组合里必须有 confining fs backend，而 `config/prts.yml:27` 用的是 `@deepseek-ai/dsh-fs-local`。所以 `prts chat` 不提供审批提示，工作区外写入直接按 sandbox-policy 处理。要补 E3，需先接入 confining fs backend（独立里程碑）。
 - ~~dispose 后进程不退出~~（2026-10-31 复测不复现）：`startRuntime` → `dispose` 与 `startRuntime` → 一次完整 turn → `dispose` 两个场景，结束后 `_getActiveHandles()` 只剩 stdin/stdout/stderr（fd 0/1/2）、`_getActiveRequests()` 为空，不加 `--test-force-exit` 也正常 `exit 0`。若日后在 supervisor / job 路径上再观察到挂住，按那条路径单独记，不能笼统写成「dispose 后不退出」。
 
 ## 文档
