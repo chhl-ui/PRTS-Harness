@@ -66,6 +66,7 @@ test/           63 例；test/support/ 是驱动、脚本化模型替身、临�
 
 ## 已知限制
 
+- **K2a 守卫已接线，但只覆盖文件系统能力**（2026-10-31）：`src/runtime/start.ts` 在 boot 返回后挂 `tools.guard`，模型发起的读/写/删先过 `Authority.guard`——越界写返回拒绝理由并写 `tool.denied` 审计，工作区内写正常放行（回归见 `test/runtime/guard-wiring.test.ts`）。`exec` / `net` / `system` / `tool` 暂不判定（归 K2b 沙箱）：K2a 对 pwsh 只能整体放行或整体拒绝，整体拒绝会破坏现有 pwsh 用例，而且那不是真正的边界。**这与下面的审批问题是两件事**——审批不可达是 fs backend 的问题，守卫接线是工具流水线的问题，不要互相代替。
 - **请求重试会重复输出片段**：`frame` 带 `attemptId` / `revision`，模型请求失败重试会起新 attempt 从头重发 delta，而已经写进终端的片段撤不回来。`chat.ts` 按 `attemptId` 变化重置游标，但不做终端回滚——重试路径下用户可能看到重复片段。正常对话（无错误、无工具重试）不触发。
 - **审批在组合内不可达（E3 待办）**。文件工具的工作区外写入不会触发审批：`dsh-tool-fs/lib/index.js:1134-1150` 的 `resolvePolicy` 在未带 `sandbox_permissions` / `justification` 时直接返回 standing policy，根本不发审批；带参数重试则要求 `escalationModes.length > 0`，即组合里必须有 confining fs backend，而 `config/prts.yml:27` 用的是 `@deepseek-ai/dsh-fs-local`。所以 `prts chat` 不提供审批提示，工作区外写入直接按 sandbox-policy 处理。要补 E3，需先接入 confining fs backend（独立里程碑）。
 - ~~dispose 后进程不退出~~（2026-10-31 复测不复现）：`startRuntime` → `dispose` 与 `startRuntime` → 一次完整 turn → `dispose` 两个场景，结束后 `_getActiveHandles()` 只剩 stdin/stdout/stderr（fd 0/1/2）、`_getActiveRequests()` 为空，不加 `--test-force-exit` 也正常 `exit 0`。若日后在 supervisor / job 路径上再观察到挂住，按那条路径单独记，不能笼统写成「dispose 后不退出」。
