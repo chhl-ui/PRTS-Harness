@@ -60,11 +60,12 @@ K1 有库无入口。`Ledger.create` 从未被调用——`grep "Ledger.open" sr
 
 ## 容量与并发
 
-- 上限检查落在 **`activate`**（draft → active 那一刻），不在 `create`
-- 统计口径：`phase IN ('draft','active')` 的总数，默认上限 4
+- 上限检查落在 **`create`**，只对 `actor.kind === 'model'` 生效。**与本节原稿不同**：原稿写落在 `activate`，但 `activate` 只由 owner 执行（`MODEL_OPS` 不含它）、而 owner 不受上限约束——放那里永远不会触发。真正的风险是模型灌 draft，所以检查点必须在 `create`。
+- 统计口径：`phase NOT IN ('done','cancelled','stopped-by-owner')`，即全部未结任务
 - 检查在 `this.tx(...)` 事务内做，与 `transition` 一致；放在 `create` 的 tx 外是 TOCTOU
 - **owner 通道不受上限约束**——博士正在推进的工作不能被账本策略挡住；上限只约束模型入口
-- 超限用独立错误码，便于 CLI 给出引导（列出僵尸任务、提示 cancel），不用 `INVALID_INPUT`
+- 超限用独立错误码 `TASK_LIMIT`（`src/ledger/errors.ts`），便于 CLI 给出引导
+- 已实现：`ledger.ts` 的 `create`，常量 `MODEL_TASK_LIMIT = 4`；`test/ledger/task-limit.test.ts` 三条断言覆盖
 
 ## 生命周期
 
@@ -94,17 +95,20 @@ stateDiagram-v2
 
 ## 回合如何挂上去
 
-**必须在 runtime 内打开 Ledger**——`start.ts` 当前只 open Authority（`grep Ledger src/runtime/start.ts` = 0），没有句柄，记账无处落。用与 supervisor 相同的 `core.sqlite`（`supervisor.ts:311`），并在 `dispose()` 里 `close()`（Windows 上 sqlite 句柄不关会锁文件，Authority 已踩过这个坑）。
+**runtime 打开 Ledger**（已实现于 W0）：`start.ts` 在 boot 返回后、与 Authority 同一 `dbPath` 打开，`dispose()` 里 `close()`。用与 supervisor 相同的 `core.sqlite`（`supervisor.ts:311`），Windows 上 sqlite 句柄不关会锁文件。
 
-挂点分两个，不能合并：
+**挂点（已实现，与本节原稿不同）**：`beginStep` 与 `endStep` **都挂在 `tools/result`**（`dsh-tools/lib/types/index.d.ts:92`，emit 型），背靠背写。
 
-- **`beginStep` → `tools/execute`**（`dsh-tools/lib/types/index.d.ts:58`，waterfall，需 `next()`）：执行前、已放行、即将 dispatch。`tools/result`（`:92`）是执行后的 emit，拿不到「开始」信号，挂在那里会让 started 态事后才写，崩溃时无从观察
-- **`endStep` → `tools/result`**（`:92`）
+原稿写的是 `beginStep` 挂 `tools/execute`（`:58`，waterfall），理由是保留 `started` 中间态、崩溃时能观察。**实际实现退回了 `result`**，原因：`tools/execute` 是 waterfall 型，Cordis 的 waterfall 监听器走 `ctx.on` 而 `AGENTS.md` 明确「事件订阅走 `ctx.events.on`，`ctx.on` 是生命周期钩子」——两者冲突，订阅方式未实测。用错的代价是工具派发直接断掉，风险不对称。
+
+**代价**：不留 started 态，`recoverOnStartup` 看不到本进程的孤儿 step。只降低崩溃观测粒度，不影响记账正确性。这是待改进项，不是已完成项。
 
 两个实现细节：
 
-- **stepNo 分配**：并发工具调用共用计数器会撞 `UNEXPECTED_STEP`，需要 per-task 单调分配器（`steps().length + 1` 或持久计数器）
-- **钩子内全程 try/catch**：ledger 抛错（`INVALID_TRANSITION` / `UNEXPECTED_STEP`）不能污染工具派发。记账失败是缺陷，否决工具执行是事故——失败只上报 `agent/error`
+- **stepNo 分配**：进程内 `Map<taskId, next>` 缓存，首次从 `steps().length` 推得。这是**可重建的缓存，不是事实**——重启后从投影重建即可（与 session↔task 绑定相反，那个必须落账本）
+- **钩子内全程 try/catch**：记账失败只写 stderr，绝不否决工具执行——记账失败是缺陷，否决工具执行是事故
+
+**没有活跃任务时不记**。步骤表不是会话时间线；会话时间线归 K4 审计与会话日志。
 
 **没有活跃任务时不记**。步骤表不是会话时间线；会话时间线归 K4 审计与会话日志。
 
@@ -126,18 +130,24 @@ stateDiagram-v2
 - 只列出，不自动恢复；恢复必须显式 `resume`
 - 列表由 runtime 暴露只读查询后在 CLI 打印，不在 CLI 里另开 Ledger 连接
 
-## 实现顺序（前置依赖已排好）
+## 实现状态（2026-10-31 全部落地）
 
-| 波次 | 内容 | 为什么是这个顺序 |
-|---|---|---|
-| W0 | `startRuntime` 打开/关闭 Ledger（与 supervisor 同库） | 没有句柄，后面全部无处落 |
-| W1 | draft→activate 语义 + 并发上限（放 activate，事务内） | 不先定，记账会撞 `INVALID_TRANSITION`，验收必红 |
-| W2 | session↔task 绑定（账本事件 + 查询） | 不先定，多任务时 step 会记错对象 |
-| W3 | `beginStep` 挂 `tools/execute`、`endStep` 挂 `tools/result` | 依赖 W0/W1/W2 |
-| W4 | 入口：`/task`、`/task-approve`、`prts_task_create`（含权限判定二选一） | 依赖 W1 |
-| W5 | 启动列出 draft/active/blocked | 依赖 W0 |
+| 波次 | 内容 | 提交 | 偏离设计之处 |
+|---|---|---|---|
+| W0 | `startRuntime` 打开/关闭 Ledger（与 supervisor 同库） | `306d240` | 无 |
+| W1 | draft→activate 语义 + 并发上限 | `8573075` | 上限检查落在 `create`（只对 model），不是 `activate`——见「容量与并发」 |
+| W2 | session↔task 绑定（账本事件 + 投影表） | `50859d6` | 用独立表 `task_bindings`，没给 `tasks` 加列（`CREATE TABLE IF NOT EXISTS` 不会给已有表加列） |
+| W3 | 工具调用记账 | `d898670` | begin/end 都挂 `tools/result`，不是 `execute` + `result`——见「回合如何挂上去」 |
+| W4 | 终端入口 `/task`、`/task-approve` | `ec99601` | 无 |
+| W4b | 模型入口 `prts_task_create` | `cf7225b` | 只产出 draft + 强制 owner-confirm |
+| W5 | 启动列出 draft/active/blocked | `a9e3dbf` | 无 |
 
-每波独立提交，每波跑 `npm test` 与 `npx tsc -p .`。
+每波独立提交，每波跑过 `npm test` 与 `npx tsc -p .`。当前全量 85 pass / 0 fail。
+
+**仍未做的**：
+- `tools/execute` waterfall 挂点（保留 started 态）——订阅方式未实测
+- `uncertain` 结论——依赖 `CheckSpec` 扩展，独立设计
+- 任务与记忆的关联（`derived_from`）——等记忆层
 
 ## 不做
 
