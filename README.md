@@ -42,9 +42,9 @@ test/           62 例；test/support/ 是驱动、脚本化模型替身、临�
 
 ## 当前状态
 
-- HEAD `b3cb34b`（2026-10-30 19:18）"Runtime integration 2a"：真实 DSH 组合在自有守护进程下跑通，模型由脚本替身驱动。
+- 最近的功能提交是 `b3cb34b`（2026-10-30）"Runtime integration 2a"：真实 DSH 组合在自有守护进程下跑通，模型由脚本替身驱动。之后只有文档与工作树整理提交，取准看 `git log`。
 - 未接真实模型：见下条 O1。
-- 未提交的遗留：`test/runtime/enum-tools.ts`（10-30 21:18，Devin 留下的孤儿文件，不参与测试）。
+- Devin 留下的孤儿脚本 `enum-tools.ts` 已移入 `.scratch\`（一次性探针，不参与测试）。
 
 ## 已知缺陷
 
