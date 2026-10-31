@@ -6,6 +6,9 @@
   "description": "PRTS 受保护核心：K1 任务账本（纯 TypeScript 库，node:sqlite 存储）",
   "scripts": {
     "chat": "node src/cli/chat-main.ts",
+    "chat:serve": "node src/cli/chat-serve.ts",
+    "chat:remote": "node src/cli/chat-client.ts",
+    "verify:e10": "node test/e10/gate.mjs",
     "secret:set": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/set-secret.ps1",
     "secret:del": "powershell -NoProfile -Command \"cmdkey /delete:PRTS/DeepSeek\"",
     "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\"",

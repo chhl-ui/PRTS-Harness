@@ -96,6 +96,28 @@ async function waitIdle(agent: { status: string }, ms = 120000): Promise<boolean
   return false
 }
 
+/**
+ * D2：审批通道收到的询问（只带判定所需的事实，不带 UI 语义）。
+ * capabilities 来自 pre-execute 的暂存（start.ts 的 PendingApproval），
+ * 是「本次操作会动到哪些能力」，不是渲染好的句子——怎么显示由客户端决定。
+ */
+export interface ApprovalAsk {
+  callId: string
+  tool: string
+  capabilities: string[]
+  reason: string
+}
+
+/** D2：一轮结束的事实。text 与 replies 同源（最后一次 attempt 优先）。 */
+export interface TurnEndInfo {
+  sessionId: string
+  /** 1 起的回合序号，等于本会话已产出的 replies 条数。 */
+  turn: number
+  text: string
+  /** 回合是否在 waitIdle 的时限内收敛；false 表示等超时了。 */
+  settled: boolean
+}
+
 export interface ChatDeps {
   ctx: Context
   /** 逐行输入；EOF 或 '/exit' 结束。 */
@@ -123,6 +145,23 @@ export interface ChatDeps {
    * 未注入时 /task-approve 只接受显式 id，不崩。
    */
   draftTaskForSession?: (sessionId: string) => unknown
+  /**
+   * D2：模型文本增量分流口。只承载模型回复的 text-delta——审批提示、宿主命令
+   * 回显、命令报错仍只走 out，两者不混。未提供时行为不变（out 照写）。
+   */
+  onAssistantDelta?: (text: string) => void
+  /**
+   * D2：审批应答通道（远端客户端/前端用它应答 pre-execute 的审批）。
+   * 提供时**完全不碰 lines**——否则通道与主循环会抢同一行（e3-approval 的
+   * inputs 顺序断言依赖它）。返回值即裁决：true → allowed-once，false → rejected。
+   * 需要 approvalBridge（取 capabilities）与 authority（落记录）同时在场，
+   * 否则 answerer 不注册，审批仍走下游默认的 fail-closed。
+   */
+  approvalChannel?: {
+    ask(info: ApprovalAsk): Promise<boolean>
+  }
+  /** D2：每轮结束回调，在 onIdle 之前触发；缺省无副作用。 */
+  onTurnEnd?: (info: TurnEndInfo) => void
 }
 
 export interface ChatResult {
@@ -378,7 +417,9 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
     if (delta === '') return
     attemptText += delta
     streamed += delta
-    deps.out(delta)
+    if (deps.onAssistantDelta !== undefined) deps.onAssistantDelta(delta)
+    else deps.out(delta)
+    // 模型文本出口见上：回调与 out 二选一，不可双写（否则 host 通道会混入模型文本）。
   })
   try {
     // E3：审批应答与主循环共用同一个输入迭代器。审批发生在回合内，此时主循环
@@ -402,12 +443,27 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
           const r = req as { callId?: unknown; reason?: unknown }
           const p = deps.approvalBridge?.take(String(r.callId))
           if (p === undefined) return next()
-          deps.out(`\n[审批] 工具 ${p.tool} 请求越界操作：\n`)
-          for (const c of p.capabilities) deps.out(`  · ${c}\n`)
-          if (typeof r.reason === 'string' && r.reason !== '') deps.out(`  理由：${r.reason}\n`)
-          deps.out('  批准本次？[y/N] ')
-          const answer = (await readLine()) ?? ''
-          const ok = /^y(es)?$/i.test(answer.trim())
+          const reason = typeof r.reason === 'string' ? r.reason : ''
+          let ok: boolean
+          if (deps.approvalChannel !== undefined) {
+            // D2：有通道就不读 lines。通道抛错按「没人应答」处理 → 拒绝，
+            // 不因异常而默许（审批的缺省必须是 fail-closed）。
+            const ask: ApprovalAsk = { callId: p.callId, tool: p.tool, capabilities: p.capabilities, reason }
+            try {
+              ok = await deps.approvalChannel.ask(ask)
+            } catch (error) {
+              deps.out(`[prts] 审批通道失败：${error instanceof Error ? error.message : String(error)}\n`)
+              ok = false
+            }
+          } else {
+            // 无通道：保持原来的本地 [y/N] 交互。
+            deps.out(`\n[审批] 工具 ${p.tool} 请求越界操作：\n`)
+            for (const c of p.capabilities) deps.out(`  · ${c}\n`)
+            if (reason !== '') deps.out(`  理由：${reason}\n`)
+            deps.out('  批准本次？[y/N] ')
+            const answer = (await readLine()) ?? ''
+            ok = /^y(es)?$/i.test(answer.trim())
+          }
           try {
             deps.authority?.recordOwnerDecision({
               sessionId: p.sessionId,
@@ -480,10 +536,16 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
       }
       seenSeq = fromLog.seq
       // 仅当一个 delta 都没写出去时，才把日志文本打到终端；两者都空就不输出空行。
-      if (streamed === '' && fromLog.text.length > 0) deps.out(fromLog.text)
+      // 仅当一个 delta 都没写出去时，才把日志文本交给同一个出口；否则日志兜底的
+      // 模型文本会以 host 身份出现（chat-serve 把 out 接到 host 通道）。
+      if (streamed === '' && fromLog.text.length > 0) {
+        if (deps.onAssistantDelta !== undefined) deps.onAssistantDelta(fromLog.text)
+        else deps.out(fromLog.text)
+      }
       // replies 仍存整段（不是逐片）：最后一次 attempt 的文本优先，其次终端所见，再其次日志。
       const text = attemptText || streamed || fromLog.text
       replies.push(text)
+      deps.onTurnEnd?.({ sessionId, turn: replies.length, text, settled })
       deps.onIdle?.()
     }
   } finally {

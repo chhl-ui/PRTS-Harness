@@ -36,6 +36,17 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 - **第二道闸在库层**：`MODEL_OPS`（`ledger.ts:121`）是 model actor 的白名单，`perm()`（`ledger.ts:304`）对 model 只放名单内的 op、其余抛 `FORBIDDEN`，对 `system` 一律 `FORBIDDEN`（system 只能走固定 actor 路径），owner 全放。名单外的方法即使日后被工具包起来，model 调用也会被库拒。
 - **已知缺口：「模型永不绑定」只在工具面成立**：`MODEL_OPS` 里仍有 `bindSession`（`ledger.ts:123`）——工具面没暴露它，但库层允许 model actor 绑定，任何新工具或内部调用走到那里就会静默失去这条不变量。收紧方案是从白名单删掉并补库层负向断言（工具面已有负向①断言工具名不含 bind 语义，那验的是工具面，不是库层）。**本轮未做，记为遗留。**
 
+### 所有者通道（P2）：管道、双通道输出、断开语义、E10
+
+- **端点**：随机管道名 `\\.\pipe\prts-term-<32 hex>`，服务端**先 listen 成功**再把名字**原子**发布到 `<数据根>/terminal.endpoint`（写 `.tmp` → rename）；退出顺序相反。反过来会有「文件已存在但还没人听」的窗口，固定名实现里更会变成抢注窗口。随机名只消除发布瞬间的抢注，**不是安全边界**——endpoint 在数据根下，而沙箱可读数据根（H3 实测），读到名字就能连。
+- **安全边界只有 E10 那一道**：Low 完整性进程发起命名管道连接一律 `EPERM`。实测比「禁止向上写」更强：**Low 连 Low 也不行**（`.scratch/probe-pipe-il.test.ts` 臂 C 失败），所以凡涉及「Low 进程连管道」的推断不要写成「向上写被拦」。防线来自 Windows 完整性控制的默认行为，PRTS 没有给管道加安全描述符。
+- **E10 的验收判据是 `npm run verify:e10` 的 exit 0**，不是 `npm test` 全绿。四臂缺一不可：A 普通连得上（基线）、B 沙箱被挡且 `EPERM`、B' 沙箱连不存在管道得到 `ENOENT`（证明 errno 可区分）、C' 普通进程能连沙箱创建的管道（对照臂，证明失败归因于发起方 IL 而非环境残缺）。环境不具备时脚本 exit 2——**2 不是通过**。
+- **双通道输出**：模型文本走 `event{kind:'delta'}`（`deps.onAssistantDelta`），宿主回显走 `event{kind:'host'}`（`deps.out` 被 chat-serve 接到管道）。chat.ts 里这两条路径**互斥**：流式与日志兜底都走同一个分流判断，双写会让同一段模型文本以 host 身份再出现，而 `host 通道只承载宿主输出` 正是要被测的东西。
+- **状态机由 `approvalChannel` 驱动，不靠文本推断**：`requestApproval()` 进入 awaiting 并记 pendingCallId；应答必须 `callId` 逐字相等，否则 `stale-approval` 且不结算；审批期内的 prompt 回错**不入队**（排队会让审批结束后凭空多出一轮对话）。
+- **单客户端**：runChat 是单会话长循环，多客户端会争抢同一个输入迭代器，后来者收 `busy` 并被断开。这是会话语义，不是性能限制。
+- **断开语义**：只做两件事——未结算审批按 false 结算（fail-closed），送 EOF。**不中断飞行中的回合**（收敛由 chat.ts 的 `waitIdle` 控制，默认 120s，本层拿不到 agent 句柄）。因此「断开后模型调用数还在涨」是预期行为；衡量「是否停止接新活」的指标是**新回合起始数**，不是模型调用次数——用后者断言会把正确实现判红。
+- **词表无 `cancel`**：`/cancel` 在 chat.ts 是 `ledger.cancel`（账本相位变更），与「中止回合」是两回事。所有 `/` 命令当普通 prompt 文本发，由 chat.ts 解析；中止回合留 P2b。
+
 ### 账本工具集（D2 落地）与两处未接/取舍
 
 - **工具面**：`src\runtime\task-tools.ts` 的 `createTaskTools()` 注册 13 个 `prts_task_*` 工具（create / list / get / note / set_resume / step_begin / step_end / add_evidence / claim_done / block / unblock / pause / resume）。返回的 `names` 是**注册回执**，`startRuntime()` 以 `toolNames` 透出——工具面清单不手抄常量，避免与注册漂移。

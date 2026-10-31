@@ -9,7 +9,10 @@ PRTS 受保护核心：任务账本、授权、停止、审计、启动完整性
 
 ```sh
 npm install       # 依赖：@deepseek-ai/dsh-* 0.2.1-rc.2（RC 版本，升级需复验接口）
-npm test          # node --test，106 例，约 33 秒（2026-11-01 实测 106 pass / 0 fail，32.4s）
+npm run chat:serve # 所有者通道服务端（P2）：起运行时 + 命名管道，端点写 <数据根>/terminal.endpoint
+npm run chat:remote # 分离客户端：连上面那条管道（需另开一个终端，PRTS_DATA_ROOT 指同一数据根）
+npm run verify:e10 # E10 硬门（见下）。**所有者通道的安全性验收判据是这个脚本 exit 0**
+npm test          # node --test，112 例，约 33 秒（2026-11-01 实测 112 pass / 0 fail）
 npm run typecheck # tsc -p .（strict + noEmit + erasableSyntaxOnly）
 npm run chat      # 所有者终端：进程内 REPL（需下面三个环境变量）
 ```
