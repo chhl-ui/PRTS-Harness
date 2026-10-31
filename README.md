@@ -9,7 +9,7 @@ PRTS 受保护核心：任务账本、授权、停止、审计、启动完整性
 
 ```sh
 npm install       # 依赖：@deepseek-ai/dsh-* 0.2.1-rc.2（RC 版本，升级需复验接口）
-npm test          # node --test，85 例，约 33 秒
+npm test          # node --test，89 例，约 33 秒
 npm run typecheck # tsc -p .（strict + noEmit + erasableSyntaxOnly）
 npm run chat      # 所有者终端：进程内 REPL（需下面三个环境变量）
 ```
@@ -37,7 +37,7 @@ src/
   cli/          prts upgrade（清单只能经它修改）
   runtime/      K6 运行时入口 main.ts + start.ts（boot 组合 + 内存 credentials）
 config/prts.yml 组合树（sdk-minimal 展开，自 sdk-app/jsonrpc 与账户链中剥离）
-test/           85 例；test/support/ 是驱动、脚本化模型替身、临时目录
+test/           89 例；test/support/ 是驱动、脚本化模型替身、临时目录
 .scratch/       一次性诊断探针（gitignore，不参与测试）
 ```
 
@@ -69,7 +69,9 @@ test/           85 例；test/support/ 是驱动、脚本化模型替身、临�
 
 - **K2a 守卫已接线，但只覆盖文件系统能力**（2026-10-31）：`src/runtime/start.ts` 在 boot 返回后挂 `tools.guard`，模型发起的读/写/删先过 `Authority.guard`——越界写/读返回拒绝理由并写 `tool.denied` 审计，工作区内读写正常放行（回归见 `test/runtime/guard-wiring.test.ts`）。`exec` / `net` / `system` / `tool` 暂不判定（归 K2b 沙箱）：K2a 对 pwsh 只能整体放行或整体拒绝，整体拒绝会破坏现有 pwsh 用例，而且那不是真正的边界。**这与下面的审批问题是两件事**——审批不可达是 fs backend 的问题，守卫接线是工具流水线的问题，不要互相代替。
 - **请求重试会重复输出片段**：`frame` 带 `attemptId` / `revision`，模型请求失败重试会起新 attempt 从头重发 delta，而已经写进终端的片段撤不回来。`chat.ts` 按 `attemptId` 变化重置游标，但不做终端回滚——重试路径下用户可能看到重复片段。正常对话（无错误、无工具重试）不触发。
-- **审批在组合内不可达（E3 待办）**。文件工具的工作区外写入不会触发审批：`dsh-tool-fs/lib/index.js:1134-1150` 的 `resolvePolicy` 在未带 `sandbox_permissions` / `justification` 时直接返回 standing policy，根本不发审批；带参数重试则要求 `escalationModes.length > 0`，即组合里必须有 confining fs backend，而 `config/prts.yml:27` 用的是 `@deepseek-ai/dsh-fs-local`。所以 `prts chat` 不提供审批提示，工作区外写入直接按 sandbox-policy 处理。要补 E3，需先接入 confining fs backend（独立里程碑）。
+- **E3 审批已实现（2026-10-31），走 K2a 侧而非 DSH 的 fs escalation**。DSH 的 `resolvePolicy` 路径被 K2a 守卫遮蔽——越界写在 `authority.ts:148-152` 就被拒，到不了 `dsh-tool-fs/lib/index.js:1134-1150`。可用的钩子是 `tools/pre-execute`：它是异步 waterfall 且在同步 guards 之前（`dsh-tools/lib/index.js:3321` / `:3337`）。链路：pre-execute 用 `classify(name, arguments)` 算 capabilities → `decide()` 返 `ask` → 按 callId 暂存 → `approval/request` answerer（`src/cli/chat.ts`）弹终端提示 → `recordOwnerDecision({outcome:'allowed-once'})` → 同步 guard 读到 once 放行。回归见 `test/runtime/e3-approval.test.ts`。
+- **三层授权语义**：`protectedRoots` 内 → `deny`（绝对禁止，审批救不了）；工作区外且非 protected → `ask`（可审批）；工作区内 → `allow`。`decide()` 的优先级是 `deny > ask > allow`，所以越界写的 E3 用例必须落在「工作区外、非 protectedRoots」。
+- **审批只覆盖文件能力**：`exec` / `net` / `system` 不归 E3（归 K2b）——pre-execute 对非 `fs.*` 能力直接放行。
 - ~~dispose 后进程不退出~~（2026-10-31 复测不复现）：`startRuntime` → `dispose` 与 `startRuntime` → 一次完整 turn → `dispose` 两个场景，结束后 `_getActiveHandles()` 只剩 stdin/stdout/stderr（fd 0/1/2）、`_getActiveRequests()` 为空，不加 `--test-force-exit` 也正常 `exit 0`。若日后在 supervisor / job 路径上再观察到挂住，按那条路径单独记，不能笼统写成「dispose 后不退出」。
 
 ## 文档

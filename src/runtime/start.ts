@@ -21,6 +21,27 @@ export interface StartRuntimeOptions {
   dbPath?: string
 }
 
+/**
+ * pre-execute 阶段算出、等审批时暂存的一次性能力快照。
+ *
+ * 存在的理由：`approval.request` 的载荷只有 agent/toolName/callId/reason/signal
+ * （dsh-tools/lib/index.js:3535-3560），不含 capabilities；而
+ * `Authority.recordOwnerDecision` 必须拿到 capabilities 才能写出 guard 认的
+ * once 记录（authority.ts:162-172）。两侧唯一的交集是 callId，所以只能用
+ * 进程内桥把 capabilities 从 pre-execute 传到 answerer。
+ */
+export interface PendingApproval {
+  sessionId: string
+  callId: string
+  tool: string
+  capabilities: string[]
+}
+
+/** E3 审批桥：answerer 按 callId 取走 pre-execute 暂存的 capabilities。取走即删。 */
+export interface ApprovalBridge {
+  take(callId: string): PendingApproval | undefined
+}
+
 const createAppReady = () => {
   let ready = false
   const listeners = new Set<() => void>()
@@ -41,7 +62,7 @@ const createAppReady = () => {
   }
 }
 
-export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Context; ledger: Ledger; dispose(): Promise<void> }> {
+export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Context; ledger: Ledger; authority: Authority; approvalBridge: ApprovalBridge; dispose(): Promise<void> }> {
   process.env.DSH_HOME = join(o.dataRoot, 'dsh-home')
   process.env.PRTS_WORKSPACE = o.workspace
   const appReady = createAppReady()
@@ -122,6 +143,54 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
       // classify 对非法输入抛 INVALID_INPUT；DSH 对「抛异常的 guard」行为未核实，
       // 所以在这里转成拒绝理由，与 authority.ts:126 的 fail-closed 保持一致。
       return `prts authority: ${error instanceof Error ? error.message : String(error)}`
+    }
+  })
+
+  // E3：越界操作先问人，而不是直接拒。
+  //
+  // 为什么挂 pre-execute 而不是 DSH 的 fs escalation：K2a 守卫在工具执行前就调
+  // authority.guard，越界写在那里被拒并写 tool.denied（authority.ts:148-152），
+  // 根本到不了 dsh-tool-fs 的 resolvePolicy。pre-execute 是异步 waterfall 且在
+  // 同步的 guards 之前（dsh-tools/lib/index.js:3321 与 :3337），是唯一能在守卫之前
+  // 问到人的钩子。
+  //
+  // 必须调 next()：cordis 的 waterfall 里不调 next 会 veto 整条链
+  // （cordis/lib/index.js:310-316），连工具派发都会先被邸断。
+  const pendingApprovals = new Map<string, PendingApproval>()
+  const approvalBridge: ApprovalBridge = {
+    take(callId) {
+      const p = pendingApprovals.get(callId)
+      if (p !== undefined) pendingApprovals.delete(callId)
+      return p
+    },
+  }
+  const offPreExecute = (ctx as unknown as {
+    on(name: string, fn: (exec: unknown, next: () => unknown) => unknown): () => void
+  }).on('tools/pre-execute', async (execution: unknown, next: () => unknown) => {
+    try {
+      const exec = execution as {
+        readonly callId: unknown
+        readonly name: string
+        readonly arguments: unknown
+        readonly agent?: { session?: { id?: string } }
+      }
+      const capabilities = classify(exec.name, exec.arguments)
+        .filter((c) => c.startsWith('fs.read:') || c.startsWith('fs.write:') || c.startsWith('fs.delete:'))
+      // 非文件能力不归 E3（exec/net/system 归 K2b），原样放行。
+      if (capabilities.length === 0) return next()
+      const sessionId = exec.agent?.session?.id ?? ''
+      const callId = String(exec.callId)
+      const decision = authority.decide({ sessionId, callId, tool: exec.name, capabilities })
+      // 只有 ask 才问人：allow 原样放行，deny（如 protectedRoots）不可审批，
+      // 交回同步守卫去拒并落 tool.denied——保持「守卫是唯一强制点」不变量。
+      if (decision.kind !== 'ask') return next()
+      pendingApprovals.set(callId, { sessionId, callId, tool: exec.name, capabilities })
+      return { kind: 'ask', reason: decision.reason }
+    } catch (error) {
+      // 审批链路自身出错不能让工具静默放行，也不能把工具全邸断：
+      // 记一笔并交回默认放行，由同步守卫兑现强制点。
+      console.error(`[prts] approval gate failed: ${error instanceof Error ? error.message : String(error)}`)
+      return next()
     }
   })
 
@@ -221,8 +290,11 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
   return {
     ctx,
     ledger,
+    authority,
+    approvalBridge,
     dispose: async () => {
       detachGuard()
+      offPreExecute()
       offToolResult?.()
       offTaskTool()
       // Ledger 与 Authority 各自持有 sqlite 连接，都不由 ctx 生命周期管理；

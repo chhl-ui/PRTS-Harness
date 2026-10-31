@@ -88,6 +88,9 @@ try {
     dataRoot,
     // 账本句柄来自 startRuntime（W0）。不传的话 /task 系列命令会在终端里报不可用。
     ledger: app.ledger,
+    // E3 审批：授权句柄 + 能力桥都来自 startRuntime；缺任一则越界操作 fail-closed。
+    authority: app.authority,
+    approvalBridge: app.approvalBridge,
     // 回合结束先换行再打提示符，保证提示符另起一行（流式文本本身不带尾换行）。
     onIdle: () => process.stdout.write('\nprts> '),
   })

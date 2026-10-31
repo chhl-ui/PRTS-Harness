@@ -18,6 +18,8 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Ledger } from '../ledger/index.ts'
+import type { Authority } from '../authority/index.ts'
+import type { ApprovalBridge } from '../runtime/start.ts'
 
 const NL = String.fromCharCode(10)
 
@@ -108,6 +110,13 @@ export interface ChatDeps {
   onIdle?: () => void
   /** 任务账本；未提供时 /task 系列命令不可用（明确报错，不静默忽略）。 */
   ledger?: Ledger
+  /**
+   * E3 授权句柄（与运行时同库）。未提供时越界操作走 fail-closed：
+   * pre-execute 仍会发起 ask，但没有 answerer 应答，结果是 'unavailable' → 拒绝。
+   */
+  authority?: Authority
+  /** E3 审批桥：按 callId 取 pre-execute 暂存的 capabilities。 */
+  approvalBridge?: ApprovalBridge
 }
 
 export interface ChatResult {
@@ -204,6 +213,8 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
   })
 
   const replies: string[] = []
+  /** E3 审批应答的解绑器；在 try 内赋值、finally 里解绑，故声明在 try 外。 */
+  let offApproval: (() => void) | undefined
   /** 本回合已写到终端的流式文本（跨 attempt 只增不减，用来判断要不要走日志兜底）。 */
   let streamed = ''
   /** 当前 attempt 累积到的完整文本；换 attempt 即重置（重试会从头重发 delta）。 */
@@ -227,7 +238,54 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
     deps.out(delta)
   })
   try {
-    for await (const raw of deps.lines) {
+    // E3：审批应答与主循环共用同一个输入迭代器。审批发生在回合内，此时主循环
+    // 正阻塞等回合收敛，两者不会同时消费同一行。
+    const lineIter = deps.lines[Symbol.asyncIterator]()
+    const readLine = async (): Promise<string | undefined> => {
+      const r = await lineIter.next()
+      return r.done === true ? undefined : r.value
+    }
+
+    // E3：审批应答。只应答本运行时经 pre-execute 发起的请求（桥里能取到
+    // capabilities）；取不到就交回下游默认行为（无 answerer 时是 fail-closed 的
+    // 'unavailable'），不越权代答别的来源的审批。
+    offApproval = (deps.authority === undefined || deps.approvalBridge === undefined)
+      ? undefined
+      : (ctx as unknown as {
+        on(name: string, fn: (...a: never[]) => unknown): () => void
+      }).on(
+        'approval/request',
+        (async (req: unknown, next: () => unknown) => {
+          const r = req as { callId?: unknown; reason?: unknown }
+          const p = deps.approvalBridge?.take(String(r.callId))
+          if (p === undefined) return next()
+          deps.out(`\n[审批] 工具 ${p.tool} 请求越界操作：\n`)
+          for (const c of p.capabilities) deps.out(`  · ${c}\n`)
+          if (typeof r.reason === 'string' && r.reason !== '') deps.out(`  理由：${r.reason}\n`)
+          deps.out('  批准本次？[y/N] ')
+          const answer = (await readLine()) ?? ''
+          const ok = /^y(es)?$/i.test(answer.trim())
+          try {
+            deps.authority?.recordOwnerDecision({
+              sessionId: p.sessionId,
+              callId: p.callId,
+              tool: p.tool,
+              capabilities: p.capabilities,
+              outcome: ok ? 'allowed-once' : 'denied',
+            })
+          } catch (error) {
+            deps.out(`[prts] 审批结果记录失败：${error instanceof Error ? error.message : String(error)}\n`)
+            // 写不进记录就等于没批准——必须按拒绝走，不能假装成功。
+            return 'rejected'
+          }
+          deps.out(ok ? '[prts] 已批准本次\n' : '[prts] 已拒绝\n')
+          return ok ? 'allowed-once' : 'rejected'
+        }) as never,
+      )
+
+    for (;;) {
+      const raw = await readLine()
+      if (raw === undefined) break
       const line = raw.trim()
       if (line === '') continue
       if (line === '/exit' || line === '/quit') break
@@ -266,6 +324,7 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
     }
   } finally {
     off?.()
+    offApproval?.()
   }
   return { turns: replies.length, replies }
 }
