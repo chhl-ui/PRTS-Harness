@@ -67,7 +67,8 @@ test('R2+网络对照：pwsh 沙箱写区内 OK/区外拒 + LanguageMode + TLS �
     // 使下面的 match() 取到 undefined（实测四次两红两绿即由此而来）。
     const sessDir = join(app.dataRoot, 'dsh-home', 'sessions')
     let transcript = ''
-    for (let i = 0; i < 40; i++) {
+    // 60×250ms = 15s。原为 10s，余量偏窄：pwsh 冷启动 + 5 步脚本化回合在负载下可能更久。
+    for (let i = 0; i < 60; i++) {
       transcript = ''
       if (existsSync(sessDir)) {
         for (const f of readdirSync(sessDir, { recursive: true }) as string[]) {
@@ -81,6 +82,13 @@ test('R2+网络对照：pwsh 沙箱写区内 OK/区外拒 + LanguageMode + TLS �
     const lang = transcript.match(/(FullLanguage|ConstrainedLanguage)/)?.[0]
     console.log('LanguageMode in tool result:', lang ?? 'NOT FOUND')
     assert.ok(transcript.includes('tool/result'), '会话日志缺 tool/result 事件')
+    // 先单独断言「等到落盘了」——否则轮询耗尽时 lang 是 undefined，
+    // 下面那句会把「等待超时」误报成「语言模式不对」，把定位引到错误的层。
+    assert.ok(
+      lang !== undefined,
+      `等待 LanguageMode 落盘超时（15s），transcript 长度=${transcript.length}。`
+      + '这不是语言模式问题，是轮询窗口不足或日志写盘过慢。',
+    )
     assert.equal(lang, 'FullLanguage', 'pwsh 未恢复 FullLanguage')
     const net = transcript.match(/HTTP-STATUS=\w+/)
     console.log('sandboxed Invoke-WebRequest:', net?.[0] ?? 'no result found')

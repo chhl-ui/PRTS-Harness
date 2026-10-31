@@ -53,7 +53,7 @@ test/           90 例；test/support/ 是驱动、脚本化模型替身、临�
 ## 当前状态
 
 - 最近的功能提交是 `ddc511d`（2026-10-31 22:55）"任务入口设计同步到实现状态"。在此之前 `b3cb34b`（2026-10-30）"Runtime integration 2a" 让真实 DSH 组合在自有守护进程下跑通、模型由脚本替身驱动；此后不再只有文档提交——K1 任务入口已按 `docs/task-entry-design.md` 的 W0–W5 全部落地（`306d240` W0 至 `a9e3dbf` W5），模型只能建 `draft`、`owner` 才能 `activate`。取准看 `git log`。
-- **测试稳定性（2026-10-31 实测）**：85 例，5 次连续采样中 1 次出现 `fail 1`（用例名未捕获），其余 4 次 85/85。所以单次全绿不能当作结论——本仓的判据是**连续两次全绿**，flaky 用例尚未定位。
+- **测试稳定性（2026-10-31 实测）**：曾观察到 1 次 `fail 1`（85 例时代，详情因日志被 grep 过滤而丢失）。随后 **20 轮连续采样**（90 例，共 1800 次用例执行）**0 失败**，原始失败未复现——若真实概率是 1/5，20 轮全绿的概率仅 1.15%，故该频率假设可以否定；95% 置信的失败率上界约 15%（rule of three, 3/20）。**仍未定位**：头号嫌疑是 R2 等待 LanguageMode 落盘的轮询窗口（原 10s，已放宽到 15s，并把「等待超时」与「语言模式错误」拆成两条断言，避免下次复现时把定位引到错误的层）。单次全绿仍不作结论，判据是**连续两次全绿**。
 - O1 已修（2026-10-31）：驱动路径改用 `createUserMessage()` 构造消息，真实适配器经 agent 轮次能发出请求；回归见 `test/runtime/o1-real-adapter.test.ts`。
 - **E1 已通（2026-10-31）**：真实 key、真实 `api.deepseek.com`、出厂默认配置（`reasoningEffort` 缺省 = `high`，未改 `config/prts.yml`），连跑 4 次全部成功，`assistant/message` 含 `reasoning` + `text` 块，`turn/end` 为 `completed`，单次约 1580ms，`agent/error` 0 条。thinking block 被正确映射为 `reasoning`，不需要关掉推理。
 - **`prts chat` 已流式输出（2026-10-31）**：`agent/assistant-stream` 的 payload 是 `{ frame: AssistantStreamFrame }`（`dsh-agent/lib/types/runtime-types.d.ts:107-140`，事件声明 `:366-369`）；可见文本只在 `frame.type === 'chunk'` 且 `frame.chunk.type === 'text-delta'` 的 `chunk.text` 里（`dsh-llm/lib/types/types.d.ts:434-441`，emit 站点 `dsh-agent-loop/lib/index.js:1080`）。`src/cli/chat.ts` 按此契约取增量、逐片写终端；真实 key 实测首片比回合结束早约 250ms 到达。某 provider 只发完整 block 不发 `text-delta` 时，仍走 `<dataRoot>/dsh-home/sessions/**` 的 `assistant/message` 兜底——两条路径互斥，不会重复。
