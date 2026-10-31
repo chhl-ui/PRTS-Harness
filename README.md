@@ -9,7 +9,7 @@ PRTS 受保护核心：任务账本、授权、停止、审计、启动完整性
 
 ```sh
 npm install       # 依赖：@deepseek-ai/dsh-* 0.2.1-rc.2（RC 版本，升级需复验接口）
-npm test          # node --test，63 例，约 33 秒
+npm test          # node --test，85 例，约 33 秒
 npm run typecheck # tsc -p .（strict + noEmit + erasableSyntaxOnly）
 npm run chat      # 所有者终端：进程内 REPL（需下面三个环境变量）
 ```
@@ -37,7 +37,7 @@ src/
   cli/          prts upgrade（清单只能经它修改）
   runtime/      K6 运行时入口 main.ts + start.ts（boot 组合 + 内存 credentials）
 config/prts.yml 组合树（sdk-minimal 展开，自 sdk-app/jsonrpc 与账户链中剥离）
-test/           63 例；test/support/ 是驱动、脚本化模型替身、临时目录
+test/           85 例；test/support/ 是驱动、脚本化模型替身、临时目录
 .scratch/       一次性诊断探针（gitignore，不参与测试）
 ```
 
@@ -52,7 +52,8 @@ test/           63 例；test/support/ 是驱动、脚本化模型替身、临�
 
 ## 当前状态
 
-- 最近的功能提交是 `b3cb34b`（2026-10-30）"Runtime integration 2a"：真实 DSH 组合在自有守护进程下跑通，模型由脚本替身驱动。之后只有文档与工作树整理提交，取准看 `git log`。
+- 最近的功能提交是 `ddc511d`（2026-10-31 22:55）"任务入口设计同步到实现状态"。在此之前 `b3cb34b`（2026-10-30）"Runtime integration 2a" 让真实 DSH 组合在自有守护进程下跑通、模型由脚本替身驱动；此后不再只有文档提交——K1 任务入口已按 `docs/task-entry-design.md` 的 W0–W5 全部落地（`306d240` W0 至 `a9e3dbf` W5），模型只能建 `draft`、`owner` 才能 `activate`。取准看 `git log`。
+- **测试稳定性（2026-10-31 实测）**：85 例，5 次连续采样中 1 次出现 `fail 1`（用例名未捕获），其余 4 次 85/85。所以单次全绿不能当作结论——本仓的判据是**连续两次全绿**，flaky 用例尚未定位。
 - O1 已修（2026-10-31）：驱动路径改用 `createUserMessage()` 构造消息，真实适配器经 agent 轮次能发出请求；回归见 `test/runtime/o1-real-adapter.test.ts`。
 - **E1 已通（2026-10-31）**：真实 key、真实 `api.deepseek.com`、出厂默认配置（`reasoningEffort` 缺省 = `high`，未改 `config/prts.yml`），连跑 4 次全部成功，`assistant/message` 含 `reasoning` + `text` 块，`turn/end` 为 `completed`，单次约 1580ms，`agent/error` 0 条。thinking block 被正确映射为 `reasoning`，不需要关掉推理。
 - **`prts chat` 已流式输出（2026-10-31）**：`agent/assistant-stream` 的 payload 是 `{ frame: AssistantStreamFrame }`（`dsh-agent/lib/types/runtime-types.d.ts:107-140`，事件声明 `:366-369`）；可见文本只在 `frame.type === 'chunk'` 且 `frame.chunk.type === 'text-delta'` 的 `chunk.text` 里（`dsh-llm/lib/types/types.d.ts:434-441`，emit 站点 `dsh-agent-loop/lib/index.js:1080`）。`src/cli/chat.ts` 按此契约取增量、逐片写终端；真实 key 实测首片比回合结束早约 250ms 到达。某 provider 只发完整 block 不发 `text-delta` 时，仍走 `<dataRoot>/dsh-home/sessions/**` 的 `assistant/message` 兜底——两条路径互斥，不会重复。
