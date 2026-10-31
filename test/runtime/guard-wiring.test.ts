@@ -37,6 +37,21 @@ function transcript(dataRoot: string): string {
   return out
 }
 
+/**
+ * 等到 transcript 里出现期望的模式再返回。
+ * 会话日志落盘晚于工具调用结束，全量并行跑时尤其明显——直接读会拿到空串，
+ * 表现为「没有出现拒绝理由」的假失败（单文件跑却是绿的）。
+ */
+async function transcriptAfter(dataRoot: string, pattern: RegExp, ms = 5000): Promise<string> {
+  const t0 = Date.now()
+  let out = transcript(dataRoot)
+  while (Date.now() - t0 < ms && !pattern.test(out)) {
+    await new Promise((r) => setTimeout(r, 50))
+    out = transcript(dataRoot)
+  }
+  return out
+}
+
 /** 让模型发起一次 write，返回是否落盘、会话日志、以及落盘时的内容。 */
 async function runWrite(where: 'protected' | 'workspace'): Promise<{ created: boolean; log: string; content: string }> {
   const t = makeTmp(`guard-${where}-`)
@@ -69,7 +84,7 @@ async function runWrite(where: 'protected' | 'workspace'): Promise<{ created: bo
     const created = existsSync(targetPath)
     return {
       created,
-      log: transcript(dataRoot),
+      log: await transcriptAfter(dataRoot, /protected root/),
       content: created ? readFileSync(targetPath, 'utf8') : '',
     }
   } finally {
@@ -124,7 +139,7 @@ test('guard: 读取 protectedRoots 内的文件被拒且内容不落日志', { t
       cwd: ws,
       dataRoot,
     })
-    const log = transcript(dataRoot)
+    const log = await transcriptAfter(dataRoot, /fs\.read denied/)
     console.log('[guard] 日志含密钥内容 =', log.includes(secret),
       '| 含读拒绝理由 =', /fs\.read denied/.test(log))
     assert.equal(log.includes(secret), false, '受保护文件的内容泄漏进了会话日志')

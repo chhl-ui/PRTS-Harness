@@ -5,6 +5,7 @@ import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import type { Context } from '@deepseek-ai/cordis'
 import { attachErrorReporter } from './error-report.ts'
 import { Authority, classify } from '../authority/index.ts'
+import { Ledger } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
 
 export interface StartRuntimeOptions {
@@ -40,7 +41,7 @@ const createAppReady = () => {
   }
 }
 
-export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Context; dispose(): Promise<void> }> {
+export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Context; ledger: Ledger; dispose(): Promise<void> }> {
   process.env.DSH_HOME = join(o.dataRoot, 'dsh-home')
   process.env.PRTS_WORKSPACE = o.workspace
   const appReady = createAppReady()
@@ -75,6 +76,10 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
   // 否则授权事实会落进 K1/K4/K5 都看不见的库。initCoreDb 的建表语句全是
   // CREATE TABLE IF NOT EXISTS（ledger.ts:28、audit.ts:15），重复调用幂等。
   initCoreDb(dbPath)
+  // W0：账本句柄。与守护进程用同一个 core.sqlite（supervisor.ts:62 `join(dataRoot,'core.sqlite')`，
+  // :158 以 PRTS_DB 传下来），否则任务事实会落进 K1/K4/K5 都看不见的库。
+  // 上面已经 initCoreDb 幂等建过表，这里直接 open 即可。
+  const ledger = Ledger.open(dbPath)
   const authority = Authority.open(dbPath, {
     workspaceRoots: [o.workspace],
     protectedRoots: [o.dataRoot],
@@ -123,10 +128,13 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
   if (ctx.get('loader') !== undefined) appReady.commit()
   return {
     ctx,
+    ledger,
     dispose: async () => {
       detachGuard()
-      // Authority 自带 AuditLog 连接（authority.ts:44 close → audit.close），不由 ctx 生命周期
-      // 管理；不关会在 Windows 上锁住 sqlite 文件，临时目录清理报 EPERM。
+      // Ledger 与 Authority 各自持有 sqlite 连接，都不由 ctx 生命周期管理；
+      // 不关会在 Windows 上锁住文件，临时目录清理报 EPERM。
+      ledger.close()
+      // Authority 自带 AuditLog 连接（authority.ts:44 close → audit.close）。
       authority.close()
       detachErrorReporter()
       await ctx.fiber.dispose()
