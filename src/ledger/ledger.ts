@@ -68,6 +68,12 @@ CREATE TABLE IF NOT EXISTS evidence (
   produced_by TEXT NOT NULL,
   recorded_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS task_bindings (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),
+  session_id TEXT NOT NULL,
+  bound_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS task_bindings_session ON task_bindings(session_id);
 `
 
 interface TaskRow {
@@ -114,7 +120,7 @@ const STOPPED: ReadonlySet<string> = new Set(['cancelled', 'stopped-by-owner'])
 /** model 经自由 actor 参数允许的操作；owner 全可；system 一律 FORBIDDEN。 */
 const MODEL_OPS = new Set([
   'create', 'note', 'setResume', 'beginStep', 'endStep', 'addEvidence',
-  'claimDone', 'block', 'unblock', 'pause', 'resume',
+  'claimDone', 'block', 'unblock', 'pause', 'resume', 'bindSession',
 ])
 
 /** 模型侧未结任务上限（draft / active / paused / blocked）。owner 通道不受限。 */
@@ -446,6 +452,35 @@ export class Ledger {
 
   activate(actor: Actor, ref: TaskRef): TaskSnapshot {
     return this.transition(actor, ref, 'activate', ['draft'], 'task.activated', {})
+  }
+
+  /**
+   * 把任务绑定到会话。绑定必须落在账本里——runtime 会被 supervisor 按限额自动重启，
+   * 内存 Map 一重启就丢，而 recoverOnStartup 只能找回没做完的 step，找不回归属。
+   */
+  bindSession(actor: Actor, ref: TaskRef, sessionId: string): TaskSnapshot {
+    Ledger.nonEmpty(sessionId, 'sessionId')
+    return this.tx(() => {
+      const row = this.mustTask(ref.id)
+      this.perm(actor, 'bindSession')
+      this.checkRevision(row, ref)
+      this.checkPhase(row, ['draft', 'active', 'paused', 'blocked'], 'bindSession')
+      const existing = this.taskForSession(sessionId)
+      if (existing !== undefined && existing.id !== row.task_id) {
+        raise('INVALID_TRANSITION', `session ${sessionId} already bound to task ${existing.id}`)
+      }
+      this.appendEvent(row.task_id, row.revision + 1, 'task.session-bound', actor, { sessionId })
+      return this.snapshot(row.task_id)
+    })
+  }
+
+  /** 查会话当前绑定的未结任务；任务终结后不再返回。 */
+  taskForSession(sessionId: string): TaskSnapshot | undefined {
+    const row = this.db.prepare(
+      `SELECT t.* FROM tasks t JOIN task_bindings b ON b.task_id = t.task_id
+        WHERE b.session_id = ? AND t.phase NOT IN ('done','cancelled','stopped-by-owner')`,
+    ).get(sessionId) as TaskRow | undefined
+    return row === undefined ? undefined : this.toSnapshot(row)
   }
 
   pause(actor: Actor, ref: TaskRef): TaskSnapshot {

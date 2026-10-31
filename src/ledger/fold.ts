@@ -229,6 +229,20 @@ export function applyEvent(db: DatabaseSync, e: LedgerEventRow): void {
       break
     }
 
+    case 'task.session-bound': {
+      // 绑定落在独立表而不是 tasks 的列：CREATE TABLE IF NOT EXISTS 不会给已存在的
+      // 表加列，改 tasks 结构会让老库无法升级。新表 + IF NOT EXISTS 对老库安全。
+      const p = e.payload as { sessionId: unknown }
+      if (typeof p?.sessionId !== 'string' || p.sessionId.trim() === '') {
+        throw new Error('task.session-bound: sessionId must be a non-empty string')
+      }
+      db.prepare(
+        `INSERT INTO task_bindings (task_id, session_id, bound_at) VALUES (?, ?, ?)
+         ON CONFLICT(task_id) DO UPDATE SET session_id = excluded.session_id, bound_at = excluded.bound_at`,
+      ).run(e.task_id, p.sessionId, e.ts)
+      break
+    }
+
     default:
       throw new Error(`unknown ledger event kind: ${e.kind}`)
   }
