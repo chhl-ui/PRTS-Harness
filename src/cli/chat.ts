@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
+import type { Ledger } from '../ledger/index.ts'
 
 const NL = String.fromCharCode(10)
 
@@ -105,6 +106,8 @@ export interface ChatDeps {
   dataRoot: string
   /** 每轮结束后的回调，CLI 用来打提示符。 */
   onIdle?: () => void
+  /** 任务账本；未提供时 /task 系列命令不可用（明确报错，不静默忽略）。 */
+  ledger?: Ledger
 }
 
 export interface ChatResult {
@@ -116,6 +119,57 @@ export interface ChatResult {
  * 跑一次 REPL 会话。返回后调用方负责 dispose。
  * 不含审批应答：本组合下审批不可达（见文件头）。
  */
+/** `/task <目标>`：建任务 → 激活 → 绑定当前会话，全程 owner 通道。 */
+async function runTaskCommand(deps: ChatDeps, sessionId: string, objective: string): Promise<void> {
+  if (deps.ledger === undefined) {
+    deps.out('[prts] 未配置 ledger，/task 不可用\n')
+    deps.onIdle?.()
+    return
+  }
+  if (objective === '') {
+    deps.out('[prts] 用法：/task <目标>\n')
+    deps.onIdle?.()
+    return
+  }
+  try {
+    const owner = { kind: 'owner' } as const
+    const created = deps.ledger.create(owner, {
+      title: objective.length > 60 ? `${objective.slice(0, 60)}…` : objective,
+      objective,
+      acceptance: { kind: 'owner-confirm' },
+    })
+    const active = deps.ledger.activate(owner, { id: created.id, revision: created.revision })
+    deps.ledger.bindSession(owner, { id: active.id, revision: active.revision }, sessionId)
+    deps.out(`[prts] 已开任务 ${active.id}（active，已绑定本会话）\n`)
+  } catch (error) {
+    deps.out(`[prts] 开任务失败：${error instanceof Error ? error.message : String(error)}\n`)
+  }
+  deps.onIdle?.()
+}
+
+/** `/task-approve <id>`：把模型建的 draft 激活。owner 通道，模型无权调用。 */
+async function runTaskApprove(deps: ChatDeps, id: string): Promise<void> {
+  if (deps.ledger === undefined) {
+    deps.out('[prts] 未配置 ledger，/task-approve 不可用\n')
+    deps.onIdle?.()
+    return
+  }
+  if (id === '') {
+    deps.out('[prts] 用法：/task-approve <taskId>\n')
+    deps.onIdle?.()
+    return
+  }
+  try {
+    const owner = { kind: 'owner' } as const
+    const current = deps.ledger.get(id as never)
+    const active = deps.ledger.activate(owner, { id: current.id, revision: current.revision })
+    deps.out(`[prts] 已批准任务 ${active.id}（${active.phase}）\n`)
+  } catch (error) {
+    deps.out(`[prts] 批准失败：${error instanceof Error ? error.message : String(error)}\n`)
+  }
+  deps.onIdle?.()
+}
+
 export async function runChat(deps: ChatDeps): Promise<ChatResult> {
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const ctx = deps.ctx as any
@@ -160,6 +214,15 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
       const line = raw.trim()
       if (line === '') continue
       if (line === '/exit' || line === '/quit') break
+      // ---- 宿主命令：不触发模型回合，走 owner 通道 ----
+      if (line === '/task' || line.startsWith('/task ')) {
+        await runTaskCommand(deps, sessionId, line.slice('/task'.length).trim())
+        continue
+      }
+      if (line.startsWith('/task-approve')) {
+        await runTaskApprove(deps, line.slice('/task-approve'.length).trim())
+        continue
+      }
       streamed = ''
       attemptText = ''
       agent.followup(createUserMessage({
