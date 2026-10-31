@@ -55,8 +55,16 @@ export class Authority {
   private evalCap(c: Capability, grants: { grantId: string; capability: string }[]): CapResult {
     const p = parseCapability(c)
     switch (p.kind) {
-      case 'fs.read':
+      case 'fs.read': {
+        // 读侧保护：protectedRoots（数据根、密钥目录）对模型不可读。
+        // 此前这里是无条件 allow，而 dsh-sandbox-windows-acl 自述只创建 WRITE_RESTRICTED
+        // 令牌（读完全不受限），两边都不管等于 <dataRoot>/secrets/*.key 对模型 shell 敞开。
+        const rp = realpathBestEffort(p.arg)
+        if (this.protectedRoots.some((r) => isWithin(rp, r))) {
+          return { kind: 'deny', reason: `fs.read denied: ${p.arg} is inside protected root` }
+        }
         return { kind: 'allow', via: 'policy' }
+      }
       case 'fs.write': {
         const rp = realpathBestEffort(p.arg)
         if (this.protectedRoots.some((r) => isWithin(rp, r))) {

@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, existsSync, readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startRuntime } from '../../src/runtime/start.ts'
@@ -91,4 +91,46 @@ test('guard: 越界写被拒且留理由，工作区内写正常放行', { timeo
   assert.match(outside.log, /protected root/, '会话日志里没有出现来自 guard 的拒绝理由')
   assert.equal(inside.created, true, '工作区内写被误拒')
   assert.equal(inside.content, 'guard-probe', '工作区内写内容不符')
+})
+
+/** 读侧：protectedRoots 内的文件不应能被模型读取，内容不得进会话日志。 */
+test('guard: 读取 protectedRoots 内的文件被拒且内容不落日志', { timeout: 180000 }, async () => {
+  const t = makeTmp('guard-read-')
+  const dataRoot = join(t.dir, 'data')
+  const ws = join(t.dir, 'ws')
+  mkdirSync(join(dataRoot, 'secrets'), { recursive: true })
+  mkdirSync(ws, { recursive: true })
+  const secret = 'SECRET-MUST-NOT-LEAK-9f3a'
+  const keyPath = join(dataRoot, 'secrets', 'fake.key')
+  writeFileSync(keyPath, secret)
+
+  const app = await startRuntime({
+    configPath: prtsYml,
+    dataRoot,
+    workspace: ws,
+    mode: 'normal',
+    patches: [{ id: 'llm-deepseek', disabled: true }],
+  })
+  try {
+    const script: ScriptedStep[] = [
+      { toolCalls: [{ name: 'read', arguments: { file_path: keyPath } }] },
+      { text: 'done' },
+    ]
+    scriptedLlmPlugin(script).apply(app.ctx as Context)
+    await runChat({
+      ctx: app.ctx as Context,
+      lines: lines('read it', '/exit'),
+      out: () => {},
+      cwd: ws,
+      dataRoot,
+    })
+    const log = transcript(dataRoot)
+    console.log('[guard] 日志含密钥内容 =', log.includes(secret),
+      '| 含读拒绝理由 =', /fs\.read denied/.test(log))
+    assert.equal(log.includes(secret), false, '受保护文件的内容泄漏进了会话日志')
+    assert.match(log, /fs\.read denied/, '没有出现来自 guard 的读拒绝理由')
+  } finally {
+    await app.dispose()
+    t.cleanup()
+  }
 })
