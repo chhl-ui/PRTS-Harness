@@ -136,7 +136,12 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
       const settled = await waitIdle(agent)
       if (!settled) deps.out('[prts] 回合未在时限内收敛，已放弃等待')
       // 事件有文本就用事件，否则从会话日志兜底
-      const fromLog = assistantAfterSeq(deps.dataRoot, sessionId, seenSeq)
+      // 会话日志的 assistant/message 可能晚于 status 变 idle 落盘：重试到拿到文本或超时
+      let fromLog = assistantAfterSeq(deps.dataRoot, sessionId, seenSeq)
+      for (let i = 0; i < 30 && buf.length === 0 && fromLog.text === ''; i++) {
+        await new Promise((r) => setTimeout(r, 100))
+        fromLog = assistantAfterSeq(deps.dataRoot, sessionId, seenSeq)
+      }
       seenSeq = fromLog.seq
       const text = buf.join('') || fromLog.text
       replies.push(text)
