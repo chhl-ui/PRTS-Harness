@@ -9,6 +9,7 @@ export type LedgerErrorCode =
   | 'EVIDENCE_MISSING'
   | 'CHAIN_BROKEN'
   | 'BUDGET_EXCEEDED'
+  | 'TASK_LIMIT'
   | 'READ_ONLY'
   | 'INVALID_INPUT'
 

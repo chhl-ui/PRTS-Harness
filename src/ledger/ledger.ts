@@ -117,6 +117,9 @@ const MODEL_OPS = new Set([
   'claimDone', 'block', 'unblock', 'pause', 'resume',
 ])
 
+/** 模型侧未结任务上限（draft / active / paused / blocked）。owner 通道不受限。 */
+const MODEL_TASK_LIMIT = 4
+
 const OWNER: Actor = { kind: 'owner' }
 const VERIFIER: Actor = { kind: 'system', component: 'verifier' }
 const BUDGET: Actor = { kind: 'system', component: 'budget' }
@@ -420,6 +423,17 @@ export class Ledger {
     Ledger.checkBudget(input.budget)
     const id = `task-${randomUUID()}` as TaskId
     return this.tx(() => {
+      // 并发上限只约束模型入口：模型建的任务停在 draft 等批准，不设上限会被每个会话
+      // 灌一条死 draft。计数必须在事务内——放在 tx 外是读→写，并发下必然漏判。
+      // owner 通道不受限：博士正在推进的工作不能被账本策略挡住。
+      if (actor.kind === 'model') {
+        const row = this.db
+          .prepare("SELECT COUNT(*) AS c FROM tasks WHERE phase NOT IN ('done','cancelled','stopped-by-owner')")
+          .get() as { c: number }
+        if (row.c >= MODEL_TASK_LIMIT) {
+          raise('TASK_LIMIT', `model may hold at most ${MODEL_TASK_LIMIT} unfinished tasks (current ${row.c})`)
+        }
+      }
       this.appendEvent(id, 1, 'task.created', actor, {
         title: input.title,
         objective: input.objective,
