@@ -1,2 +1,4 @@
 node_modules/
 *.log
+# 一次性诊断探针：不参与 npm test（glob 是 test/**/*.test.ts），不进版本库
+.scratch/
