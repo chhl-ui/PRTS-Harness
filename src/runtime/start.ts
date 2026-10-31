@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import type { Context } from '@deepseek-ai/cordis'
+import { attachErrorReporter } from './error-report.ts'
 
 export interface StartRuntimeOptions {
   configPath: string
@@ -58,6 +59,15 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
           : undefined,
     })
   })
+  // turn 内失败只经 agent/error 上报：dsh-agent-loop 的 throwError() emit 后 throw，
+  // kick() 的 catch 吞掉异常传播。不订阅则失败完全静默。
+  const detachErrorReporter = attachErrorReporter(ctx)
   if (ctx.get('loader') !== undefined) appReady.commit()
-  return { ctx, dispose: async () => { await ctx.fiber.dispose() } }
+  return {
+    ctx,
+    dispose: async () => {
+      detachErrorReporter()
+      await ctx.fiber.dispose()
+    },
+  }
 }

@@ -67,6 +67,8 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 - 测试支撑（test/）：`scripted-llm.ts` 按脚本应答的 llm adapter（registerAdapter(['deepseek-official'],a)）；`drive.ts` runTurn 发 followup 等 idle。**事件订阅走 `ctx.events.on`，`ctx.on` 是生命周期钩子**；boot() 返回 Runtime 包装对象，Context 经 `ctx.get('agents')`/`ctx.events` 取用。
 - 会话持久化落在 `<dataRoot>/dsh-home/sessions/--<cwd>--/<sessionId>/session.v4.jsonl`。
 - `ctx.jobs` 作业接口：`start(spec)` 需先 `attachController(name)`；`JobSpec={kind,label,owner?,run(job):JobHooks}`，`JobHooks={cancel(reason?),done:Promise<JobOutcome>}`（done 必须 resolve 不能 reject）；`kill(id,caller?,reason?)`、`wait(id,ms)` 按 JobId 操作，`list()` 返回视图（无 kill 方法）。
-- `agent.cancel({kind:'user'})` 同步方法；`agent.whenIdle()` 等回合收敛；turn 内错误被 kick 吞掉不出现在 agent/error。
+- `agent.cancel({kind:'user'})` 同步方法；`agent.whenIdle()` 等回合收敛；回合内错误只经 `throwError()`（`dsh-agent-loop` 0.2.1-rc.2 `lib/index.js:877-886`：先 `emit('agent/error')`（:880）再 `throw`）上报；`kick()`（:887）的 `catch {}` 随后吞掉异常，所以不经 `throwError` 的抛出既无 emit 也无外部迹象（`unhandledRejection` 也不会响）。要拿错误**必须订阅 `agent/error`**，不能依赖异常传播。
+- `agent.followup/steer/inject` 的入参必须是 `createUserMessage()` 等 `createMessage` 系列的结果（`dsh-llm` 0.2.1-rc.2 `lib/index.js:37-43` 补 `id`，`:59-64` 补 `role:'user'`）；三者本身不归一化入参（`dsh-agent-loop/lib/index.js:803` 原样 `inbox.splice`，:806/:809/:812 只转 target+wakeup）。传裸 `{content,source}` 缺 `role`/`id` → `serialize()`（`dsh-llm-deepseek/lib/index.js:1590`，由 `request()` :2190 调用）抛 TypeError，被 `generate()` 的 catch 包成 `LlmError(code:'TRANSPORT')`（:2156）——报错码指向传输，实为入参结构不合法。
+- 上述行号按 `dsh-agent-loop`/`dsh-llm`/`dsh-llm-deepseek` 0.2.1-rc.2 实测；升级 RC 后行号会漂，以符号名（`throwError`/`kick`/`createUserMessage`/`serialize`/`TRANSPORT`）为准重核。
 - credentials `resolve(ref)`：`credentialRef()` 返回品牌字符串（ref 即 'DEEPSEEK_API_KEY'）；适配器取 `hit.value`；DeepSeek 请求头是 `x-api-key`（无 Authorization）。
 - llm 消息 `content` 是块数组 `[{type:'text',text}]`；`baseURL` 经 patch `config:{baseURL}` 可指向假端点（请求路径 `/v1/messages`）。

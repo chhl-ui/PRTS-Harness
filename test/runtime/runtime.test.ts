@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execSync, spawnSync } from 'node:child_process'
 import { startRuntime } from '../../src/runtime/start.ts'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { scriptedLlmPlugin } from '../support/scripted-llm.ts'
 import type { ScriptedStep } from '../support/scripted-llm.ts'
 import { runTurn } from '../support/drive.ts'
@@ -60,17 +61,21 @@ test('R2+网络对照：pwsh 沙箱写区内 OK/区外拒 + LanguageMode + TLS �
     const { events } = await runTurn(app.ctx as Context, 'run commands', { cwd: app.workspace })
     assert.ok(existsSync(wsFile), '工作区文件未写')
     assert.equal(existsSync(outside), false, '沙箱外文件竟然被写了')
-    // LanguageMode：从会话 JSONL 里找 pwsh 工具结果
+    // LanguageMode：从会话 JSONL 里找 pwsh 工具结果。
+    // 等待条件必须是「LanguageMode 已落盘」，不能是「出现任意 tool/result」——脚本化回合有
+    // 5 个步骤、3 个 pwsh 调用，第一条结果落盘就 break 会读到还没写完的 transcript，
+    // 使下面的 match() 取到 undefined（实测四次两红两绿即由此而来）。
     const sessDir = join(app.dataRoot, 'dsh-home', 'sessions')
     let transcript = ''
     for (let i = 0; i < 40; i++) {
+      transcript = ''
       if (existsSync(sessDir)) {
         for (const f of readdirSync(sessDir, { recursive: true }) as string[]) {
           const p = join(sessDir, f)
           try { transcript += readFileSync(p, 'utf8') } catch { /* dir entry */ }
         }
       }
-      if (transcript.includes('tool/result')) break
+      if (/(FullLanguage|ConstrainedLanguage)/.test(transcript)) break
       await new Promise(r => setTimeout(r, 250))
     }
     const lang = transcript.match(/(FullLanguage|ConstrainedLanguage)/)?.[0]
@@ -208,7 +213,7 @@ test('R5: killAllJobs 杀后台作业+子进程；cancelAllTurns 中断挂起轮
     const { agent } = await (ctx.get('agents') as never as { create(o: object): Promise<{ agent: { status: string; followup(m: object): void; whenIdle(): Promise<void> } }> })
       .create({ sessionId: 'r5-hang', meta: { cwd: app.workspace }, agentOptions: { provider: 'deepseek-official', model: 'fake-1' } })
     console.log('[R5] followup sent')
-    agent.followup({ content: [{ type: 'text', text: 'sleep' }], source: { kind: 'user' } })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'sleep' }], source: { kind: 'user' } }))
     await new Promise(r => setTimeout(r, 1200))
     console.log('[R5] status after 1.2s:', agent.status)
     assert.equal(agent.status, 'running', '挂起轮次未进入 running')
@@ -249,7 +254,9 @@ test('R6: credentials resolve 真形——假端点收到 x-api-key/test-key-123
       credentials: { DEEPSEEK_API_KEY: 'test-key-123' },
       patches: [{ id: 'llm-deepseek', config: { baseURL: `http://127.0.0.1:${port}/` } }],
     })
-    const llm = (app.ctx as Context).get('llm') as { stream(o: object): Promise<AsyncIterable<unknown> | { iterable: AsyncIterable<unknown> }> }
+    // 本文件直引 '@deepseek-ai/dsh-llm'（createUserMessage）后，Context.get('llm') 的
+    // module augmentation 生效，返回类型变成 LlmRuntime | undefined；此处的窄化替身须经 unknown。
+    const llm = (app.ctx as Context).get('llm') as unknown as { stream(o: object): Promise<AsyncIterable<unknown> | { iterable: AsyncIterable<unknown> }> }
     const stream = await llm.stream({ provider: 'deepseek-official', model: 'deepseek-chat', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] })
     for await (const c of (('iterable' in (stream as never as { iterable: object }) ? (stream as never as { iterable: AsyncIterable<unknown> }).iterable : stream) as AsyncIterable<unknown>)) void c
     const key = (captured['x-api-key'] ?? captured['authorization'] ?? '') as string

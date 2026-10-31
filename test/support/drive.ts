@@ -1,5 +1,6 @@
 /** 测试驱动：发一条用户消息并等 agent 回到 idle。 */
 import { randomUUID } from 'node:crypto'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 
 export async function runTurn(ctx: Context, text: string, opts: { cwd: string; sessionId?: string }): Promise<{ events: unknown[]; final: unknown }> {
@@ -21,10 +22,10 @@ export async function runTurn(ctx: Context, text: string, opts: { cwd: string; s
     agentOptions: { provider: 'deepseek-official', model: 'fake-1' },
   } as never)
   const idle = waitIdle(agent, 30000)
-  agent.followup({
+  agent.followup(createUserMessage({
     content: [{ type: 'text', text }],
     source: { kind: 'user' },
-  } as never)
+  }))
   const final = await idle
   return { events, final }
 }
