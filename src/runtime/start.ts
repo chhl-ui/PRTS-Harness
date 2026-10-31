@@ -122,6 +122,48 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
     }
   })
 
+  // W3：回合记账。订阅 tools/result（emit 型，与 guard 同一条已验证可用的路径）。
+  //
+  // 已知权衡：begin/end 背靠背写，不留 started 中间态，所以 recoverOnStartup 不会
+  // 看到本进程的孤儿 step。挂 tools/execute（waterfall，需 ctx.on 而非 events.on）
+  // 能保留 started 态，但那套订阅方式尚未实测，留作改进项——记账正确性优先于
+  // 崩溃观测粒度。
+  //
+  // 记账失败绝不否决工具执行：钩子内全程 try/catch，失败只写 stderr。
+  const stepNumbers = new Map<string, number>()
+  const events = (ctx as unknown as {
+    events?: { on(name: string, fn: (...args: never[]) => void): () => void }
+  }).events
+  const offToolResult = events?.on('tools/result', ((execution: unknown, result: unknown) => {
+    try {
+      const exec = execution as {
+        readonly callId: unknown
+        readonly name: string
+        readonly agent?: { session?: { id?: string } }
+      }
+      const sessionId = exec.agent?.session?.id
+      if (sessionId === undefined || sessionId === '') return
+      const task = ledger.taskForSession(sessionId)
+      if (task === undefined) return
+      // stepNo 用进程内缓存，首次从投影里的已完成数推得。这是可重建的缓存，不是事实。
+      const next = stepNumbers.get(task.id) ?? ledger.steps(task.id).length
+      const stepNo = next + 1
+      stepNumbers.set(task.id, stepNo)
+      const actor = { kind: 'model' as const, sessionId }
+      ledger.beginStep(actor, task.id, {
+        stepNo,
+        name: exec.name,
+        idempotent: false,
+        toolCallRef: String(exec.callId),
+      })
+      ledger.endStep(actor, task.id, stepNo, {
+        status: (result as { isError?: boolean }).isError === true ? 'failed' : 'succeeded',
+      })
+    } catch (error) {
+      console.error(`[prts] ledger step record failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }) as never)
+
   // turn 内失败只经 agent/error 上报：dsh-agent-loop 的 throwError() emit 后 throw，
   // kick() 的 catch 吞掉异常传播。不订阅则失败完全静默。
   const detachErrorReporter = attachErrorReporter(ctx)
@@ -131,6 +173,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
     ledger,
     dispose: async () => {
       detachGuard()
+      offToolResult?.()
       // Ledger 与 Authority 各自持有 sqlite 连接，都不由 ctx 生命周期管理；
       // 不关会在 Windows 上锁住文件，临时目录清理报 EPERM。
       ledger.close()
