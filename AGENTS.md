@@ -75,3 +75,13 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 - 上述行号按 `dsh-agent-loop`/`dsh-llm`/`dsh-llm-deepseek` 0.2.1-rc.2 实测；升级 RC 后行号会漂，以符号名（`throwError`/`kick`/`createUserMessage`/`serialize`/`TRANSPORT`）为准重核。
 - credentials `resolve(ref)`：`credentialRef()` 返回品牌字符串（ref 即 'DEEPSEEK_API_KEY'）；适配器取 `hit.value`；DeepSeek 请求头是 `x-api-key`（无 Authorization）。
 - llm 消息 `content` 是块数组 `[{type:'text',text}]`；`baseURL` 经 patch `config:{baseURL}` 可指向假端点（请求路径 `/v1/messages`）。
+
+## 外部参考与选型
+
+实现本项目没有的能力、或做技术选型前，先检索 GitHub（repo 看有没有、code 看怎么实现、issue 看坑）与论文（arXiv / Papers with Code，优先选有开源实现的），评估许可证、活性、真实度、契合度、代价，结论必须是「复用 / 适配 / 借鉴设计 / 自建」四选一并写理由。
+
+归档到 `C:\Users\Administrator\Desktop\参考库\<项目名>`，记录来源 URL 与**固定 commit**（不是分支名）；归档目录只读，不当依赖 import。已有 10 个条目，新增前先看有没有重复（清单见文档）。
+
+引用外部结论前，必须在本仓用 grep / read_file 核实该断言成立——「README 说支持」不等于「已实现」，「文档没提」不等于「没做」。归档 ≠ 采纳。
+
+完整规则：`docs/external-reference-research.md`。
