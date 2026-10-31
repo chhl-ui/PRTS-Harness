@@ -6,6 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { attachErrorReporter } from './error-report.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { Ledger } from '../ledger/index.ts'
+import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
 
 export interface StartRuntimeOptions {
@@ -203,10 +204,24 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
   //
   // 记账失败绝不否决工具执行：钩子内全程 try/catch，失败只写 stderr。
   const stepNumbers = new Map<string, number>()
+  /** callId → 本进程已 begin 的 step；被守卫拒绝的调用不会进这张表。 */
+  const startedSteps = new Map<string, { taskId: TaskId; stepNo: number }>()
   const events = (ctx as unknown as {
     events?: { on(name: string, fn: (...args: never[]) => void): () => void }
   }).events
-  const offToolResult = events?.on('tools/result', ((execution: unknown, result: unknown) => {
+
+  // U4：beginStep 挂 tools/execute——waterfall 型，位置在 guards 之后、工具真正执行之前
+  // （dsh-tools/lib/index.js:3427 晚于 :3337 的 guardReason）。
+  //
+  // 比原来「begin/end 都挂 tools/result 背靠背」多保留一个 started 中间态：
+  // 进程在工具执行中途崩溃时，账本里留着孤儿 step，recoverOnStartup 才看得见它。
+  // 代价：被守卫拒绝的调用走不到 execute，因此不再产生 step——这是更准确的语义，
+  // 拒绝不是「执行失败」，它压根没执行。
+  //
+  // 必须调 next()：cordis 的 waterfall 里不调 next 会 veto 整条链（cordis/lib/index.js:310-316）。
+  const offToolExecute = (ctx as unknown as {
+    on(name: string, fn: (exec: unknown, next: () => unknown) => unknown): () => void
+  }).on('tools/execute', async (execution: unknown, next: () => unknown) => {
     try {
       const exec = execution as {
         readonly callId: unknown
@@ -214,25 +229,46 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
         readonly agent?: { session?: { id?: string } }
       }
       const sessionId = exec.agent?.session?.id
-      if (sessionId === undefined || sessionId === '') return
-      const task = ledger.taskForSession(sessionId)
-      if (task === undefined) return
-      // stepNo 用进程内缓存，首次从投影里的已完成数推得。这是可重建的缓存，不是事实。
-      const next = stepNumbers.get(task.id) ?? ledger.steps(task.id).length
-      const stepNo = next + 1
-      stepNumbers.set(task.id, stepNo)
-      const actor = { kind: 'model' as const, sessionId }
-      ledger.beginStep(actor, task.id, {
-        stepNo,
-        name: exec.name,
-        idempotent: false,
-        toolCallRef: String(exec.callId),
-      })
-      ledger.endStep(actor, task.id, stepNo, {
+      if (sessionId !== undefined && sessionId !== '') {
+        const task = ledger.taskForSession(sessionId)
+        if (task !== undefined) {
+          // stepNo 用进程内缓存，首次从投影里的已完成数推得。这是可重建的缓存，不是事实。
+          const nextNo = stepNumbers.get(task.id) ?? ledger.steps(task.id).length
+          const stepNo = nextNo + 1
+          stepNumbers.set(task.id, stepNo)
+          ledger.beginStep({ kind: 'model' as const, sessionId }, task.id, {
+            stepNo,
+            name: exec.name,
+            idempotent: false,
+            toolCallRef: String(exec.callId),
+          })
+          startedSteps.set(String(exec.callId), { taskId: task.id, stepNo })
+        }
+      }
+    } catch (error) {
+      // 记账失败绝不否决工具执行——记账失败是缺陷，否决执行是事故。
+      console.error(`[prts] ledger beginStep failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return next()
+  })
+
+  // U4：endStep 仍挂 tools/result（emit 型），但只收尾本进程 begin 过的调用。
+  const offToolResult = events?.on('tools/result', ((execution: unknown, result: unknown) => {
+    try {
+      const exec = execution as {
+        readonly callId: unknown
+        readonly agent?: { session?: { id?: string } }
+      }
+      const key = String(exec.callId)
+      const started = startedSteps.get(key)
+      if (started === undefined) return
+      startedSteps.delete(key)
+      const sessionId = exec.agent?.session?.id ?? ''
+      ledger.endStep({ kind: 'model' as const, sessionId }, started.taskId, started.stepNo, {
         status: (result as { isError?: boolean }).isError === true ? 'failed' : 'succeeded',
       })
     } catch (error) {
-      console.error(`[prts] ledger step record failed: ${error instanceof Error ? error.message : String(error)}`)
+      console.error(`[prts] ledger endStep failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }) as never)
 
@@ -295,6 +331,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{ ctx: Conte
     dispose: async () => {
       detachGuard()
       offPreExecute()
+      offToolExecute()
       offToolResult?.()
       offTaskTool()
       // Ledger 与 Authority 各自持有 sqlite 连接，都不由 ctx 生命周期管理；

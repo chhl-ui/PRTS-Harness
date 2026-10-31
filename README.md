@@ -9,7 +9,7 @@ PRTS 受保护核心：任务账本、授权、停止、审计、启动完整性
 
 ```sh
 npm install       # 依赖：@deepseek-ai/dsh-* 0.2.1-rc.2（RC 版本，升级需复验接口）
-npm test          # node --test，89 例，约 33 秒
+npm test          # node --test，90 例，约 33 秒
 npm run typecheck # tsc -p .（strict + noEmit + erasableSyntaxOnly）
 npm run chat      # 所有者终端：进程内 REPL（需下面三个环境变量）
 ```
@@ -37,7 +37,7 @@ src/
   cli/          prts upgrade（清单只能经它修改）
   runtime/      K6 运行时入口 main.ts + start.ts（boot 组合 + 内存 credentials）
 config/prts.yml 组合树（sdk-minimal 展开，自 sdk-app/jsonrpc 与账户链中剥离）
-test/           89 例；test/support/ 是驱动、脚本化模型替身、临时目录
+test/           90 例；test/support/ 是驱动、脚本化模型替身、临时目录
 .scratch/       一次性诊断探针（gitignore，不参与测试）
 ```
 
@@ -57,6 +57,7 @@ test/           89 例；test/support/ 是驱动、脚本化模型替身、临�
 - O1 已修（2026-10-31）：驱动路径改用 `createUserMessage()` 构造消息，真实适配器经 agent 轮次能发出请求；回归见 `test/runtime/o1-real-adapter.test.ts`。
 - **E1 已通（2026-10-31）**：真实 key、真实 `api.deepseek.com`、出厂默认配置（`reasoningEffort` 缺省 = `high`，未改 `config/prts.yml`），连跑 4 次全部成功，`assistant/message` 含 `reasoning` + `text` 块，`turn/end` 为 `completed`，单次约 1580ms，`agent/error` 0 条。thinking block 被正确映射为 `reasoning`，不需要关掉推理。
 - **`prts chat` 已流式输出（2026-10-31）**：`agent/assistant-stream` 的 payload 是 `{ frame: AssistantStreamFrame }`（`dsh-agent/lib/types/runtime-types.d.ts:107-140`，事件声明 `:366-369`）；可见文本只在 `frame.type === 'chunk'` 且 `frame.chunk.type === 'text-delta'` 的 `chunk.text` 里（`dsh-llm/lib/types/types.d.ts:434-441`，emit 站点 `dsh-agent-loop/lib/index.js:1080`）。`src/cli/chat.ts` 按此契约取增量、逐片写终端；真实 key 实测首片比回合结束早约 250ms 到达。某 provider 只发完整 block 不发 `text-delta` 时，仍走 `<dataRoot>/dsh-home/sessions/**` 的 `assistant/message` 兜底——两条路径互斥，不会重复。
+- **U4：step 现在有 started 中间态（2026-10-31）**：`beginStep` 从 `tools/result` 挪到 `tools/execute`（waterfall，位置在 guards 之后、工具真正执行之前——`dsh-tools/lib/index.js:3427` 晚于 `:3337` 的 guardReason），`endStep` 仍在 `tools/result`。收益是进程在工具执行中途崩溃时账本里留着孤儿 step，`recoverOnStartup` 才看得见；代价是被守卫拒绝的调用不再产生 step——拒绝不是「执行失败」，它压根没执行。回归见 `test/runtime/ledger-startstep.test.ts`。
 - Devin 留下的孤儿脚本 `enum-tools.ts` 已移入 `.scratch\`（一次性探针，不参与测试）。
 
 ## 已知缺陷
