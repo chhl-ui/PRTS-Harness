@@ -55,6 +55,18 @@ GitHub 三条路分工不同：
 | 记忆与检索 | `hindsight` `mempalace` `codebase-memory-mcp` |
 | 其他 | `ECC` `hallmark` `Understand-Anything` |
 
+记忆与检索那一组已做过代码级对账（2026-11-01，对照架构需求 §5.3 的十三项），
+逐格证据与判定在 `docs/memory-landscape.md`。三家结论：
+
+| 目录 | 四选一 | 理由 |
+|---|---|---|
+| `hindsight` | 借鉴设计 | 写时结构化 + 后台巩固 + 结构化库上的四路召回，是 §5.3 最接近的实现样本；但强绑 PostgreSQL（pgvector / JSONB / `db_url.py` 拒绝非 PG），与 TS + `node:sqlite` 的部署假设不兼容 |
+| `mempalace` | 借鉴设计 | wings/rooms 分层作用域、协议层「回答前先查」、删除连带清派生索引三项可用；强制 `chromadb` 依赖；README 自称「不做摘要/抽取」与代码冲突（`general_extractor.py` 存在） |
+| `codebase-memory-mcp` | 不适用 | 代码库结构记忆。`nodes` DDL 无自由文本列、无主体列、无事实时间列，填不了 §5.3 任何一格 |
+
+对账同时确认四格零覆盖：关系记忆、技能与经验、意图库、「明说 vs 推断」的 provenance。
+前两格还有候选没拉（Letta、Generative Agents），后两格在架构需求 §9 的候选表里没有对应条目，判为自建。
+
 ## 引用纪律
 
 - 引用外部结论前，用 grep / read_file 独立核实该断言在当前代码库里成立
