@@ -1,6 +1,6 @@
 # PRTS 记忆第一版设计决定
 
-状态：v2.1，经议事会四席评审后修订，并于 2026-11-01 二次收束。对应架构需求 §5.2 / §5.3，验收 V1-06 / V1-15 / V1-17。
+状态：v2.2，经议事会四席评审后修订，2026-11-01 二次收束并定下四条待决（删除路线 D、DeepSeek 判分、基准落位、T04/T05 不适用）。对应架构需求 §5.2 / §5.3，验收 V1-06 / V1-15 / V1-17。
 
 **这是设计决定，不是实现计划。**
 
@@ -260,6 +260,10 @@ CREATE TABLE mem_facts (
   provenance     TEXT NOT NULL,   -- 'stated' | 'inferred'
   origin         TEXT NOT NULL,   -- 'live' | 'benchmark'
   confidence     REAL,
+  revision       INTEGER NOT NULL DEFAULT 1,        -- 每次事实变更递增（DESIGN.md §5）
+  confirmation_basis TEXT NOT NULL,                 -- owner-stated | model-inferred | verifier
+  applicable_when TEXT,                             -- 适用条件，可空
+  retention_class TEXT NOT NULL DEFAULT 'clearable',-- permanent | retirable | clearable（对应 §9 三档）
   source_turn_ids TEXT,           -- JSON 数组
   importance     REAL DEFAULT 0.5,
   retired_at_ms  INTEGER,
@@ -481,11 +485,38 @@ V1-06 要求「删除 3 条，经核实全部生效，索引与摘要中也不�
 
 先跑 **LongMemEval `_oracle`**——只含证据会话，规模最小（500 题、单会话历史），是最便宜的首次基线。
 
-**三条前置未决，缺一条基线就不可执行**：
+**判分：已改为 DeepSeek（博士 2026-11-01 决定）。**
 
-1. **`locomo10.json` 不在仓库**（本文的数据是 curl 下载到临时目录后实测的）。跑 LoCoMo 需先确定数据放哪、是否入库。
-2. **判分需 `OPENAI_API_KEY`**。没有 key 就没有基线。
-3. **基准版本未锁定**。LongMemEval 有 2025-09 的 cleaned 版与多个数据文件；架构需求 §11 第 13 条自陈这些基准属「未经审读的资料级引用」。**基线数字要可复现，必须先锁 commit 或数据集版本号。**
+判分脚本 `scripts\eval-longmemeval.py`，零第三方依赖（标准库直调 OpenAI 兼容端点；本机没装 `openai`/`backoff`，也不打算装）。与原脚本的差异只有三处：
+
+| 项 | 原实现 | PRTS |
+|---|---|---|
+| 端点 | OpenAI / 本地 vLLM | `https://api.deepseek.com/v1` |
+| 判分模型 | gpt-4o | **`deepseek-reasoner`**（默认） |
+| prompt 模板 | — | **逐字未改**（改了就不是同一个基准） |
+
+**「自己判自己」的偏差怎么处理**：被测模型是 `deepseek-chat`，判分用 `deepseek-reasoner`——同供应商、不同模型。偏差比同模型小，但不为零。三条措施：
+
+1. 每条记录写 `judged_by`，基线数字必须带着它一起引用：「V1-17 基线 0.72（judged_by=deepseek-reasoner）」才是完整陈述。
+2. `--sample` 控制题数，`--dry-run` 不花钱。
+3. 人工抽样复核留待基线出来后再做——**本脚本不能消除偏差，只能让它可追溯。**
+
+**实测（2026-11-01）：4 题对照，全部判对。**
+
+| 用例 | 预期 | 实际 |
+|---|---|---|
+| 正确答案 | yes | YES ✓ |
+| 故意答「I do not know」 | no | no ✓ |
+| abstention 题正确识别为不可答 | yes | YES ✓ |
+| 另一道正确答案 | yes | YES ✓ |
+
+Accuracy 0.75（4 题 3 对），与构造时的预期一致。**这是判分器行为验证，不是基线成绩。**
+
+**数据落位（已定）**：`C:\prts-benchmark\<dataset>\`——**独立的根，不在 `protectedRoots` 也不在 `workspaceRoots` 内**，理由与 spill 根相同：基准数据含标准答案，模型 shell 不能读到。
+
+**版本锁定**：`longmemeval_oracle.json` 实测 **15,388,478 字节**，500 题，6 种 `question_type`（temporal-reasoning 133 / multi-session 133 / knowledge-update 78 / single-session-user 70 / single-session-assistant 56 / single-session-preference 30），abstention 30 题。**基线数字必须与这个字节数一起记录**——架构需求 §11 第 13 条自陈基准属「未经审读的资料级引用」，不锁版本就不可复现。
+
+**仍未解决**：`locomo10.json` 未落位（本文的数据是 curl 到临时目录后实测的，2,805,274 字节）。
 
 基线数字出来之前，不宣称任何召回质量。
 
@@ -503,15 +534,15 @@ V1-06 要求「删除 3 条，经核实全部生效，索引与摘要中也不�
 | # | 项 | 性质 |
 |---|---|---|
 | 1 | ~~`DESIGN.md` 缺席~~ **已解决（2026-11-01）** | 文件在 `C:\Users\Administrator\Desktop\error\PRTS-弃案文档-2026-10-31\DESIGN.md`（33,743 字节，16 章）。`§5`/`§9`/`§10` 与架构需求 L26/L235/L267 引用逐一吻合。状态是「归档但有效」。**已移回 `设计和计划\`（2026-11-01），逐条处置见同目录 `PRTS-DESIGN-03-CONTRACTS-2026-11-01.md`** |
-| 2 | 删除路线选 D 还是 D'（SQLite 表 vs 文件外置） | 需博士拍板；D' 才真正物理不可恢复 |
-| 3 | 判分用 OpenAI 还是 DeepSeek 改写 | 需博士拍板；后者有「自己判自己」偏差 |
-| 4 | 基准版本锁定与数据入库位置 | 未定；不定则 V1-17 基线不可复现 |
+| 2 | ~~删除路线选 D 还是 D'~~ **已定（2026-11-01）：走 D** | `mem_bodies` 表外置正文，删除置 NULL。理由：V1-06 的 10 条规模用 D 足够；D' 会把事务边界从单库扩到「库 + 文件系统」，代价超过收益。**D 的边界已写在 §7.2**：自由页残留需 VACUUM，不等于物理不可恢复。要真正不可恢复时升级 D' |
+| 3 | ~~判分用 OpenAI 还是 DeepSeek 改写~~ **已定（2026-11-01）：DeepSeek** | 脚本 `scripts\eval-longmemeval.py` 已落盘并实测（4 题对照全判对）。判分用 `deepseek-reasoner` 与被测 `deepseek-chat` 区分；`judged_by` 写进每条记录。已知偏差见 §9.3 |
+| 4 | ~~基准版本锁定与数据入库位置~~ **已定（2026-11-01）** | 数据落 `C:\prts-benchmark\<dataset>\`（独立根，不入 protectedRoots / workspaceRoots）。`longmemeval_oracle.json` 已下载并锁定 **15,388,478 字节 / 500 题**；基线数字必须与字节数一起记录 |
 | 5 | `LIKE` 全表扫描的规模上限 | 未定；数据量上去后需换后端并重测基线 |
 | 6 | `retired` / `deleted` 的保留期与清理策略 | 未定；参考 spill 的单会话上界思路 |
 | 7 | 关系记忆 / 技能经验 / 意图库 / 关联图 | 各自立项 |
 | 8 | Letta / Generative Agents / Graphiti 三个补拉 | `memory-landscape.md` §五 已排，本文不阻塞 |
-| 9 | `DESIGN.md` §5 的字段清单有 4 列未落表：`revision` / `确认依据` / `适用条件` / `保留类别` | **实现前必补**（`PRTS-DESIGN-03-CONTRACTS` §7 第 1 条查出） |
-| 10 | `DESIGN.md` T04/T05（跨项目越权读取、scope 碰撞）在 V1 表里无对应验收 | 需博士定：补进 V1，还是明确「第一版不验越权」 |
+| 9 | `DESIGN.md` §5 的 4 列未落表 | **解法已定（2026-11-01），落码时补**：`revision`（与 K1 同构，每次事实变更递增）、`确认依据`（`owner-stated` / `model-inferred` / `verifier`）、`适用条件`（可空文本，事实成立的前提）、`保留类别`（`permanent` / `retirable` / `clearable`，对应 §9 三档） |
+| 10 | ~~`DESIGN.md` T04/T05 在 V1 表里无对应~~ **已定为「第一版不适用」** | 理由不是跳过安全：**第一版 `scope` 固定 `'prts'` 单值，不存在跨项目对象**，T04/T05 没有测试对象。到两人格隔离（§5.1）引入多 scope 时启用。**在那之前，「第一版无越权面」这句话必须与「scope 单值」这个前提一起说，不能单独说** |
 
 ## 十二、议事会意见与处置
 
