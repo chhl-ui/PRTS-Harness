@@ -65,6 +65,7 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   - **判据**：不要用「宿主直 spawn」的探针去证明「模型能用」，那测的是宿主的能力，模型走的是容器内 pwsh 那条路。写探针时必须让 pwsh 去执行目标程序。
   - **修法（已验证 2026-11-01）**：用管理员权限对这两处做一次 AppContainer SID 的读授权，脚本 `scripts/grant-sandbox-read.ps1`（未提权时只打印 SID 与待执行命令，不改动）。授权后容器内实测：`where node` → `C:\Program Files\nodejs\node.exe`、`node --version` → `v24.19.0`、`git --version` → `2.55.0.windows.4`；真机 `prts chat` 里模型自己跑出的结果相同。
   - **结论随之修正**：appcontainer 现在 **shell 与 node/git 都能跑**，「shell 能用但干不了活」不再是它的缺陷。默认后端要不要切过去是决策问题，不再是能力性阻塞。
+- **横向对比见 `docs/harness-sandbox-comparison.md`**：Codex / NanoClaw / pi / goose / DSH / PRTS 六家在「Windows 上怎么给模型 shell」这件事上的取舍。结论：Windows 上默认不开沙箱是业界常态（Codex 这么重的实现也默认 `Disabled`）；PRTS 与 NanoClaw 同走「白名单而非黑名单」这条路，方向没偏。
 - **依赖 koffi**（`^3.3.6`）。它是原生模块，install 时有预编译下载脚本——**新机器上 `npm ci` 若被 `allow-scripts` 拦下，koffi 的二进制不会就位，`require('koffi')` 会失败**。这是部署约束，不是代码缺陷。
 - **实现要点（踩过的坑，别重踩）**：
   - `DWORD_PTR`（UpdateProcThreadAttribute 的 attr 参数）是 64 位，传 Number 会被 koffi 拒，必须 `BigInt`；`lpReturnSize` 可传 `NULL`。
