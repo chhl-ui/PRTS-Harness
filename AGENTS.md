@@ -50,7 +50,19 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   - **stdio 合并捕获**：stdout 与 stderr 走**同一个**管道。分开读两个管道时，若子进程写满其中一个（64KB）而父进程正在读另一个，写端阻塞、读端等 EOF——双死锁。合并后单一读端，读到 EOF 即结束。`wait()` 返回 `{ exitCode, output }`，`output` 是两者合并的文本。**不要为了「区分 stderr」改成两个管道**，除非同时实现异步并发读。
   - **读必须先于等**：`wait()` 里先 `drainPipe` 再 `WaitForSingleObject`。反过来「先等子进程退出再读」会在输出超过管道缓冲时死锁。父进程的写端必须在 `CreateProcessW` 之后立刻关闭，否则读端永远等不到 EOF。
   - 授权走 `icacls` 子进程而非手写 `SetNamedSecurityInfo`（后者有「pSacl 要 ACL 指针而不是整个 SD」的坑）。
-  - **尚未接线到运行时**：`createAppContainer` 目前是独立可用的库，PRTS 的 shell 工具还没有走它。接线需要决定「哪些命令进容器、输出如何回传」，是下一步。
+  - **尚未接线到运行时**：`createAppContainer` 目前是独立可用的库，PRTS 的 shell 工具还没有走它。
+- **接线形态：必须是 runner，不能直接接 `SandboxProvider`**（2026-11-01 查证）：
+  `dsh-sandbox` 的 `SandboxProvider.confine()` 返回 `ConfinedArgv`，其 `argv` 是
+  「runner + profile + 分隔符 + 调用方 argv」，由上层用普通 `child_process` 启动
+  （`node_modules/@deepseek-ai/dsh-sandbox/lib/types/index.d.ts:79-112`）。
+  AppContainer 不是 argv 包装——它要在父进程里 `CreateProcessW` 并传
+  `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`，没法表达成一段 argv。
+  所以要接入 DSH，得写一个 **runner 可执行**：`[ac-runner, --profile X, --workspace W, --, cmd.exe, /c, ...]`，
+  由 runner 内部建容器、起子进程、转发 stdio、透传退出码。**绕过 DSH 自己重写 shell 工具是另一条路，但会丢掉持久 shell 与既有沙箱策略，不推荐。**
+- **容器生命周期（实测支撑）**：空工作区上 `create` 中位 9.8ms、`spawn+wait` 6.5ms、`dispose` 7.3ms
+  （`.scratch/probe-ac-cost.mjs`）。建容器本身很便宜，**但 `icacls (OI)(CI)` 是递归的**——
+  大工作区的授权会随树规模增长（`dsh-sandbox-windows-acl` README 记着「tens of seconds on large workspace trees」）。
+  所以 runner 要么复用已建的 profile + 已授权的 ACL，要么在授权前先判断 ACL 里是否已有该 SID，别每次全树走一遍。
 
 ### 所有者通道（P2）：管道、双通道输出、断开语义、E10
 
