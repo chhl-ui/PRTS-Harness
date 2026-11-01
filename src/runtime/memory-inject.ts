@@ -77,8 +77,14 @@ function formatTime(hit: MemoryHit): string {
   return new Date(hit.occurredAtMs).toISOString()
 }
 
-/** 注入正文。必须自报来源，否则模型会把它当成用户这一轮说的话。 */
-function render(hits: MemoryHit[]): string {
+/**
+ * 注入正文。必须自报来源，否则模型会把它当成用户这一轮说的话。
+ *
+ * 导出是给评测用的：离线探针必须喂**与生产完全相同**的文本，否则判分口径会漂——
+ * 实测过一次（同一批题，带前缀的注入文本判 14/20，裸命中列表判 7/20），
+ * 差 7 题全在格式而不是检索。
+ */
+export function renderInjection(hits: MemoryHit[]): string {
   const lines = hits.map((h, i) => `${i + 1}. [${h.kind}] ${formatTime(h)} — ${h.text}`)
   return '[记忆检索] 与当前问题可能相关的历史记录（按相关度排序，来自长期记忆；不是用户本轮发言）：\n'
     + lines.join('\n')
@@ -120,7 +126,7 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
       const injected = {
         id: `mem-${randomUUID()}`,
         role: 'user',
-        content: [{ type: 'text', text: render(hits) }],
+        content: [{ type: 'text', text: renderInjection(hits) }],
         source: { kind: 'user' },
       }
       return { ...decision, messages: [...decision.messages, injected] }

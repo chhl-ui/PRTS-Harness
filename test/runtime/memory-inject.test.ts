@@ -8,7 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MemoryStore } from '../../src/memory/index.ts'
-import { attachMemoryInjection } from '../../src/runtime/memory-inject.ts'
+import { attachMemoryInjection, renderInjection } from '../../src/runtime/memory-inject.ts'
 import { makeTmp } from '../support/tmp.ts'
 
 type Handler = (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>
@@ -178,6 +178,21 @@ test('I6 同一 step 不重复注入；dispose 注销钩子', async () => {
   } finally {
     cleanup()
   }
+})
+
+test('I8 renderInjection 自报来源并带编号（评测与生产共用同一渲染）', () => {
+  const text = renderInjection([
+    {
+      kind: 'turn', id: 't1', score: 1, origin: 'live', text: '我平时用 Godox V1 闪光灯',
+      recallPath: 'like', occurredAtMs: 1_700_000_000_000,
+    },
+  ])
+  assert.match(text, /^\[记忆检索\]/, '必须带来源前缀，否则模型会当成用户本轮发言')
+  assert.match(text, /不是用户本轮发言/)
+  assert.match(text, /1\. \[turn\]/)
+  assert.match(text, /Godox V1/)
+  // 时间要出现：没有时间的记忆答不了「多少天前」这类问题
+  assert.match(text, /2023-11-1[34]T/)
 })
 
 test('I7 不把本轮问题自己当历史注入（inbox/claimed 先于 pre-step 落盘）', async () => {
