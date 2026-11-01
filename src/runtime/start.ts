@@ -11,6 +11,7 @@ import { Authority, classify } from '../authority/index.ts'
 import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
+import { attachSpill, resolveSpillRoot } from '../spill/wiring.ts'
 
 export interface StartRuntimeOptions {
   configPath: string
@@ -132,9 +133,14 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // :158 以 PRTS_DB 传下来），否则任务事实会落进 K1/K4/K5 都看不见的库。
   // 上面已经 initCoreDb 幂等建过表，这里直接 open 即可。
   const ledger = Ledger.open(dbPath)
+  // 工具结果卸载的存储根：默认与 dataRoot 平级，**不嵌在受保护根里**——
+  // 嵌进去会被 `fs.read` 的 protectedRoots 判定拒掉，卸载的内容模型就永远读不回来
+  // （见 docs/design-tool-output-spill.md §5.1 与议事会指出的 v1 硬伤）。
+  const spillRoot = resolveSpillRoot(o.dataRoot)
   const authority = Authority.open(dbPath, {
     workspaceRoots: [o.workspace],
     protectedRoots: [o.dataRoot],
+    spillRoots: [spillRoot],
   })
 
   const tools = ctx.get('tools') as
@@ -338,6 +344,21 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
 
   // turn 内失败只经 agent/error 上报：dsh-agent-loop 的 throwError() emit 后 throw，
   // kick() 的 catch 吞掉异常传播。不订阅则失败完全静默。
+  // 工具结果卸载（spill）接线。它是优化、不是启动前置：根与受保护根/工作区根
+  // 相交或上限为 0 时内部自行停用并告警，不阻断启动；钩子内失败只写 stderr，
+  // 绝不改变工具调用的结果。
+  const spillWiring = attachSpill(
+    ctx as unknown as {
+      on(name: string, fn: (exec: unknown, result: unknown, next: () => unknown) => unknown): () => void
+    },
+    {
+      dataRoot: o.dataRoot,
+      root: spillRoot,
+      protectedRoots: authority.protectedRootPaths(),
+      workspaceRoots: authority.workspaceRootPaths(),
+      warn: (message: string) => console.warn(message),
+    },
+  )
   const detachErrorReporter = attachErrorReporter(ctx)
   if (ctx.get('loader') !== undefined) appReady.commit()
   return {
@@ -355,6 +376,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       offPreExecute()
       offToolExecute()
       offToolResult?.()
+      spillWiring.dispose()
       taskTools.dispose()
       // Ledger 与 Authority 各自持有 sqlite 连接，都不由 ctx 生命周期管理；
       // 不关会在 Windows 上锁住文件，临时目录清理报 EPERM。

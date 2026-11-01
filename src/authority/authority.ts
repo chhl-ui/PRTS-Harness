@@ -27,6 +27,7 @@ export class Authority {
   private readonly audit: AuditLog
   private readonly workspaceRoots: string[]
   private readonly protectedRoots: string[]
+  private readonly spillRoots: string[]
   private readonly now: () => number
 
   private constructor(audit: AuditLog, config: AuthorityConfig, now: () => number) {
@@ -34,6 +35,7 @@ export class Authority {
     // 与 evalCap 里的 realpathBestEffort 同一规范化域：两侧都取真实路径再比
     this.workspaceRoots = config.workspaceRoots.map(realpathBestEffort)
     this.protectedRoots = config.protectedRoots.map(realpathBestEffort)
+    this.spillRoots = (config.spillRoots ?? []).map(realpathBestEffort)
     this.now = now
   }
 
@@ -46,6 +48,16 @@ export class Authority {
    */
   protectedRootPaths(): readonly string[] {
     return [...this.protectedRoots]
+  }
+
+  /**
+   * spill 根（同上，只读副本）。
+   *
+   * 给启动自检用：spill 根必须与 protectedRoots / workspaceRoots 都不相交，
+   * 否则要么模型读不回来（落进受保护根），要么模型能改写卸载内容（落进工作区）。
+   */
+  spillRootPaths(): readonly string[] {
+    return [...this.spillRoots]
   }
 
   /** 工作区根（同上，只读副本）。 */
@@ -79,12 +91,18 @@ export class Authority {
         if (this.protectedRoots.some((r) => isWithin(rp, r))) {
           return { kind: 'deny', reason: `fs.read denied: ${p.arg} is inside protected root` }
         }
+        if (this.spillRoots.some((r) => isWithin(rp, r))) {
+          return { kind: 'allow', via: 'policy' }
+        }
         return { kind: 'allow', via: 'policy' }
       }
       case 'fs.write': {
         const rp = realpathBestEffort(p.arg)
         if (this.protectedRoots.some((r) => isWithin(rp, r))) {
           return { kind: 'deny', reason: `fs.write denied: ${p.arg} is inside protected root` }
+        }
+        if (this.spillRoots.some((r) => isWithin(rp, r))) {
+          return { kind: 'deny', reason: `fs.write denied: ${p.arg} is inside spill root` }
         }
         if (this.workspaceRoots.some((r) => isWithin(rp, r))) {
           return { kind: 'allow', via: 'policy' }
@@ -98,6 +116,9 @@ export class Authority {
         const rp = realpathBestEffort(p.arg)
         if (this.protectedRoots.some((r) => isWithin(rp, r))) {
           return { kind: 'deny', reason: `fs.delete denied: ${p.arg} is inside protected root` }
+        }
+        if (this.spillRoots.some((r) => isWithin(rp, r))) {
+          return { kind: 'deny', reason: `fs.delete denied: ${p.arg} is inside spill root` }
         }
         return { kind: 'ask', reason: `fs.delete requires per-call approval: ${p.arg}` }
       }
