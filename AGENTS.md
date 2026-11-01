@@ -58,6 +58,12 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 - **local 后端在 `C:\` 下的 workspace 上跑不了 pwsh**（实测 2026-11-01）：`dsh-sandbox-windows-acl` 的 `grantWrite` 会对 workspace 做 `SetNamedSecurityInfoW`（DACL + 强制完整性标签，`types-Cl_DXjhk.js:485` 传的 securityInfo 是 20 = DACL|LABEL）。在 `C:\prts-workspace`、`C:\prts-ws-clean` 上它返回 Win32 5 (ACCESS_DENIED)，命令一行都没执行；连 `1+1` 也失败。同一个命令换成 `%TEMP%` 下的 workspace 就正常，且三处 owner 完全相同（都是 `Administrator`），所以不是权限归属问题，是上游对 `C:\` 下目录的标签编辑失败。**这是上游限制，PRTS 无法在源码层修**。
   **后果**：`PRTS_SANDBOX_BACKEND` 不设（默认 local）时，真机 `npm run chat` 配 `C:\prts-workspace` 的 shell 能力是**断的**。测试能过是因为测试的 workspace 建在 `%TEMP%` 下——别拿测试绿去推断真机可用。
   **两个后端的 workspace 位置要求互斥**：appcontainer 要浅层（`C:\prts-workspace`，否则祖先链 traverse 失败，见 `confine.ts` 的 `workspaceTraversalRisk`），local 要 `%TEMP%` 下。不能共用一个位置。**当前可用的真机组合只有 appcontainer**。
+- **模型在容器里跑不了 node / git，原因是「谁发起 CreateProcess」而不是笼统的「未授权」**（实测 2026-11-01，结论与初判相反，记下来免得再踩）：
+  - 宿主（普通用户令牌）直接 `CreateProcess` 启动 `C:\Program Files\nodejs\node.exe` → **成功**，返回 `v24.19.0`；`git --version` → `2.55.0.windows.4`。
+  - 容器内的 pwsh 再启动同一个 exe → **失败**：`where.exe node` 返回「找不到」，直调报「无法识别」。AppContainer 的读隔离生效——容器只被授予 workspace 与 `--read-path` 列表，Program Files 不在其中。
+  - 差异的本质：访问检查发生在**发起方**上下文。宿主能读 `node.exe` 所以能加载映像；容器的受限令牌读不到。
+  - **判据**：不要用「宿主直 spawn」的探针去证明「模型能用」，那测的是宿主的能力，模型走的是容器内 pwsh 那条路。写探针时必须让 pwsh 去执行目标程序。
+  - **修法（待验证）**：用管理员权限对 `C:\Program Files\nodejs` 与 `C:\Program Files\Git` 做一次 AppContainer SID 的读授权；普通权限 icacls 会被拒（实测 exit 5）。授权后重跑容器内 `where node` 验证。这条通过之前，appcontainer 里「shell 能用但干不了活」的判断成立。
 - **依赖 koffi**（`^3.3.6`）。它是原生模块，install 时有预编译下载脚本——**新机器上 `npm ci` 若被 `allow-scripts` 拦下，koffi 的二进制不会就位，`require('koffi')` 会失败**。这是部署约束，不是代码缺陷。
 - **实现要点（踩过的坑，别重踩）**：
   - `DWORD_PTR`（UpdateProcThreadAttribute 的 attr 参数）是 64 位，传 Number 会被 koffi 拒，必须 `BigInt`；`lpReturnSize` 可传 `NULL`。
