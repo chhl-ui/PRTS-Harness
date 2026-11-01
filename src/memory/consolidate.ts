@@ -74,6 +74,7 @@ export function consolidationStats(db: DatabaseSync, scope = DEFAULT_SCOPE): {
   entities: number
   links: number
   topics: number
+  mentions: number
   budgetSpent: number
 } {
   const one = (sql: string): number => (db.prepare(sql).get() as { c: number }).c
@@ -85,12 +86,14 @@ export function consolidationStats(db: DatabaseSync, scope = DEFAULT_SCOPE): {
     entities: one('SELECT COUNT(*) AS c FROM mem_entities'),
     links: one('SELECT COUNT(*) AS c FROM mem_links'),
     topics: one('SELECT COUNT(*) AS c FROM mem_topics'),
+    mentions: one('SELECT COUNT(*) AS c FROM mem_mentions'),
     budgetSpent: cursorRow?.b ?? 0,
   }
 }
 
 interface PendingTurn {
   rid: number
+  turnId: string
   /** 事件发生时间。`occurred_raw` 解析失败时为 0（见 selectUnconsolidated 的注释）。 */
   atMs: number
   body: string
@@ -108,7 +111,7 @@ function selectUnconsolidated(
   db: DatabaseSync, scope: string, cursor: number, limit: number,
 ): PendingTurn[] {
   return db.prepare(
-    `SELECT t.rowid AS rid, COALESCE(t.occurred_at_ms, 0) AS atMs, b.body AS body
+    `SELECT t.rowid AS rid, t.turn_id AS turnId, COALESCE(t.occurred_at_ms, 0) AS atMs, b.body AS body
        FROM mem_turns t
        JOIN mem_bodies b ON b.body_ref = t.body_ref
       WHERE t.scope = ? AND t.rowid > ? AND t.deleted_at_ms IS NULL
@@ -168,6 +171,11 @@ export function runConsolidation(db: DatabaseSync, opts: ConsolidateOptions = {}
        entry_count = entry_count + 1,
        last_seen_ms = MAX(last_seen_ms, excluded.last_seen_ms)`,
   )
+  // 实体 → 出现位置。扩散激活靠它把「邻居实体」翻译成「候选 turn」；
+  // 没有这一步，关联图只能导航到实体名，召回不了任何内容。
+  const insertMention = db.prepare(
+    'INSERT INTO mem_mentions (entity_key, turn_id) VALUES (?,?) ON CONFLICT(entity_key, turn_id) DO NOTHING',
+  )
   const upsertCursor = db.prepare(
     `INSERT INTO mem_consolidation (scope, cursor_turn_rowid, cursor_event_seq, updated_at_ms, budget_spent)
      VALUES (?,?,0,?,?)
@@ -208,6 +216,7 @@ export function runConsolidation(db: DatabaseSync, opts: ConsolidateOptions = {}
         const at = turn.atMs
         for (const e of ents) {
           upsertEntity.run(e.key, scope, e.name, e.kind, at, at)
+          insertMention.run(e.key, turn.turnId)
           if (isTopicKind(e.kind)) {
             upsertTopic.run(e.key, scope, at)
             topicMentions++

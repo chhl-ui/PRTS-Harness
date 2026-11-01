@@ -115,6 +115,26 @@ export interface MemoryQuery {
   semanticTopK?: number
   /** 余弦下限，默认 0（不设阈值，先靠排名融合吸收噪声）。 */
   semanticMinSim?: number
+  /**
+   * 扩散激活跳数（Wave 4）。默认 0（关闭），只支持 0 或 1。
+   *
+   * 做法：从直接命中的 turn 里抽实体当种子 → 沿 `mem_links` 取 1 跳邻居 →
+   * 邻居经 `mem_mentions` 翻译成候选 turn。**不递归**：2 跳会在 108 万条边上
+   * 爆炸，且「朋友的朋友」与查询的相关性没有证据支持。
+   *
+   * 默认关闭的理由：扩散是唯一「凭空增加候选」的路，放大噪声的风险最高。
+   * 计划要求它单独分组、单独报数——`recallPaths` 会记 'spread'，
+   * 因此可以只统计这一步的边际效果。
+   */
+  spreadHops?: 0 | 1
+  /** 扩散候选上限，默认 8。 */
+  spreadLimit?: number
+  /**
+   * 边权重下限，默认 2：只共现过一次的配对标为「偶然同句」，扩散它等于放大噪声。
+   */
+  spreadMinWeight?: number
+  /** 用作种子的直接命中条数，默认 5。抽实体是正则，种太多会拖慢每次查询。 */
+  spreadSeeds?: number
 }
 
 export interface MemoryHit {

@@ -204,6 +204,22 @@ CREATE TABLE IF NOT EXISTS mem_links (
   PRIMARY KEY (from_key, to_key, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_links_to ON mem_links(to_key, weight);
+
+-- 实体 → 出现位置（Wave 4 补的洞）。
+--
+-- 没有这张表，关联图只能导航到「实体名」，召回不了任何内容：mem_links 是
+-- 实体↔实体，mem_entities 只有实体自身。扩散激活要产出候选，必须有这一步。
+-- 也不能用 FTS 代替：trigram 对 AI / TV 这类 2 字符实体恒为 0，而它们
+-- 恰恰是出现最多的一批。
+--
+-- 键用 turn_id 而不是 rowid：rebuildProjections 会重建 mem_turns，rowid 会漂；
+-- mentions 是链外派生项不参与重放，漂了之后会永久指向错误的 turn 且无报错。
+CREATE TABLE IF NOT EXISTS mem_mentions (
+  entity_key  TEXT NOT NULL,
+  turn_id     TEXT NOT NULL,
+  PRIMARY KEY (entity_key, turn_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mentions_turn ON mem_mentions(turn_id);
 `
 
 /** 打开（或创建）记忆库。`secure_delete` 是设计稿 §八 第 15 条的硬要求。 */

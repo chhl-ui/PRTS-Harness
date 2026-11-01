@@ -13,6 +13,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import { appendChained, sha256hex, verifyChainRows, type ChainVerifyResult } from '../chain/index.ts'
 import { applyMemoryEvent } from './fold.ts'
 import { cosineSimilarity, decodeVector, encodeVector, type Embedder } from './embedding.ts'
+import { extractEntities } from './extract.ts'
 import {
   readConsolidationCursor, runConsolidation, consolidationStats as readConsolidationStats,
   type ConsolidateOptions, type ConsolidateResult,
@@ -40,6 +41,17 @@ const RECENCY_WEIGHT = 0.1
  * 当前上限内扫描一遍的输出是确定的（ORDER BY 固定顺序），不依赖插入次序。
  */
 const SEMANTIC_SCAN_CAP = 50_000
+
+/**
+ * 扩散候选的 RRF 权重（Wave 4）。
+ *
+ * 实测依据：与直接命中同权时，250 题上 any@8 从 32.8% 掉到 1.6%（-31.2pp），
+ * 而 any@32 只掉 2.8pp。候选没有被删掉，是被扩散顶出了前排——扩散候选的
+ * score 系数（1+0.1×overlap）还高于直接命中，于是系统性压过真正匹配的内容。
+ *
+ * 扩散是「关联证据」而不是「匹配证据」，权重必须显著低于字面/语义命中。
+ */
+const SPREAD_RRF_WEIGHT = 0.25
 
 /** `LIKE` 通配符转义。不转义时一条含 `%` 的提问会命中全表（设计稿 §6.5）。 */
 export function escapeLike(s: string): string {
@@ -298,9 +310,9 @@ export class MemoryStore {
     // 排名融合是这个顾虑的正面解法，而不是绕开它。
     const RRF_K = 60
     const fused = new Map<string, { hit: MemoryHit; rrf: number }>()
-    const rank = (hits: MemoryHit[], path: RecallPath): void => {
+    const rank = (hits: MemoryHit[], path: RecallPath, weight = 1): void => {
       hits.forEach((h, i) => {
-        const add = 1 / (RRF_K + i + 1)
+        const add = weight / (RRF_K + i + 1)
         const prev = fused.get(h.id)
         if (prev === undefined) fused.set(h.id, { hit: { ...h, recallPath: path, recallPaths: [path] }, rrf: add })
         else {
@@ -647,6 +659,108 @@ export class MemoryStore {
 
       rank(likeFacts, 'like')
       rank(likeTurns, 'like')
+    }
+
+    // ---- 路 4：扩散激活（Wave 4）----
+    // 从直接命中的 turn 抽实体当种子 → 沿 mem_links 取 1 跳邻居 → 邻居经
+    // mem_mentions 翻译成候选 turn。**不递归**：2 跳在 108 万条边上会爆炸，
+    // 且「朋友的朋友」与查询的相关性没有任何证据支持。
+    // 放在所有直接路之后：种子必须是已经算过分的命中，否则无从扩散。
+    const spreadHops = q.spreadHops ?? 0
+    if (spreadHops > 0 && fused.size > 0) {
+      const spreadMinWeight = q.spreadMinWeight ?? 2
+      const spreadLimit = q.spreadLimit ?? 8
+      const spreadSeeds = q.spreadSeeds ?? 5
+
+      const seedTurns = [...fused.values()]
+        .filter((x) => x.hit.kind === 'turn')
+        .sort((a, b) => b.rrf - a.rrf)
+        .slice(0, spreadSeeds)
+
+      const seedKeys = new Set<string>()
+      for (const s of seedTurns) {
+        for (const e of extractEntities(s.hit.text)) seedKeys.add(e.key)
+      }
+
+      const keys = [...seedKeys]
+      if (keys.length > 0) {
+        const inClause = keys.map(() => '?').join(',')
+        const neighbors = new Set<string>()
+        // 边是无向的但只存一份（规范化 from_key < to_key），所以两个方向都要查
+        for (const r of this.db.prepare(
+          `SELECT to_key AS k FROM mem_links
+            WHERE from_key IN (${inClause}) AND kind = 'cooccur' AND weight >= ?`,
+        ).all(...keys, spreadMinWeight) as unknown as Array<{ k: string }>) neighbors.add(r.k)
+        for (const r of this.db.prepare(
+          `SELECT from_key AS k FROM mem_links
+            WHERE to_key IN (${inClause}) AND kind = 'cooccur' AND weight >= ?`,
+        ).all(...keys, spreadMinWeight) as unknown as Array<{ k: string }>) neighbors.add(r.k)
+        // 把种子自己剔掉，否则只是把它们再召回一次、白白占名额
+        for (const k of keys) neighbors.delete(k)
+
+        const nb = [...neighbors]
+        if (nb.length > 0) {
+          const nbClause = nb.map(() => '?').join(',')
+          // 命中邻居越多的 turn 越可能是扩散目标；*4 是给「已被直接命中」的重复留余量
+          const cand = this.db.prepare(
+            `SELECT m.turn_id AS turnId, COUNT(*) AS overlap
+               FROM mem_mentions m
+              WHERE m.entity_key IN (${nbClause})
+              GROUP BY m.turn_id
+              ORDER BY overlap DESC, m.turn_id
+              LIMIT ?`,
+          ).all(...nb, spreadLimit * 4) as unknown as Array<{ turnId: string; overlap: number }>
+
+          const want = cand.filter((c) => !fused.has(c.turnId)).slice(0, spreadLimit)
+          if (want.length > 0) {
+            const rows = this.db.prepare(
+              `SELECT t.turn_id, t.session_id, t.turn_index, t.external_id, t.origin,
+                      t.occurred_at_ms, t.occurred_raw, b.body
+                 FROM mem_turns t
+                 LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref
+                WHERE t.turn_id IN (${want.map(() => '?').join(',')})
+                  AND t.scope = ? AND t.deleted_at_ms IS NULL
+                  AND t.origin IN (${originSlots})`,
+            ).all(...want.map((w) => w.turnId), scope, ...origins) as unknown as Array<{
+              turn_id: string
+              session_id: string
+              turn_index: number
+              external_id: string | null
+              origin: Origin
+              occurred_at_ms: number | null
+              occurred_raw: string | null
+              body: string | null
+            }>
+            const byId = new Map(rows.map((r) => [r.turn_id, r]))
+            const spreadHits: MemoryHit[] = []
+            // 按 overlap 顺序重建——rank() 用数组下标当名次
+            for (const w of want) {
+              const r = byId.get(w.turnId)
+              if (r === undefined) continue
+              spreadHits.push({
+                kind: 'turn',
+                id: r.turn_id,
+                // 扩散候选没有字面/语义分，用一个随命中邻居数递增的底分，
+                // 让「命中 3 个邻居」比「命中 1 个邻居」排得前
+                score: (1 + RECENCY_WEIGHT * (r.occurred_at_ms === null ? 0.5 : recency(r.occurred_at_ms, nowMs)))
+                  * (1 + 0.1 * w.overlap),
+                origin: r.origin,
+                sessionId: r.session_id,
+                turnIndex: r.turn_index,
+                ...(r.external_id === null ? {} : { externalId: r.external_id }),
+                occurredAtMs: r.occurred_at_ms,
+                ...(r.occurred_raw === null ? {} : { occurredRaw: r.occurred_raw }),
+                text: r.body ?? '',
+                recallPath: 'spread',
+              })
+            }
+            // 折扣而不是同权：实测同权时扩散把 any@8 从 32.8% 砸到 1.6%，
+            // 而 any@32 只掉 2.8pp——候选没丢，是排序被扩散顶掉了。
+            // 扩散是关联证据，不是匹配证据，不该与直接命中平起平坐。
+            rank(spreadHits, 'spread', SPREAD_RRF_WEIGHT)
+          }
+        }
+      }
     }
 
     // 分组名额：fact 与 turn 分开取，避免一方挤满（见 MemoryQuery.factQuota 的注释）。
