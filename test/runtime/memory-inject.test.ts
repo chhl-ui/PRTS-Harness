@@ -64,11 +64,10 @@ test('I1 有命中时追加一条 user 消息，正文含记忆内容', async ()
     const fake = fakeHookCtx()
     const att = attachMemoryInjection(fake.ctx, { store })
     try {
-      // 注意：query 里用空格分隔关键词。当前 tokenizer 把连续汉字当成**一个** token
-      // （`tokenize.ts:38` 的正则），"我之前说过的光学偏好是什么"整体是一个长 token，
-      // LIKE 与 FTS 都命中不了——这是已知缺陷，不是本测试要迁就的写法。
-      // 修复方向（未做）：中文分词或对长汉字串做 2-gram 展开。
-      const payload = payloadOf('光学 偏好 是什么？')
+      // 整句中文、无分隔符：这是真机对话的真实形状。
+      // 依赖 tokenize 对长汉字串拆 2-gram（见 `tokenize.ts` 与 M8e）；
+      // 修复前整句是一个 13 字 token，这里会零命中。
+      const payload = payloadOf('我之前说过的光学偏好是什么？')
       const out = await fake.fire(payload, async () => enter([...payload.messages])) as {
         kind: string
         messages: Array<{ role: string; content: Array<{ type: string; text?: string }> }>
@@ -167,7 +166,7 @@ test('I6 同一 step 不重复注入；dispose 注销钩子', async () => {
     const fake = fakeHookCtx()
     const att = attachMemoryInjection(fake.ctx, { store })
     try {
-      const payload = payloadOf('光学 偏好 还记得吗', 7)
+      const payload = payloadOf('我之前提到的光学偏好', 7)
       const first = await fake.fire(payload, async () => enter([...payload.messages])) as { messages: unknown[] }
       assert.equal(first.messages.length, 2)
       const second = await fake.fire(payload, async () => enter([...payload.messages])) as { messages: unknown[] }
