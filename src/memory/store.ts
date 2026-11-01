@@ -322,7 +322,7 @@ export class MemoryStore {
       .join(' + ')
     const turnRows = this.db.prepare(
       `SELECT t.turn_id, t.session_id, t.turn_index, t.external_id, t.origin,
-              t.occurred_at_ms, b.body,
+              t.occurred_at_ms, t.occurred_raw, b.body,
               (${turnHitExpr}) AS hit_count
          FROM mem_turns t
          LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref
@@ -344,6 +344,7 @@ export class MemoryStore {
       external_id: string | null
       origin: Origin
       occurred_at_ms: number | null
+      occurred_raw: string | null
       body: string | null
     }>
 
@@ -355,6 +356,9 @@ export class MemoryStore {
       sessionId: r.session_id,
       turnIndex: r.turn_index,
       ...(r.external_id === null ? {} : { externalId: r.external_id }),
+      // 时间必须跟着命中一起出去：只给正文，时间推理类问题无从作答。
+      occurredAtMs: r.occurred_at_ms,
+      ...(r.occurred_raw === null ? {} : { occurredRaw: r.occurred_raw }),
       text: r.body ?? '',
       recallPath,
     }))

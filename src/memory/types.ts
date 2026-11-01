@@ -81,6 +81,15 @@ export interface MemoryHit {
   sessionId?: string
   turnIndex?: number
   externalId?: string
+  /**
+   * 事件发生时间（仅 turn/summary 有）。**检索结果必须携带它**——
+   * 只给正文不给时间，任何「多少天后 / 谁先谁后」的问题都无从推理：
+   * 2026-11-01 实测，temporal-reasoning（133/500 题）因缺这一列 4/4 拒答。
+   * 解析失败时为 null，此时退回 `occurredRaw`。
+   */
+  occurredAtMs?: number | null
+  /** 原始时间串，`occurredAtMs` 解析失败或精度丢失时的兜底。 */
+  occurredRaw?: string
   text: string
   /** 走了哪条召回路径——V1-15 的 abstention 判定要用（设计稿 §6.5）。 */
   recallPath: RecallPath
