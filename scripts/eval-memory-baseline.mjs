@@ -68,13 +68,24 @@ async function callModel(prompt) {
   return body.choices[0].message.content ?? ''
 }
 
-function buildPrompt(question, hits) {
+/** 时间怎么呈现：原始串优先（`2023/04/10 (Mon) 17:50` 带星期与精度），退回毫秒。 */
+function fmtWhen(h) {
+  if (typeof h.occurredRaw === 'string' && h.occurredRaw !== '') return h.occurredRaw
+  if (typeof h.occurredAtMs === 'number') return new Date(h.occurredAtMs).toISOString().slice(0, 16).replace('T', ' ')
+  return null
+}
+
+function buildPrompt(question, hits, questionDate) {
   const excerpts = hits.length === 0
     ? '(none)'
-    : hits.map((h, i) => `[${i + 1}] ${h.text}`).join('\n')
+    : hits.map((h, i) => {
+      const when = fmtWhen(h)
+      return `[${i + 1}]${when === null ? '' : ` (${when})`} ${h.text}`
+    }).join('\n')
   return `Answer the question using ONLY the retrieved memory excerpts below.
+Each excerpt may carry the date/time it was said in parentheses — use those timestamps for any question about when something happened, how many days between events, or which came first.
 Be concise — a short phrase or sentence. If the excerpts do not contain the answer, reply exactly: I don't know.
-
+${questionDate ? `\nThe current date is ${questionDate}.` : ''}
 Question: ${question}
 
 Retrieved excerpts:
@@ -120,7 +131,7 @@ for (let i = 0; i < items.length; i++) {
     limit,
   })
   if (hits.length === 0) noHits++
-  const hypothesis = await callModel(buildPrompt(q.question, hits))
+  const hypothesis = await callModel(buildPrompt(q.question, hits, q.question_date))
   rows.push({ question_id: q.question_id, hypothesis: hypothesis.trim() })
   if ((i + 1) % 25 === 0 || i === items.length - 1) {
     console.log(`  [${i + 1}/${items.length}] 零命中累计 ${noHits}，耗时 ${Date.now() - t0}ms`)
