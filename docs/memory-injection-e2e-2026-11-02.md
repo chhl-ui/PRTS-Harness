@@ -128,3 +128,54 @@ apiKeyEnv / contextWindow / idleTimeout），要换成本地 27B 得改写 adapt
 （它允许把多条证据拼起来），所以 50% > 32.8% 不可解读为「注入比检索多 17pp」。
 
 要得到严格可比的数字，得在注入口径下重跑 250 题并同时记录 any@k——本轮没做。
+
+---
+
+## 失败归因与查询扩展（同日追加）
+
+### 诊断：`06878be2` 是词汇鸿沟，不是排序问题
+
+`probe-fail-diag.mjs` 的输出：
+
+```
+问题   : Can you suggest some accessories that would complement my current photography setup?
+rubric : 偏好 Sony 兼容配件或高质量摄影器材，不喜欢其他品牌或低质量器材
+gold #0: I'm looking to upgrade my camera flash. Can you recommend ... Sony A7R IV?
+gold #8: What's the best way to clean my Sony 24-70mm f/2.8 lens?
+gold #14: As a Sony camera user, ... upgrading my camera bag ...
+gold 名次：81 / 106 / 100（443 turn 里）
+top-5：[fts-trigram] 依赖解析冲突、藜麦早餐、蜡烛摄影道具、新西兰租车、大提顿徒步
+```
+
+问题与 gold 的唯一字面交集是 `some` 这类虚词。真正相关的概念（accessories ↔ camera
+flash/lens/bag）没有任何词汇重叠——bm25 对这种同义/上位关系无能为力。这不是排序权重
+问题：gold 命中路径全是 `fts-trigram`，分数 0.006–0.007，与 top-5 的 0.016 差一个量级，
+调权重救不回来。
+
+### 实验：先扩查询再检索
+
+用本地 27B 把问题扩成 8–12 个具体名词（`accessories` → `camera lens, flash, tripod, bag…`），
+其余不变（同一批 20 题、同一导入、同一判分器）。
+
+| 组 | 可答对 |
+|---|---|
+| 原始 query | 7/20 |
+| 扩展 query | **10/20** |
+| 净变化 | **+3 题（+15pp）**，救回 3、弄丢 0 |
+
+### ⚠️ 这一轮的基线与此前不一致，不能跨实验比较
+
+本实验的「原始 query」是 **7/20**，而前面题内口径的同批题是 **14/20**。差异不在检索，
+在**喂给判分器的文本格式**：注入链路那边是带 `[记忆检索] …` 前缀的完整注入文本，
+这里直接是 `1. [turn] …` 的命中列表。判分器对被判定为「记忆片段」的输入更宽容。
+
+所以：
+- **能说的**：在同一口径内，查询扩展把 7/20 提到 10/20，只救不丢。
+- **不能说的**：扩展后是 10/20 还是 14/20+3；也不能说这 +15pp 会传导到全库口径。
+
+### 下一步（按证据排序）
+
+1. **统一判分输入格式**，让三种口径可比——这是所有后续比较的前提。
+2. 在全库口径下重测扩展（每轮多一次模型调用，约 +1s）。
+3. 若扩展稳健，考虑把「扩展词」并入检索而不是替换问题（避免长 query 稀释 IDF）。
+4. 向量检索仍是词汇鸿沟的正解，但 24.6 万 turn 的向量化约 80 分钟 GPU，成本要先算。
