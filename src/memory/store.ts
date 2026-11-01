@@ -77,6 +77,19 @@ function recency(recordedAtMs: number, nowMs: number): number {
   return 1 / (1 + days / 30)
 }
 
+/**
+ * 一行 fact 的折算重要性。
+ *
+ * `access_count` 是可选的：退役候选查询与生命周期统计不取这一列（它们只看写入强度
+ * 与年龄），传进来的行没有该字段时按 0 处理——与没有这一维之前的行为一致。
+ */
+function rowImportance(
+  r: { importance: number; recorded_at_ms: number; access_count?: number },
+  nowMs: number,
+): number {
+  return decayedImportance(r.importance, r.recorded_at_ms, nowMs, IMPORTANCE_HALF_LIFE_DAYS, r.access_count ?? 0)
+}
+
 export class MemoryStore {
   private readonly db: DatabaseSync
 
@@ -447,7 +460,7 @@ export class MemoryStore {
     }>
     let nearestCandidate: RetireCandidate | null = null
     for (const r of rows) {
-      const effective = decayedImportance(r.importance, r.recorded_at_ms, nowMs)
+      const effective = rowImportance(r, nowMs)
       if (nearestCandidate === null || effective < nearestCandidate.effective) {
         nearestCandidate = {
           factId: r.fact_id,
@@ -591,7 +604,7 @@ export class MemoryStore {
     // ---- 路 1：FTS5 trigram（按 bm25 升序，越小越相关）----
     const ftsFacts: MemoryHit[] = ftsMatch === null ? [] : (
       this.db.prepare(
-        `SELECT f.fact_id, f.provenance, f.origin, f.importance, f.recorded_at_ms, b.body
+        `SELECT f.fact_id, f.provenance, f.origin, f.importance, f.recorded_at_ms, f.access_count, b.body
            FROM mem_fts_facts
            JOIN mem_facts f ON f.rowid = mem_fts_facts.rowid
            LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
@@ -614,7 +627,7 @@ export class MemoryStore {
       // importance 是写入时的强度，这里是**折算后的有效强度**（Wave 5）：
       // 衰减是纯函数而不是写回，理由见 lifecycle.ts 头部。
       score: (1 + RECENCY_WEIGHT * recency(r.recorded_at_ms, nowMs))
-        * (0.5 + decayedImportance(r.importance, r.recorded_at_ms, nowMs)),
+        * (0.5 + rowImportance(r, nowMs)),
       provenance: r.provenance,
       origin: r.origin,
       text: r.body ?? '',
@@ -769,7 +782,7 @@ export class MemoryStore {
       }>()
       if (factIds.length > 0) {
         const rows = this.db.prepare(
-          `SELECT f.fact_id, f.provenance, f.origin, f.importance, f.recorded_at_ms, b.body
+          `SELECT f.fact_id, f.provenance, f.origin, f.importance, f.recorded_at_ms, f.access_count, b.body
              FROM mem_facts f
              LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
             WHERE f.fact_id IN (${factIds.map(() => '?').join(',')})
@@ -810,7 +823,7 @@ export class MemoryStore {
             kind: 'fact',
             id: r.fact_id,
             score: (1 + RECENCY_WEIGHT * recency(r.recorded_at_ms, nowMs))
-              * (0.5 + decayedImportance(r.importance, r.recorded_at_ms, nowMs)),
+              * (0.5 + rowImportance(r, nowMs)),
             provenance: r.provenance,
             origin: r.origin,
             text: r.body ?? '',
@@ -853,7 +866,7 @@ export class MemoryStore {
         .join(' + ')
 
       const likeFacts = (this.db.prepare(
-        `SELECT f.fact_id, f.provenance, f.origin, f.importance, f.recorded_at_ms, b.body,
+        `SELECT f.fact_id, f.provenance, f.origin, f.importance, f.recorded_at_ms, f.access_count, b.body,
                 (${factHitExpr}) AS hit_count
            FROM mem_facts f
            LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
@@ -875,7 +888,7 @@ export class MemoryStore {
         kind: 'fact' as const,
         id: r.fact_id,
         score: (1 + RECENCY_WEIGHT * recency(r.recorded_at_ms, nowMs))
-          * (0.5 + decayedImportance(r.importance, r.recorded_at_ms, nowMs))
+          * (0.5 + rowImportance(r, nowMs))
           * (1 + countHits(r.body, likeTokens)),
         provenance: r.provenance,
         origin: r.origin,

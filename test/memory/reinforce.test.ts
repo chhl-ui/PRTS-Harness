@@ -121,6 +121,31 @@ test('R4 已删除的事实不参与强化', () => {
   }
 })
 
+test('R6 强化影响检索排序：同分事实中被召回过的排在前面', () => {
+  const { store, cleanup } = open('prts-mem-reinf-rank-')
+  try {
+    const a = store.assertFact({
+      actor: 'owner', subject: '博士', predicate: '偏好', object: '光学镜头设计 A',
+      provenance: 'stated', confirmationBasis: 'owner-stated',
+    })
+    store.assertFact({
+      actor: 'owner', subject: '博士', predicate: '偏好', object: '光学镜头设计 B',
+      provenance: 'stated', confirmationBasis: 'owner-stated',
+    })
+    for (let i = 0; i < 10; i++) store.reinforceFacts({ actor: 'system', factIds: [a] })
+
+    // 把「现在」推到 400 天后：半衰期 180 天的事实已衰减到约 0.21，
+    // 而强化 10 次的事实半衰期 1080 天，仍剩约 0.39。不动库内时间戳。
+    const later = Date.now() + 400 * DAY
+    const hits = store.search({ text: '光学', nowMs: later })
+    assert.equal(hits.length, 2)
+    assert.equal(hits[0]?.id, a, '被召回多次的事实应排在从未被召回的同分事实之前')
+    assert.ok((hits[0]?.score ?? 0) > (hits[1]?.score ?? 0))
+  } finally {
+    cleanup()
+  }
+})
+
 test('R5 检索工具命中 fact 后触发强化', async () => {
   const { store, dbPath, cleanup } = open('prts-mem-reinf-tool-')
   try {
