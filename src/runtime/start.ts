@@ -10,6 +10,7 @@ import { AppContainerSandboxProvider } from '../sandbox/provider.ts'
 import { localBackendWarning } from '../sandbox/confine.ts'
 import { createStepAllocator, createTaskTools, isLedgerTool } from './task-tools.ts'
 import { createMemoryTools } from './memory-tools.ts'
+import { attachMemoryInjection } from './memory-inject.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
@@ -480,6 +481,15 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 那只会让模型学会绕开它。
   const memoryTools = memory === undefined ? undefined : createMemoryTools(tools, { store: memory })
 
+  // 每轮自动注入：挂在 `agent/pre-step` waterfall 上，在模型看到本轮消息之前
+  // 追加一条记忆摘要。库打不开时整体缺席——没有库就没有可注入的内容。
+  const memoryInjection = memory === undefined ? undefined : attachMemoryInjection(
+    ctx as unknown as {
+      on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
+    },
+    { store: memory },
+  )
+
   // turn 内失败只经 agent/error 上报：dsh-agent-loop 的 throwError() emit 后 throw，
   // kick() 的 catch 吞掉异常传播。不订阅则失败完全静默。
   // 工具结果卸载（spill）接线。它是优化、不是启动前置：根与受保护根/工作区根
@@ -517,6 +527,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       offMemoryTurn?.()
       offMemoryAssistantStream?.()
       offMemoryTurnStop?.()
+      memoryInjection?.dispose()
       memoryTools?.dispose()
       memory?.close()
       spillWiring.dispose()
