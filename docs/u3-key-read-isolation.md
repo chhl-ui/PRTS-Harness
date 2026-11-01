@@ -113,6 +113,41 @@ node --test --test-force-exit .scratch/probe-shell-identity.test.ts
 ```
 **判据**：子进程 `whoami /user` 返回 `prts_shell` 的 SID，而非 `S-1-5-21-...-500`。
 
+#### Wave 0 实测结果（2026-11-01）：第 2、3 问在非提权上下文均不可行
+
+探针：`.scratch/probe-token-spawn.ps1`（一次性，ASCII 输出；PowerShell 按系统代码页读 .ps1，中文注释会破坏引号）。
+
+**前置事实（实测）**：
+
+| 项 | 结果 |
+|---|---|
+| 当前身份 | `Administrator`，但 Administrators 组是**deny-only（未提权）** |
+| 令牌特权 | 仅 5 项：`SeShutdown` / `SeChangeNotify`(启用) / `SeUndock` / `SeIncreaseWorkingSet` / `SeTimeZone` |
+| `SeAssignPrimaryTokenPrivilege` | **ABSENT** |
+| `SeIncreaseQuotaPrivilege` | **ABSENT** |
+| `SeImpersonatePrivilege` | **ABSENT** |
+| 专用账号 | 已存在（`prts_owner10` / `prts_front10` / `prts_broker10` / `prts_pub_226` / `prts_run_226`，以及 `CodexSandboxUsers` 组的 `CodexSandboxOffline`/`Offline`）——**第 1 问不是瓶颈** |
+
+**spawn 能力实测**：
+
+```
+[1] OpenProcessToken        = True
+[2] DuplicateTokenEx        = True   (impersonation -> primary)
+[3] CreateProcessWithTokenW = False  err=1314 (ERROR_PRIVILEGE_NOT_HELD)
+[4] CreateProcessAsUserW    = False  err=123  (探针参数瑕疵，非特权结论)
+```
+
+`CreateProcessWithTokenW` 的门槛（`SeImpersonatePrivilege`）**低于** `CreateProcessAsUserW`（`SeAssignPrimaryToken` + `SeIncreaseQuota`）。低门槛的入口返回 1314，高门槛的不可能通过——结论闭合，不需要再修 [4] 的参数。
+
+**含义**：
+
+- 「专用账号 + 自研 spawn 层」这条剩余路径，**在当前进程上下文下不可实现**。不是账号问题（账号已在），不是 API 用法问题（OpenProcessToken / DuplicateTokenEx 都成功），是**缺特权**。
+- 三项特权都不属于本地 Administrator 的默认令牌。提权能不能解决**未验证**——本地管理员提权后通常仍无 `SeAssignPrimaryTokenPrivilege`（该特权属 LocalSystem/Service），但这是外部知识，本仓没有实测证据。要判定，需在提权上下文跑同一探针。
+- 确定具备这三项特权的是 **LocalSystem 服务**形态。这与 HANDOFF 里「若撞上明文密码那关，方案要退化为 PRTS 以服务形式运行」的判断一致，且现在有了实测支撑。
+
+**结论档位：当前上下文不具备，不是机制不可行。** 后续若要做，第一条不是写 spawn 层，是决定 PRTS 以什么身份常驻（服务 / 提权 / 维持现状）。
+
+
 ### Wave 1：账号与 ACL（一次性，需提权，不可逆）
 
 ```powershell
