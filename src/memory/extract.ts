@@ -163,11 +163,17 @@ export function extractEntities(text: string): ExtractedEntity[] {
     if (starts.has(at)) {
       // 句首单词序列一律跳过：The / She / Can 与专名在这里无法区分
       if (words.length < 2) continue
-      // 句首多词序列若是「祈使动词 + 专名」，剥掉动词留专名
-      if (IMPERATIVE.has(words[0].toLowerCase())) {
-        effective = words.slice(1)
-        if (effective.length === 0) continue
+      // 句首多词序列要**剥前缀**而不是整条丢弃：
+      // `The Godox V1` 会被正则整体匹配成一个序列，首词 The 命中停用词表后
+      // 若直接丢掉，整句的专名就没了——实测这是最常见的漏抽形态。
+      // 剥到第一个非停用词/非祈使动词为止；剥完若只剩一个停用词则仍跳过。
+      while (
+        effective.length > 1
+        && (STOPWORDS.has(effective[0].toLowerCase()) || IMPERATIVE.has(effective[0].toLowerCase()))
+      ) {
+        effective = effective.slice(1)
       }
+      if (effective.length === 1 && STOPWORDS.has(effective[0].toLowerCase())) continue
     }
     const first = effective[0].toLowerCase()
     if (STOPWORDS.has(first)) continue
