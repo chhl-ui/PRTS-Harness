@@ -483,11 +483,17 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
 
   // 每轮自动注入：挂在 `agent/pre-step` waterfall 上，在模型看到本轮消息之前
   // 追加一条记忆摘要。库打不开时整体缺席——没有库就没有可注入的内容。
+  //
+  // 注入条数可用 `PRTS_MEMORY_INJECT_LIMIT` 调（默认 5）。它是运维旋钮而不是代码常量：
+  // 条数直接决定注入占多少上下文，也决定「答案分散在多条 turn」时能否凑齐证据。
+  // 非法值（NaN / ≤0 / 非数字）回落到 5，不静默变成 0——0 等于关掉注入。
+  const injectLimitRaw = Number(process.env.PRTS_MEMORY_INJECT_LIMIT ?? '5')
+  const injectLimit = Number.isFinite(injectLimitRaw) && injectLimitRaw > 0 ? Math.floor(injectLimitRaw) : 5
   const memoryInjection = memory === undefined ? undefined : attachMemoryInjection(
     ctx as unknown as {
       on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
     },
-    { store: memory },
+    { store: memory, limit: injectLimit },
   )
 
   // turn 内失败只经 agent/error 上报：dsh-agent-loop 的 throwError() emit 后 throw，
