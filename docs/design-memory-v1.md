@@ -712,7 +712,34 @@ gold 答案直接以 fact 形式放进库里**，能检索到吗？纯检索层�
 | 当前 turn 检索 | 3.3% | 3.3% |
 | **fact-oracle**（30 条 gold answer 直接 `assertFact` 入库） | **86.7%** | **100%** |
 
-**差 26 倍，结论决定性**：瓶颈不在检索层，在**抽取层**。只要偏好以事实形式存在，检索
+**v2.10 更正（2026-11-01 晚）：上一段的结论错了，86.7% 是假上界。**
+
+按上面的结论做了模型抽取的小样（`single-session-preference` 前 10 题，2445 条 user turn，
+125 次调用，抽出 1641 条 fact），判分结果：
+
+| 方案 | 可用率（top-8 能否回答问题） |
+|---|---|
+| fact-oracle（gold answer 直接入库） | 86.7% |
+| 当前 turn 检索 | 3.3% |
+| **模型抽取 + 检索** | **0/10（0.0%）** |
+
+10 题里检索 top-8 **每一题都有 fact 命中**，但没有一题能回答问题。看明细就明白：问
+「推荐摄影配件」时 gold 要 Sony 兼容配件，命中的是 “small accessories”、“Something
+Borrowed”、“current home in the city”。
+
+**错在哪**：fact-oracle 把 **gold answer 直接当 object** 塞进库，而 gold answer 长这样——
+“The user would prefer responses that suggest resources specifically tailored to Adobe
+Premiere Pro…”。那是**已经推理好的偏好画像**，不是能从对话里抽出的素材。抽取能产出
+「用户在用 Adobe Premiere」，产出不了「该推荐 Adobe Premiere 相关的教程」。
+
+所以 86.7% 测的是**「答案已经在库里时检索能否找到」**，不是「抽取能提供的原料质量」。
+
+**真正的瓶颈是归纳，不是抽取**：偏好题的 gold 是一个**画像**，要从多条事实归纳出来；
+抽取只产出单条事实。这是推理任务。也解释了为什么这道题从 turn 检索（3.3%）换到 fact
+检索（0%）都卡在个位数——它本来就不是检索能解决的问题。
+
+**方法论教训**：上界实验如果把「答案」当输入，测出来的永远是检索能力，不是上游能力。
+设计这类实验时必须问一句「这个输入，真实管线生产得出来吗」。
 几乎总能找到——30 题里 26 题进 top-8、30 题全部进 top-32。
 
 一个反直觉的细节：30 题里「问题与 gold answer 零词重叠」的只有 2 题，且这 2 题都被召回
