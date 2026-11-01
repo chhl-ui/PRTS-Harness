@@ -63,7 +63,8 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   - 容器内的 pwsh 再启动同一个 exe → **失败**：`where.exe node` 返回「找不到」，直调报「无法识别」。AppContainer 的读隔离生效——容器只被授予 workspace 与 `--read-path` 列表，Program Files 不在其中。
   - 差异的本质：访问检查发生在**发起方**上下文。宿主能读 `node.exe` 所以能加载映像；容器的受限令牌读不到。
   - **判据**：不要用「宿主直 spawn」的探针去证明「模型能用」，那测的是宿主的能力，模型走的是容器内 pwsh 那条路。写探针时必须让 pwsh 去执行目标程序。
-  - **修法（待验证）**：用管理员权限对 `C:\Program Files\nodejs` 与 `C:\Program Files\Git` 做一次 AppContainer SID 的读授权；普通权限 icacls 会被拒（实测 exit 5）。授权后重跑容器内 `where node` 验证。这条通过之前，appcontainer 里「shell 能用但干不了活」的判断成立。
+  - **修法（已验证 2026-11-01）**：用管理员权限对这两处做一次 AppContainer SID 的读授权，脚本 `scripts/grant-sandbox-read.ps1`（未提权时只打印 SID 与待执行命令，不改动）。授权后容器内实测：`where node` → `C:\Program Files\nodejs\node.exe`、`node --version` → `v24.19.0`、`git --version` → `2.55.0.windows.4`；真机 `prts chat` 里模型自己跑出的结果相同。
+  - **结论随之修正**：appcontainer 现在 **shell 与 node/git 都能跑**，「shell 能用但干不了活」不再是它的缺陷。默认后端要不要切过去是决策问题，不再是能力性阻塞。
 - **依赖 koffi**（`^3.3.6`）。它是原生模块，install 时有预编译下载脚本——**新机器上 `npm ci` 若被 `allow-scripts` 拦下，koffi 的二进制不会就位，`require('koffi')` 会失败**。这是部署约束，不是代码缺陷。
 - **实现要点（踩过的坑，别重踩）**：
   - `DWORD_PTR`（UpdateProcThreadAttribute 的 attr 参数）是 64 位，传 Number 会被 koffi 拒，必须 `BigInt`；`lpReturnSize` 可传 `NULL`。
