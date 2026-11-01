@@ -56,11 +56,19 @@ export function createLocalSpillStore(options: LocalSpillStoreOptions): SpillSto
         await handle.close()
       }
 
-      return {
-        locator: path,
-        bytes: Buffer.byteLength(input.content, 'utf8'),
-        retrievalHint: `完整结果已存至 ${path}，用 read 或 grep 读取`,
-      }
+      const bytes = Buffer.byteLength(input.content, 'utf8')
+      // 单行超长是「存了却读不回来」的真实场景：read 按行分页，单行超过 2000 字符
+      // 会被截断且 offset 推进不了（dsh-tool-fs 的 READ_MAX_LINE_LENGTH）。所以单行
+      // 结果必须给出按字符窗口推进的读法，否则卸载等于丢失。
+      // 路径用单引号包（PowerShell 的 literal string），内部单引号按 PS 规则双写。
+      const quoted = path.replace(/'/g, "''")
+      const retrievalHint = input.content.includes('\n')
+        ? `完整结果已存至 ${path}（${bytes} 字节）。用 read 读；超长时按它返回的提示传 offset 续读。`
+        : `完整结果已存至 ${path}（${bytes} 字节，单行）。read 会把单行截到 2000 字符，`
+          + `改用 pwsh 分段：$t=(Get-Content -LiteralPath '${quoted}' -Raw); $t.Substring(0,2000)`
+          + `（之后把 0 换成 2000、4000…）`
+
+      return { locator: path, bytes, retrievalHint }
     },
   }
 }

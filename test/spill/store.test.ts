@@ -17,6 +17,29 @@ function root(): { dir: string; root: string; cleanup(...c: { close(): void }[])
   return { dir: t.dir, root: join(t.dir, 'spill'), cleanup: t.cleanup }
 }
 
+test('单行结果的 retrievalHint 给出 pwsh 分段读命令（read 会按 2000 字符截断单行）', async () => {
+  const t = root()
+  try {
+    const store = createLocalSpillStore({ root: t.root })
+    const ref = await store.saveText({
+      sessionId: 's1', toolName: 'pwsh', callId: 'c1', suggestedName: 'one-line.txt', content: 'x'.repeat(5000),
+    })
+    assert.match(ref.retrievalHint, /Substring/i, '单行结果应给出 PowerShell 的 Substring 分段读法')
+    assert.equal(ref.retrievalHint.includes(ref.locator), true)
+  } finally { t.cleanup() }
+})
+
+test('多行结果的 retrievalHint 指向 read 的 offset 续读', async () => {
+  const t = root()
+  try {
+    const store = createLocalSpillStore({ root: t.root })
+    const ref = await store.saveText({
+      sessionId: 's1', toolName: 'pwsh', callId: 'c1', suggestedName: 'multi.txt', content: 'a\nb\nc',
+    })
+    assert.match(ref.retrievalHint, /offset/i, '多行结果应指向 read 的 offset 续读')
+  } finally { t.cleanup() }
+})
+
 test('写入后文件存在且内容逐字等于输入，bytes 按 UTF-8 计', async () => {
   const t = root()
   try {
