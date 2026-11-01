@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { appendChained, sha256hex, verifyChainRows, type ChainVerifyResult } from '../chain/index.ts'
 import { applyMemoryEvent } from './fold.ts'
-import { openMemoryDb } from './schema.ts'
+import { ensureSessionsBuilt, openMemoryDb } from './schema.ts'
 import { parseTime } from './time.ts'
 import { tokenize } from './tokenize.ts'
 import type {
@@ -299,6 +299,35 @@ export class MemoryStore {
       ? null
       : longTokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ')
 
+    // ---- 阶段一：session 级粗筛（v2.12）----
+    // turn 级从 491 个候选里选 8 个，噪声淹信号（any@8 38.8%）；先定位 session
+    // （每题中位 48 选 10）能把搜索空间压到约 100 turn，实测 all@10 80.8%。
+    // 注意不能复用 turn 级索引聚合（实测只到 55.8%，低 25pp）——必须是真的 session 索引。
+    // 默认关闭（0）：两阶段的**阶段一算法**还没选对。实测把它打开后 any@8 从
+    // 38.8% 掉到 34.0%——因为阶段一用 FTS5 bm25 做长文档粗筛，any@3 只有 14.7%，
+    // 而离线用「token 重叠 / sqrt(词数)」能到 85.6%（差 5.8 倍）。bm25 的打分被
+    // session 聚合文本的长度稀释了。修法是阶段一改成显式长度归一化（FTS5 只做召回、
+    // JS 里重排），在修好之前不开启，避免用变差的配置冒充改进。
+    const sessionLimit = q.sessionLimit ?? 0
+    let allowedSessions: string[] | null = null
+    if (sessionLimit > 0 && ftsMatch !== null) {
+      const sessRows = this.db.prepare(
+        `SELECT s.session_id AS sid
+           FROM mem_fts_sessions
+           JOIN mem_sessions s ON s.rowid = mem_fts_sessions.rowid
+          WHERE mem_fts_sessions MATCH ?
+            AND s.scope = ? AND s.origin IN (${originSlots})
+          ORDER BY bm25(mem_fts_sessions)
+          LIMIT ?`,
+      ).all(ftsMatch, scope, ...origins, sessionLimit) as Array<{ sid: string }>
+      // 阶段一颗粒无收时退回全库，避免「session 索引缺失 → 永远查不到」的静默失效
+      if (sessRows.length > 0) allowedSessions = sessRows.map((r) => r.sid)
+    }
+    const sessionFilter = allowedSessions === null
+      ? ''
+      : ` AND t.session_id IN (${allowedSessions.map(() => '?').join(',')})`
+    const sessionArgs = allowedSessions ?? []
+
     // ---- 路 1：FTS5 trigram（按 bm25 升序，越小越相关）----
     const ftsFacts: MemoryHit[] = ftsMatch === null ? [] : (
       this.db.prepare(
@@ -338,10 +367,10 @@ export class MemoryStore {
            LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref
           WHERE mem_fts_turns MATCH ?
             AND t.scope = ? AND t.deleted_at_ms IS NULL
-            AND t.origin IN (${originSlots})
+            AND t.origin IN (${originSlots})${sessionFilter}
           ORDER BY bm25(mem_fts_turns)
           LIMIT ?`,
-      ).all(ftsMatch, scope, ...origins, cap) as unknown as Array<{
+      ).all(ftsMatch, scope, ...origins, ...sessionArgs, cap) as unknown as Array<{
         turn_id: string
         session_id: string
         turn_index: number
@@ -423,11 +452,11 @@ export class MemoryStore {
            FROM mem_turns t
            LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref
           WHERE t.scope = ? AND t.deleted_at_ms IS NULL
-            AND t.origin IN (${originSlots}) AND (${turnConds})
+            AND t.origin IN (${originSlots}) AND (${turnConds})${sessionFilter}
           ORDER BY hit_count DESC, t.occurred_at_ms IS NULL, t.occurred_at_ms DESC
           LIMIT ?`,
       ).all(
-        ...pats, scope, ...origins, ...pats, cap,
+        ...pats, scope, ...origins, ...pats, ...sessionArgs, cap,
       ) as unknown as Array<{
         turn_id: string
         session_id: string
@@ -583,10 +612,13 @@ export class MemoryStore {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       // 全文索引也是投影：重建时先清空，再由 applyMemoryEvent 逐条重建。
-      this.db.exec('DELETE FROM mem_fts_turns; DELETE FROM mem_fts_facts; DELETE FROM mem_turns; DELETE FROM mem_facts; DELETE FROM mem_summaries; DELETE FROM mem_topics; DELETE FROM mem_deletions')
+      this.db.exec('DELETE FROM mem_fts_sessions; DELETE FROM mem_sessions; DELETE FROM mem_fts_turns; DELETE FROM mem_fts_facts; DELETE FROM mem_turns; DELETE FROM mem_facts; DELETE FROM mem_summaries; DELETE FROM mem_topics; DELETE FROM mem_deletions')
       const rows = this.db.prepare('SELECT * FROM memory_events ORDER BY seq')
         .all() as unknown as MemoryEventRow[]
       for (const r of rows) applyMemoryEvent(this.db, r)
+      // 重放时逐 turn 重算 session 会退化成 O(n²)；这里一次性补齐。
+      this.db.exec('DELETE FROM mem_fts_sessions; DELETE FROM mem_sessions;')
+      ensureSessionsBuilt(this.db, true)
       this.db.exec('COMMIT')
     } catch (e) {
       this.db.exec('ROLLBACK')

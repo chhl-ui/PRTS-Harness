@@ -81,6 +81,16 @@ export interface MemoryQuery {
    * 还是「挤出效应」——归因彻底失效。
    */
   factQuota?: number
+  /**
+   * 阶段一（v2.12）：先按 session 级索引取多少个会话，默认 10。
+   *
+   * 依据：turn 级 any@8 = 38.8%，而 session 级 any@3 = 85.6%、all@10 = 80.8%
+   * （同一批 500 题、同一朴素方法）。搜索空间从每题中位 491 turn 降到约 10 个
+   * session（约 100 turn）。
+   *
+   * 设为 0 表示关闭两阶段、退回纯 turn 级检索（对照用）。
+   */
+  sessionLimit?: number
 }
 
 export interface MemoryHit {

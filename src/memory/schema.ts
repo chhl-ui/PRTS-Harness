@@ -118,6 +118,18 @@ CREATE TABLE IF NOT EXISTS mem_deletions (
 -- rowid 与 mem_turns / mem_facts 的隐式 rowid 对齐，由 fold.ts 在投影更新时同步维护。
 CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_turns USING fts5(body, tokenize='trigram');
 CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_facts USING fts5(body, tokenize='trigram');
+
+CREATE TABLE IF NOT EXISTS mem_sessions (
+  session_id     TEXT PRIMARY KEY,
+  scope          TEXT NOT NULL DEFAULT 'prts',
+  origin         TEXT NOT NULL,
+  body           TEXT NOT NULL,
+  turn_count     INTEGER NOT NULL DEFAULT 0,
+  updated_at_ms  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_scope ON mem_sessions(scope, origin);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_sessions USING fts5(body, tokenize='trigram');
 `
 
 /** 打开（或创建）记忆库。`secure_delete` 是设计稿 §八 第 15 条的硬要求。 */
@@ -128,6 +140,7 @@ export function openMemoryDb(path: string): DatabaseSync {
   db.exec(SCHEMA)
   ensureFactIdentityColumn(db)
   ensureFtsIndexed(db)
+  ensureSessionsBuilt(db)
   return db
 }
 
@@ -157,6 +170,61 @@ function ensureFactIdentityColumn(db: DatabaseSync): void {
   // 宁可让它们互不去重，也不能把两条不同的老事实错判成同一条。
   db.exec("UPDATE mem_facts SET identity_key = lower(trim(subject)) || '|' || lower(trim(predicate)) || '|legacy:' || fact_id WHERE identity_key IS NULL")
   db.exec('CREATE INDEX IF NOT EXISTS idx_facts_identity ON mem_facts(identity_key, retired_at_ms, deleted_at_ms)')
+}
+
+/**
+ * session 级索引（v2.12）。
+ *
+ * 为什么需要：turn 级检索从每题 491 个候选里选 8 个，噪声把信号淹了——
+ * 实测 any@8 只有 38.8%。而按 session 检索（每题中位 48 个候选里选 3-10 个），
+ * 同样的朴素方法就能到 any@3 85.6% / all@10 80.8%。
+ *
+ * 为什么不能复用 turn 级索引聚合：实测只到 55.8%（turn 级 top-200 再聚合），
+ * 比直接检索 session 文本低 25pp——turn 级每条只留最佳匹配，聚合后丢了
+ * session 的整体主题信号。
+ *
+ * 维护方式：turn 写入时按 session 重算聚合文本（单个 session 约 10 turn，
+ * 成本可忽略）；这里负责把**旧的或缺失的** session 补建出来。
+ */
+/**
+ * @param inTransaction 调用方已开事务时传 true——SQLite 不允许嵌套 BEGIN，
+ *   `rebuildProjections` 就是在自己的事务里调它。
+ */
+export function ensureSessionsBuilt(db: DatabaseSync, inTransaction = false): void {
+  const missing = db.prepare(
+    `SELECT t.session_id AS sid, t.scope AS scope, t.origin AS origin,
+            group_concat(b.body, ' ') AS body, count(*) AS n, max(t.rowid) AS maxrid
+       FROM mem_turns t
+       JOIN mem_bodies b ON b.body_ref = t.body_ref
+      WHERE b.body IS NOT NULL AND t.deleted_at_ms IS NULL
+        AND t.session_id NOT IN (SELECT session_id FROM mem_sessions)
+      GROUP BY t.session_id`,
+  ).all() as Array<{ sid: string; scope: string; origin: string; body: string | null; n: number; maxrid: number }>
+  if (missing.length === 0) return
+
+  if (!inTransaction) db.exec('BEGIN IMMEDIATE')
+  try {
+    const ins = db.prepare(
+      `INSERT INTO mem_sessions (session_id, scope, origin, body, turn_count, updated_at_ms)
+       VALUES (?,?,?,?,?,?)
+       ON CONFLICT(session_id) DO UPDATE SET body = excluded.body,
+         turn_count = excluded.turn_count, updated_at_ms = excluded.updated_at_ms`,
+    )
+    const del = db.prepare('DELETE FROM mem_fts_sessions WHERE rowid = (SELECT rowid FROM mem_sessions WHERE session_id = ?)')
+    const insFts = db.prepare(
+      'INSERT INTO mem_fts_sessions(rowid, body) SELECT rowid, body FROM mem_sessions WHERE session_id = ?',
+    )
+    for (const r of missing) {
+      const body = r.body ?? ''
+      ins.run(r.sid, r.scope, r.origin, body, r.n, Date.now())
+      del.run(r.sid)
+      insFts.run(r.sid)
+    }
+    if (!inTransaction) db.exec('COMMIT')
+  } catch (e) {
+    if (!inTransaction) db.exec('ROLLBACK')
+    throw e
+  }
 }
 
 function ensureFtsIndexed(db: DatabaseSync): void {

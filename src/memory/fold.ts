@@ -102,6 +102,26 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       if (rid !== undefined && body !== '') {
         db.prepare('INSERT INTO mem_fts_turns(rowid, body) VALUES (?,?)').run(rid, body)
       }
+
+      // 维护 session 级索引（v2.12）。必须在写入路径上做——只在 open 时补建的话，
+      // 本次会话新写的 turn 不会被 session 索引覆盖，检索阶段一选不到它所在会话，
+      // 第二阶段就被过滤掉了：静默的「刚说的记不住」。
+      // 单个 session 约 10 turn，重算成本可忽略。
+      const sess = db.prepare(
+        `SELECT group_concat(b2.body, ' ') AS body, count(*) AS n
+           FROM mem_turns t2 JOIN mem_bodies b2 ON b2.body_ref = t2.body_ref
+          WHERE t2.session_id = ? AND b2.body IS NOT NULL AND t2.deleted_at_ms IS NULL`,
+      ).get(p.session_id) as { body: string | null; n: number } | undefined
+      if (sess !== undefined && sess.body !== null && sess.body !== '') {
+        db.prepare(
+          `INSERT INTO mem_sessions (session_id, scope, origin, body, turn_count, updated_at_ms)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(session_id) DO UPDATE SET body = excluded.body,
+             turn_count = excluded.turn_count, updated_at_ms = excluded.updated_at_ms`,
+        ).run(p.session_id, e.scope, p.origin, sess.body, sess.n, e.recorded_at_ms)
+        db.prepare('DELETE FROM mem_fts_sessions WHERE rowid = (SELECT rowid FROM mem_sessions WHERE session_id = ?)').run(p.session_id)
+        db.prepare('INSERT INTO mem_fts_sessions(rowid, body) SELECT rowid, body FROM mem_sessions WHERE session_id = ?').run(p.session_id)
+      }
       break
     }
     case 'memory.deleted': {
