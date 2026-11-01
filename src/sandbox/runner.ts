@@ -71,7 +71,10 @@ async function main(): Promise<number> {
   let box
   try {
     box = await createAppContainer({ name: profile, workspace })
-    const child = box.spawn({ command: command[0], args: command.slice(1) })
+    // cwd 必须显式设到已授权的工作区。不设的话子进程继承 runner 的当前目录
+    // （通常是仓库根，AppContainer 对它没有 traverse），PowerShell 会直接
+    // 报「当前目录无效」而根本不执行命令——cmd 不敏感，pwsh 敏感，很容易漏测。
+    const child = box.spawn({ command: command[0], args: command.slice(1), cwd: workspace })
     const result = await child.wait()
     process.stdout.write(result.output)
     return result.exitCode

@@ -88,3 +88,28 @@ test('runner: 用法错误返回 64', { timeout: 60000 }, async () => {
   assert.equal(r.code, 64, `缺 --profile 应返回 64，实际 ${r.code}`)
   assert.match(r.err, /--profile/)
 })
+
+test('runner: cwd 设到工作区——pwsh 能执行（继承错目录会报「当前目录无效」）', { timeout: 180000 }, async () => {
+  // 这是一个真实踩到的缺陷：runner 起初没给 spawn 传 cwd，子进程继承 runner 的
+  // 当前目录（仓库根），AppContainer 对它没有 traverse。cmd 不敏感所以看不出，
+  // pwsh 直接报「当前目录无效」而根本不执行命令。用相对路径写文件来钉住它。
+  const PWSH = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+  // 必须用**浅层**目录：workspace 放在 %TEMP% 下时，PowerShell 解析相对路径要
+  // realpath 整条祖先链，而 AppData / Temp 对 AppContainer 没有 traverse 权限，
+  // 于是报「对路径 … 的访问被拒绝」。cmd 不做 realpath 所以看不出来。
+  // 生产配置的 C:\prts-workspace 就符合这个要求，测试也跟着放 C:\ 下。
+  const ws = join('C:\\', `prts-ac-test-${process.pid}-${Date.now()}`)
+  mkdirSync(ws, { recursive: true })
+  const profile = `PRTS.RunnerCwd.${process.pid}.${Date.now()}`
+  try {
+    const r = await runRunner([
+      '--profile', profile, '--workspace', ws, '--',
+      PWSH, '-NoProfile', '-Command',
+      'Set-Content -Path inside-ps.txt -Value ps-ok; Get-Content inside-ps.txt',
+    ])
+    assert.equal(r.code, 0, `pwsh 退出码 ${r.code}（输出：${JSON.stringify((r.out + r.err).slice(0, 200))}）`)
+    assert.match(r.out, /ps-ok/, `pwsh 没按工作区为 cwd 执行：${JSON.stringify(r.out.slice(0, 200))}`)
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+  }
+})

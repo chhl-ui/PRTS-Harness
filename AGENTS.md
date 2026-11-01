@@ -52,6 +52,10 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   - 授权走 `icacls` 子进程而非手写 `SetNamedSecurityInfo`（后者有「pSacl 要 ACL 指针而不是整个 SD」的坑）。
   - **尚未接线到运行时**：`createAppContainer` 与 `runner.ts` 都是可用件，但 PRTS 的 shell 工具还没有走它们——还缺 `SandboxProvider` 的实现层。
 - **runner 协议（`src/sandbox/runner.ts`）**：`node runner.ts --profile <名称> --workspace <路径> -- <命令> [参数...]`。子进程 stdout/stderr 合并写入本进程 stdout，退出码**原样透传**；自身失败用 sysexits 风格（64 用法错误 / 70 内部错误），**失败绝不返回 0**——静默成功会让上游把「沙箱没起来」当成「命令跑完了」。实测两层管道（子进程→CreatePipe→runner→调用方）在 210KB 输出下不丢不死锁。
+- **两条实测出来的硬约束**：
+  1. **spawn 必须显式设 `cwd` 到已授权的工作区**。不设就继承 runner 的当前目录，AppContainer 对它没有 traverse：`cmd` 不敏感看不出来，**`pwsh` 直接报「当前目录无效」而根本不执行命令**。runner 早期漏了这一条，靠 pwsh 回归才暴露。
+  2. **workspace 必须在祖先链可 traverse 的浅层路径下**。放在 `%TEMP%` 这类深层目录时，PowerShell 解析相对路径要 realpath 整条链，`AppData` / `Temp` 对 AppContainer 无权限 → 「对路径 … 的访问被拒绝」。`C:\prts-workspace` 符合要求；`C:\Users\ADMINI~1\AppData\Local\Temp\...` 不符合。node 那个 `EPERM: lstat 'C:\'` 是同一类问题。
+- **`denialSignatures` 只能留空**（实测结论）：AppContainer 下越界操作的错误文本是**系统本地化**的——本机（中文）上读/写/删/列全是「拒绝访问。」，pwsh 是「对路径 … 的访问被拒绝。」，没有可跨语言匹配的稳定子串。填中文签名换台机器就失效，填英文在本机匹配不上。上游不能依赖 denial 分类做安全判断；沙箱是否生效要靠退出码与 ACL 本身，不靠文本嗅探。
 - **接线形态：必须是 runner，不能直接接 `SandboxProvider`**（2026-11-01 查证）：
   `dsh-sandbox` 的 `SandboxProvider.confine()` 返回 `ConfinedArgv`，其 `argv` 是
   「runner + profile + 分隔符 + 调用方 argv」，由上层用普通 `child_process` 启动
