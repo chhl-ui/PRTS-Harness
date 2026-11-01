@@ -29,35 +29,15 @@
  * 记着大树上可达数十秒），届时需要「profile 与 ACL 复用」的优化，而不是每次全树走一遍。
  */
 import { createAppContainer } from './appcontainer.ts'
+import { parseRunnerArgv } from './runner-args.ts'
 
 /** 用法错误。 */
 const EX_USAGE = 64
 /** 内部错误（建容器失败、启动失败等）。 */
 const EX_SOFTWARE = 70
 
-function parseArgv(argv: readonly string[]): {
-  profile?: string
-  workspace?: string
-  inherit: boolean
-  command: string[]
-} {
-  const sep = argv.indexOf('--')
-  if (sep < 0) return { inherit: false, command: [] }
-  const opts = argv.slice(0, sep)
-  const command = argv.slice(sep + 1)
-  let profile: string | undefined
-  let workspace: string | undefined
-  let inherit = false
-  for (let i = 0; i < opts.length; i += 1) {
-    if (opts[i] === '--profile') profile = opts[i + 1]
-    else if (opts[i] === '--workspace') workspace = opts[i + 1]
-    else if (opts[i] === '--inherit') inherit = true
-  }
-  return { profile, workspace, inherit, command }
-}
-
 async function main(): Promise<number> {
-  const { profile, workspace, inherit, command } = parseArgv(process.argv.slice(2))
+  const { profile, workspace, inherit, command, readPaths } = parseRunnerArgv(process.argv.slice(2))
   if (profile === undefined || profile === '') {
     console.error('prts runner: 缺少 --profile')
     return EX_USAGE
@@ -73,7 +53,7 @@ async function main(): Promise<number> {
 
   let box
   try {
-    box = await createAppContainer({ name: profile, workspace })
+    box = await createAppContainer({ name: profile, workspace, extraReadPaths: readPaths })
     // cwd 必须显式设到已授权的工作区。不设的话子进程继承 runner 的当前目录
     // （通常是仓库根，AppContainer 对它没有 traverse），PowerShell 会直接
     // 报「当前目录无效」而根本不执行命令——cmd 不敏感，pwsh 敏感，很容易漏测。

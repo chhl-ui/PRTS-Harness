@@ -48,6 +48,8 @@ export interface ConfineOptions {
   runnerPath: string
   /** Node 可执行文件路径；缺省用 process.execPath。 */
   execPath?: string
+  /** 需要额外授予读权限的目录（AppContainer 内可读不可写）。 */
+  readPaths?: readonly string[]
 }
 
 /** runner 自身失败时写在 stderr 的前缀，与 runner.ts 保持一致。 */
@@ -121,6 +123,9 @@ export function confineArgv(argv: readonly string[], opts: ConfineOptions): Conf
       // PTY 那头看不到 shell 输出，直接判「PTY shell exited during startup」——
       // 真机实测过一次，模型三次调用全部撞在这上面。
       '--inherit',
+      // 额外读权限目录，每个一项。用途：工具结果卸载的存储根——不给的话
+      // 沙箱里的 shell 对 spill 文件 `Test-Path` 会返回 Access is denied（实测）。
+      ...(opts.readPaths ?? []).flatMap((p) => ['--read-path', p]),
       '--',
       ...argv,
     ],

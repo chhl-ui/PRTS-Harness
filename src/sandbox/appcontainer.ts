@@ -271,7 +271,18 @@ export async function createAppContainer(opts: AppContainerOptions): Promise<App
   }
 
   await grant(opts.workspace, '(OI)(CI)(RX,W)')
-  for (const p of opts.extraReadPaths ?? []) await grant(p, '(OI)(CI)(RX)')
+  for (const p of opts.extraReadPaths ?? []) {
+    // 额外读权限是增强，不是容器创建的前置。目录可能还不存在（从未 spill 过），
+    // 那时 icacls 会以 exit 2「系统找不到指定的文件」失败。让这种情况把整个容器
+    // 建不起来是本末倒置——实测过一次：所有 shell 命令都变成 runner 70 失败。
+    try {
+      await grant(p, '(OI)(CI)(RX)')
+    } catch (error) {
+      console.warn(
+        `[prts] 跳过额外读权限 ${p}：${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
 
   return {
     sid,

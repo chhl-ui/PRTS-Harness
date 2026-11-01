@@ -1,4 +1,5 @@
 /** 运行时组装：boot('prts', configPath, patches, prepare) + 最小 credentials 服务 + K2a 守卫接线。 */
+import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { boot } from '@deepseek-ai/dsh-app-boot'
@@ -102,10 +103,21 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     // AppContainer 后端：在这里注册，因为 prepare 早于 config-tree 挂载，此时
     // `sandbox` 条目已被上面的 patch 禁用，不会与 dsh-sandbox-local 抢同一个
     // 服务名。Service 构造会自动注册为 ctx.sandbox。
+    // spill 根必须在容器授权之前就存在：icacls 对不存在的目录会 exit 2，而
+    // AppContainer 的读权限授权就发生在下面几行里。建不出来不阻断——降级为
+    // 「沙箱里没有该读权限」，spill 自己写入时会再报一次。
+    try {
+      mkdirSync(resolveSpillRoot(o.dataRoot), { recursive: true })
+    } catch { /* 交给 spill 写入时报错 */ }
     if (backend === 'appcontainer') {
       void new AppContainerSandboxProvider(hostCtx, {
         profile: 'PRTS.Sandbox',
         runnerPath: fileURLToPath(new URL('../sandbox/runner.ts', import.meta.url)),
+        // spill 根要给沙箱读权限：不给的话卸载的文件在 shell 里 `Test-Path`
+        // 返回 Access is denied（真机实测），卸载了却读不回来。
+        // 这里重算一次是因为 provider 早于 spillRoot 的定义；resolveSpillRoot
+        // 是只读 env 的纯函数，两处结果必然一致。
+        readPaths: [resolveSpillRoot(o.dataRoot)],
       })
     }
     // 最小 credentials：只实现 resolve(ref)。credentialRef() 返回品牌字符串

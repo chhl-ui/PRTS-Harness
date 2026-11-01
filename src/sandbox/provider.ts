@@ -30,6 +30,13 @@ export interface AppContainerProviderOptions {
   profile: string
   /** runner 脚本绝对路径（`src/sandbox/runner.ts` 的位置）。 */
   runnerPath: string
+  /**
+   * 需要额外授予读权限的目录。
+   *
+   * 当前唯一用途：spill 存储根。不给的话 AppContainer 里的 shell 对 spill 文件
+   * `Test-Path` 返回 Access is denied——卸载了却读不回来，等于没卸载。
+   */
+  readPaths?: readonly string[]
 }
 
 export class AppContainerSandboxProvider extends SandboxProvider {
@@ -68,6 +75,7 @@ export class AppContainerSandboxProvider extends SandboxProvider {
         workspaceRoot: policy.workspaceRoot,
         profile: this.opts.profile,
         runnerPath: this.opts.runnerPath,
+        readPaths: this.opts.readPaths,
       })
     } catch (error) {
       // 把内部错误统一成 SANDBOX_UNAVAILABLE：调用方能据此区分
