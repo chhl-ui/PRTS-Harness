@@ -54,6 +54,8 @@ export interface RecordTurnInput {
 export interface ImportStats {
   sessions: number
   turns: number
+  /** 标了证据的 turn 数（LongMemEval 的 `has_answer`）。LOCOMO 无此概念，恒 0。 */
+  evidence: number
   /** 时间串解析失败的会话数——**不阻断导入**，但要如实报出来。 */
   unparsedTime: number
 }

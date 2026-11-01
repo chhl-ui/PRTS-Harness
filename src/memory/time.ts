@@ -5,8 +5,12 @@
  * 只是 `occurred_at_ms` 为 null。**不做自然语言时间解析**：那是另一个模块，
  * 且猜错会污染双时间。
  *
- * 只处理实测出现过的形态（`locomo10.json` 的 `session_N_date_time` 是
- * `"1:56 pm on 8 May, 2023"`，不是 ISO）。
+ * 支持的形态全部来自**实测**，不是猜的：
+ * - LoCoMo `locomo10.json` 的 `session_N_date_time`：`"1:56 pm on 8 May, 2023"`
+ * - LongMemEval `longmemeval_oracle.json` 的 `haystack_dates`：`"2023/04/10 (Mon) 17:50"`
+ *
+ * 第二种是 2026-11-01 用真实数据导入时才发现的——首轮 `unparsedTime` 是 948/948，
+ * fixture 里的假设格式与真实数据不一致。
  */
 
 const MONTHS: Record<string, number> = {
@@ -68,7 +72,15 @@ export function parseTime(raw: string): number | null {
     return Date.UTC(y, month, d, hour, Number(locomo[2]))
   }
 
-  // 3. "<D> <Mon> <YYYY>"
+  // 3. "<YYYY>/<MM>/<DD> (Day) <HH>:<mm>" —— LongMemEval 的 haystack_dates
+  const slash = /^(\d{4})\/(\d{1,2})\/(\d{1,2})(?:\s*\([^)]*\))?\s*(\d{1,2}):(\d{2})$/.exec(s)
+  if (slash) {
+    const y = Number(slash[1]), m = Number(slash[2]) - 1, d = Number(slash[3])
+    if (!utcValid(y, m, d)) return null
+    return Date.UTC(y, m, d, Number(slash[4]), Number(slash[5]))
+  }
+
+  // 4. "<D> <Mon> <YYYY>"
   const dmy = /^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/.exec(s)
   if (dmy) {
     const month = MONTHS[dmy[2].toLowerCase()]
@@ -78,7 +90,7 @@ export function parseTime(raw: string): number | null {
     return Date.UTC(y, month, d)
   }
 
-  // 4. "<Mon> <D>, <YYYY>"
+  // 5. "<Mon> <D>, <YYYY>"
   const mdy = /^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/.exec(s)
   if (mdy) {
     const month = MONTHS[mdy[1].toLowerCase()]

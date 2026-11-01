@@ -377,7 +377,62 @@ export class MemoryStore {
         })
       }
     }
-    return { sessions, turns, unparsedTime }
+    return { sessions, turns, evidence: 0, unparsedTime }
+  }
+
+  /**
+   * 导入 LongMemEval 结构（`longmemeval_oracle.json` 等）。
+   *
+   * 实测字段：`question_id` / `haystack_session_ids` / `haystack_dates` /
+   * `haystack_sessions`（每会话是一个 turn 列表，turn 是 `{role, content}`，
+   * 证据 turn 额外带 `has_answer: true`）。
+   *
+   * `sessionId` 带 `question_id` 前缀——不同 question 的 `haystack_session_ids`
+   * 可能重名，不加前缀会撞车。
+   */
+  importLongMemEval(data: unknown): ImportStats {
+    if (!Array.isArray(data)) throw new Error('memory: importLongMemEval 需要数组')
+    let sessions = 0
+    let turns = 0
+    let evidence = 0
+    let unparsedTime = 0
+
+    for (const raw of data) {
+      const q = raw as {
+        question_id?: string
+        haystack_session_ids?: string[]
+        haystack_dates?: string[]
+        haystack_sessions?: Array<Array<{ role?: string; content?: string; has_answer?: boolean }>>
+      }
+      const qid = q.question_id ?? 'unknown'
+      const ids = q.haystack_session_ids ?? []
+      const dates = q.haystack_dates ?? []
+
+      ;(q.haystack_sessions ?? []).forEach((turnList, si) => {
+        const sid = ids[si] ?? `s${si}`
+        const dateRaw = dates[si]
+        if (typeof dateRaw === 'string' && parseTime(dateRaw) === null) unparsedTime++
+        sessions++
+
+        turnList.forEach((t, ti) => {
+          const isEvidence = t.has_answer === true
+          if (isEvidence) evidence++
+          this.recordTurn({
+            actor: 'system',
+            sessionId: `${qid}/${sid}`,
+            turnIndex: ti,
+            speaker: t.role ?? 'unknown',
+            text: t.content ?? '',
+            ...(typeof dateRaw === 'string' ? { occurredRaw: dateRaw } : {}),
+            origin: 'benchmark',
+            isEvidence,
+            dedupeKey: `${qid}|${sid}|${ti}`,
+          })
+          turns++
+        })
+      })
+    }
+    return { sessions, turns, evidence, unparsedTime }
   }
 
   rebuildProjections(): void {

@@ -1,0 +1,21 @@
+[
+  {
+    "question_id": "q-mini-1",
+    "question_type": "single-session-user",
+    "question": "What lens do I prefer?",
+    "answer": "50mm prime",
+    "question_date": "2023-05-10",
+    "haystack_session_ids": ["s1", "s2"],
+    "haystack_dates": ["2023-05-08", "1:56 pm on 9 May, 2023"],
+    "haystack_sessions": [
+      [
+        { "role": "user", "content": "I mostly shoot with my 50mm prime.", "has_answer": true },
+        { "role": "assistant", "content": "That is a versatile focal length." }
+      ],
+      [
+        { "role": "user", "content": "The weather has been pleasant lately." }
+      ]
+    ],
+    "answer_session_ids": ["s1"]
+  }
+]
