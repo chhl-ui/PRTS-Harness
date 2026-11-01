@@ -4,6 +4,9 @@ export { SCHEMA, openMemoryDb } from './schema.ts'
 export { applyMemoryEvent } from './fold.ts'
 export { parseTime } from './time.ts'
 export { tokenize } from './tokenize.ts'
+export {
+  OllamaEmbedder, cosineSimilarity, decodeVector, encodeVector, type Embedder,
+} from './embedding.ts'
 export type {
   ActorKind,
   AssertFactInput,

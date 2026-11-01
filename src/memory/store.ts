@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { appendChained, sha256hex, verifyChainRows, type ChainVerifyResult } from '../chain/index.ts'
 import { applyMemoryEvent } from './fold.ts'
+import { cosineSimilarity, decodeVector, encodeVector, type Embedder } from './embedding.ts'
 import { ensureSessionsBuilt, openMemoryDb } from './schema.ts'
 import { parseTime } from './time.ts'
 import { tokenize } from './tokenize.ts'
@@ -28,6 +29,13 @@ const DEFAULT_LIMIT = 20
  * 不再覆盖 RRF 的名次差异（相邻名次差 ~50%）。
  */
 const RECENCY_WEIGHT = 0.1
+
+/**
+ * 向量路的扫描上限（v2.17）。全量余弦在百千级是毫秒级，但无上限会把 24.6 万条
+ * 的库拖进每次查询。超过这个数量就该上 ANN 索引（HNSW / IVF），而不是继续硬扫。
+ * 当前上限内扫描一遍的输出是确定的（ORDER BY 固定顺序），不依赖插入次序。
+ */
+const SEMANTIC_SCAN_CAP = 50_000
 
 /** `LIKE` 通配符转义。不转义时一条含 `%` 的提问会命中全表（设计稿 §6.5）。 */
 export function escapeLike(s: string): string {
@@ -290,8 +298,17 @@ export class MemoryStore {
       hits.forEach((h, i) => {
         const add = 1 / (RRF_K + i + 1)
         const prev = fused.get(h.id)
-        if (prev === undefined) fused.set(h.id, { hit: { ...h, recallPath: path }, rrf: add })
-        else prev.rrf += add
+        if (prev === undefined) fused.set(h.id, { hit: { ...h, recallPath: path, recallPaths: [path] }, rrf: add })
+        else {
+          prev.rrf += add
+          // 多路召回时记全来源：只留首次标签会让「向量是否真的立功」无法回答，
+          // 而这正是本轮改动要回答的问题。
+          const paths = prev.hit.recallPaths ?? [prev.hit.recallPath]
+          if (!paths.includes(path)) {
+            paths.push(path)
+            prev.hit.recallPaths = paths
+          }
+        }
       })
     }
 
@@ -430,6 +447,117 @@ export class MemoryStore {
     rank(ftsTurns, 'fts-trigram')
     rank(profileHits, 'profile')
 
+    // ---- 路 3：向量语义近邻（v2.17）----
+    // 只覆盖派生项（fact / profile）：turn 是 24.6 万级，全量余弦不划算，且 turn 的
+    // 瓶颈在粒度不在语义（v2.11：session@3 85.6% vs turn@8 38.8%）。
+    // 依据：120 条归纳画像 × 3 道 preference 题，bm25 把目标画像排到 16 / 未命中 / 未命中，
+    // 同一批数据换余弦后是 4 / 1 / 14，top-8 可答性 0/3 → 2/3。
+    const semanticTopK = q.semanticTopK ?? 0
+    const qv = q.queryVector
+    if (semanticTopK > 0 && qv !== undefined && qv.length > 0) {
+      const minSim = q.semanticMinSim ?? 0
+      const vecRows = this.db.prepare(
+        `SELECT owner_kind, owner_id, vector FROM mem_vectors
+          ORDER BY owner_kind, owner_id LIMIT ?`,
+      ).all(SEMANTIC_SCAN_CAP) as unknown as Array<{
+        owner_kind: string
+        owner_id: string
+        vector: Uint8Array
+      }>
+
+      const sims: Array<{ ownerKind: string; ownerId: string; sim: number }> = []
+      for (const r of vecRows) {
+        let v: Float32Array
+        try {
+          v = decodeVector(r.vector)
+        } catch {
+          continue // BLOB 损坏：跳过这一条，不让整条检索路失败
+        }
+        // 维度不符 = 换过模型但没重算：同样跳过。静默跳过是可接受的降级，
+        // 但 vectorStats() 必须能把这种情况暴露出来，不能只有「检索变差」这一个症状。
+        if (v.length !== qv.length) continue
+        const sim = cosineSimilarity(qv, v)
+        if (sim >= minSim) sims.push({ ownerKind: r.owner_kind, ownerId: r.owner_id, sim })
+      }
+      sims.sort((a, b) => b.sim - a.sim)
+      const top = sims.slice(0, semanticTopK)
+
+      // 回表取正文：按 top 的顺序重建，rank() 用数组下标当名次，顺序即名次。
+      const factIds = top.filter((t) => t.ownerKind === 'fact').map((t) => t.ownerId)
+      const profIds = top.filter((t) => t.ownerKind === 'profile').map((t) => t.ownerId)
+
+      const factById = new Map<string, {
+        fact_id: string
+        provenance: 'stated' | 'inferred'
+        origin: Origin
+        importance: number
+        recorded_at_ms: number
+        body: string | null
+      }>()
+      if (factIds.length > 0) {
+        const rows = this.db.prepare(
+          `SELECT f.fact_id, f.provenance, f.origin, f.importance, f.recorded_at_ms, b.body
+             FROM mem_facts f
+             LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
+            WHERE f.fact_id IN (${factIds.map(() => '?').join(',')})
+              AND f.scope = ? AND f.deleted_at_ms IS NULL AND f.retired_at_ms IS NULL
+              AND f.origin IN (${originSlots})`,
+        ).all(...factIds, scope, ...origins) as unknown as Array<{
+          fact_id: string
+          provenance: 'stated' | 'inferred'
+          origin: Origin
+          importance: number
+          recorded_at_ms: number
+          body: string | null
+        }>
+        for (const r of rows) factById.set(r.fact_id, r)
+      }
+
+      const profById = new Map<string, { profile_id: string; profile_body: string; confidence: number }>()
+      if (profIds.length > 0) {
+        const rows = this.db.prepare(
+          `SELECT profile_id, profile_body, confidence FROM mem_profiles
+            WHERE profile_id IN (${profIds.map(() => '?').join(',')})
+              AND scope = ? AND deleted_at_ms IS NULL`,
+        ).all(...profIds, scope) as unknown as Array<{
+          profile_id: string
+          profile_body: string
+          confidence: number
+        }>
+        for (const r of rows) profById.set(r.profile_id, r)
+      }
+
+      const semanticHits: MemoryHit[] = []
+      for (const t of top) {
+        if (t.ownerKind === 'fact') {
+          const r = factById.get(t.ownerId)
+          if (r === undefined) continue
+          semanticHits.push({
+            kind: 'fact',
+            id: r.fact_id,
+            score: (1 + RECENCY_WEIGHT * recency(r.recorded_at_ms, nowMs)) * (0.5 + r.importance),
+            provenance: r.provenance,
+            origin: r.origin,
+            text: r.body ?? '',
+            recallPath: 'semantic',
+          })
+        } else if (t.ownerKind === 'profile') {
+          const r = profById.get(t.ownerId)
+          if (r === undefined) continue
+          semanticHits.push({
+            kind: 'profile',
+            // 同样的命名空间前缀：`fused` 按 id 合并，与 fact 同 id 时 kind 会被吞
+            id: `profile-${r.profile_id}`,
+            score: 0.5 + r.confidence,
+            origin: origins[0] ?? 'live',
+            text: r.profile_body,
+            recallPath: 'semantic',
+          })
+        }
+      }
+      rank(semanticHits, 'semantic')
+    }
+
     // ---- 路 2：LIKE 兜底（中文 2 字等短 token；FTS 颗粒无收时用全部 token 再兜一次）----
     const likeTokens = shortTokens.length > 0
       ? shortTokens
@@ -530,6 +658,114 @@ export class MemoryStore {
     // 分组配额决定「谁入选」，组内已按 score 排好；合并后总量已 <= limit，
     // 不能再全局重排后截断——那会把配额保证的小组整体挤掉（实测 profile 被 fact 挤出）。
     return [...profiles, ...facts, ...rest].slice(0, limit)
+  }
+
+  /**
+   * 批量写入向量（v2.17）。同一 `(owner_kind, owner_id)` 覆盖。
+   *
+   * 必须在一个事务里写完：分批提交会留下「一半 fact 是新模型向量、一半是旧模型」的
+   * 中间态，而检索会静默跳过维度不符的那一半——症状只是「变差」，不报错。
+   */
+  putVectors(
+    entries: Array<{ ownerKind: 'fact' | 'profile'; ownerId: string; vector: ArrayLike<number> }>,
+    model: string,
+  ): number {
+    if (entries.length === 0) return 0
+    const now = Date.now()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const stmt = this.db.prepare(
+        `INSERT INTO mem_vectors (owner_kind, owner_id, model, dim, vector, updated_at_ms)
+         VALUES (?,?,?,?,?,?)
+         ON CONFLICT(owner_kind, owner_id) DO UPDATE SET
+           model = excluded.model, dim = excluded.dim,
+           vector = excluded.vector, updated_at_ms = excluded.updated_at_ms`,
+      )
+      for (const e of entries) {
+        stmt.run(e.ownerKind, e.ownerId, model, e.vector.length, encodeVector(e.vector), now)
+      }
+      this.db.exec('COMMIT')
+      return entries.length
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
+  /**
+   * 给还没有向量的派生项补生成向量。
+   *
+   * 文本口径**必须与 FTS 索引一致**（fact = subject + predicate + body）。否则 bm25 与
+   * 向量比较的其实是两段不同文本，融合结果就无法归因——本会话反复踩的就是这个坑
+   * （v2.10 假上界、v2.12 离线/实现不一致、v2.16 探针自写排序）。
+   *
+   * 失败只影响单批：已成功的批次照常入库，不推进的部分下次重跑会自然被选中。
+   */
+  async embedPending(opts: {
+    embedder: Embedder
+    limit?: number
+    kinds?: Array<'fact' | 'profile'>
+  }): Promise<{ embedded: number; failed: number }> {
+    const limit = opts.limit ?? 200
+    const kinds = opts.kinds ?? ['fact', 'profile']
+    const pending: Array<{ ownerKind: 'fact' | 'profile'; ownerId: string; text: string }> = []
+
+    if (kinds.includes('fact')) {
+      const rows = this.db.prepare(
+        `SELECT f.fact_id AS id, f.subject || ' ' || f.predicate || ' ' || COALESCE(b.body,'') AS text
+           FROM mem_facts f
+           LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
+           LEFT JOIN mem_vectors v ON v.owner_kind = 'fact' AND v.owner_id = f.fact_id
+          WHERE f.deleted_at_ms IS NULL AND f.retired_at_ms IS NULL
+            AND (v.owner_id IS NULL OR v.model != ?)
+          ORDER BY f.fact_id
+          LIMIT ?`,
+      ).all(opts.embedder.model, limit) as unknown as Array<{ id: string; text: string }>
+      for (const r of rows) pending.push({ ownerKind: 'fact', ownerId: r.id, text: r.text })
+    }
+
+    const room = limit - pending.length
+    if (kinds.includes('profile') && room > 0) {
+      const rows = this.db.prepare(
+        `SELECT p.profile_id AS id, p.profile_body AS text
+           FROM mem_profiles p
+           LEFT JOIN mem_vectors v ON v.owner_kind = 'profile' AND v.owner_id = p.profile_id
+          WHERE p.deleted_at_ms IS NULL AND (v.owner_id IS NULL OR v.model != ?)
+          ORDER BY p.profile_id
+          LIMIT ?`,
+      ).all(opts.embedder.model, room) as unknown as Array<{ id: string; text: string }>
+      for (const r of rows) pending.push({ ownerKind: 'profile', ownerId: r.id, text: r.text })
+    }
+
+    if (pending.length === 0) return { embedded: 0, failed: 0 }
+
+    let embedded = 0
+    let failed = 0
+    // 单批 32 条：本机 bge-m3 单条约 20ms，32 条仍在一次请求的合理区间内
+    const BATCH = 32
+    for (let i = 0; i < pending.length; i += BATCH) {
+      const batch = pending.slice(i, i + BATCH)
+      let vecs: number[][]
+      try {
+        vecs = await opts.embedder.embed(batch.map((b) => b.text))
+      } catch {
+        failed += batch.length
+        continue
+      }
+      const entries = batch.map((b, j) => ({ ownerKind: b.ownerKind, ownerId: b.ownerId, vector: vecs[j] }))
+      const usable = entries.filter((e) => e.vector !== undefined && e.vector.length > 0)
+      embedded += this.putVectors(usable, opts.embedder.model)
+      failed += entries.length - usable.length
+    }
+    return { embedded, failed }
+  }
+
+  /** 向量覆盖情况——排查「为什么向量路没效果」时第一个要看的东西。 */
+  vectorStats(): Array<{ ownerKind: string; model: string; count: number }> {
+    return this.db.prepare(
+      `SELECT owner_kind AS ownerKind, model, COUNT(*) AS count
+         FROM mem_vectors GROUP BY owner_kind, model ORDER BY owner_kind, model`,
+    ).all() as unknown as Array<{ ownerKind: string; model: string; count: number }>
   }
 
   /**

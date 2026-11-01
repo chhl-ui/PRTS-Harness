@@ -17,7 +17,7 @@ export type ActorKind = 'owner' | 'model' | 'system'
  * 走了哪条召回路径。设计稿 §6.5 早已列出这三个值，实现时只写了 `'like'`——
  * 2026-11-01 换成混合检索后补齐。`'fts-unicode61'` 暂未启用（它对中文恒为 0）。
  */
-export type RecallPath = 'like' | 'fts-trigram' | 'fts-unicode61' | 'profile'
+export type RecallPath = 'like' | 'fts-trigram' | 'fts-unicode61' | 'profile' | 'semantic'
 
 export interface AssertFactInput {
   actor: ActorKind
@@ -100,6 +100,21 @@ export interface MemoryQuery {
    * 设为 0 表示关闭两阶段、退回纯 turn 级检索（对照用）。
    */
   sessionLimit?: number
+  /**
+   * 查询向量（v2.17）。**只有给了才走向量路**。
+   *
+   * 为什么不在 `search()` 内部算：`search()` 是同步的，而向量化是异步的。
+   * 把向量化提到调用方，一举两得——现有全部调用方签名零改动；没有 Ollama 的
+   * 环境传不进向量，自动退化为纯 bm25，而不是抛错或静默返回零向量。
+   *
+   * 依据见 `docs/memory-vector-retrieval-2026-11-02.md`：同一批 120 条画像 × 3 题，
+   * bm25 的目标排名 16/未命中/未命中，向量余弦为 4/1/14。
+   */
+  queryVector?: ArrayLike<number>
+  /** 向量路取前多少名进融合，默认 0（关闭）。 */
+  semanticTopK?: number
+  /** 余弦下限，默认 0（不设阈值，先靠排名融合吸收噪声）。 */
+  semanticMinSim?: number
 }
 
 export interface MemoryHit {
@@ -123,8 +138,17 @@ export interface MemoryHit {
   /** 原始时间串，`occurredAtMs` 解析失败或精度丢失时的兜底。 */
   occurredRaw?: string
   text: string
-  /** 走了哪条召回路径——V1-15 的 abstention 判定要用（设计稿 §6.5）。 */
+  /** 走了哪条召回路径——V1-15 的 abstention 判定要用（设计稿 §6.5）。
+   *  **首次命中的路径**，保留给旧调用方；多路召回时看 `recallPaths`。 */
   recallPath: RecallPath
+  /**
+   * 全部召回来源（v2.17）。一个候选可能同时被 bm25 和向量命中，只留一个标签就永远
+   * 说不清「谁立了功」——本项目三次翻车（v2.10 假上界 / v2.12 离线与实现不一致 /
+   * v2.16 自写排序）根子都是分不清检索改进还是抽取改进。
+   *
+   * 顺序为路径首次命中的先后，去重。单路召回时不填（省空间，读方用 `?? [recallPath]`）。
+   */
+  recallPaths?: RecallPath[]
 }
 
 /** 事件种类。第一版只实现 fact.asserted，其余为后续扩展预留。 */

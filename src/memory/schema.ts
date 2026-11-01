@@ -146,6 +146,22 @@ CREATE TABLE IF NOT EXISTS mem_profiles (
 CREATE INDEX IF NOT EXISTS idx_profiles_scope ON mem_profiles(scope, aspect, deleted_at_ms);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_profiles USING fts5(body, tokenize='trigram');
+
+-- 向量（v2.17）：只对派生项（fact / profile）建，不对 turn 建——turn 是 24.6 万级，
+-- 全量余弦不划算；且 turn 的瓶颈在粒度不在语义（v2.11）。
+-- 主键 (owner_kind, owner_id) 不含 model：换模型就地覆盖，避免新旧向量混用
+-- 产生「同一个库里有两种语义空间」的静默错误。
+-- 不参与 rebuildProjections——与 mem_profiles 同理，它是巩固/向量化的派生项，
+-- 不是事件链的纯函数（重建后保留，见 test/memory/profile-gate.test.ts P3 的同款约定）。
+CREATE TABLE IF NOT EXISTS mem_vectors (
+  owner_kind     TEXT NOT NULL,
+  owner_id       TEXT NOT NULL,
+  model          TEXT NOT NULL,
+  dim            INTEGER NOT NULL,
+  vector         BLOB NOT NULL,
+  updated_at_ms  INTEGER NOT NULL,
+  PRIMARY KEY (owner_kind, owner_id)
+);
 `
 
 /** 打开（或创建）记忆库。`secure_delete` 是设计稿 §八 第 15 条的硬要求。 */
