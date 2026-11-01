@@ -83,6 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_facts_scope ON mem_facts(scope, deleted_at_ms, re
 CREATE TABLE IF NOT EXISTS mem_summaries (
   summary_id     TEXT PRIMARY KEY,
   scope          TEXT NOT NULL DEFAULT 'prts',
+  origin         TEXT NOT NULL DEFAULT 'live',
   subject_kind   TEXT NOT NULL,
   subject_id     TEXT NOT NULL,
   body_ref       TEXT,
@@ -134,6 +135,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_sessions USING fts5(body, tokenize='t
 CREATE TABLE IF NOT EXISTS mem_profiles (
   profile_id         TEXT PRIMARY KEY,
   scope              TEXT NOT NULL DEFAULT 'prts',
+  -- 与 mem_facts / mem_turns 一致：基准数据不得进生产检索（设计稿 §6.4）。
+  -- 旧库靠 ensureProfileOriginColumn 迁移，新库直接有这个列。
+  origin             TEXT NOT NULL DEFAULT 'live',
   subject            TEXT NOT NULL,
   aspect             TEXT NOT NULL,
   profile_body       TEXT NOT NULL,
@@ -146,6 +150,10 @@ CREATE TABLE IF NOT EXISTS mem_profiles (
 CREATE INDEX IF NOT EXISTS idx_profiles_scope ON mem_profiles(scope, aspect, deleted_at_ms);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_profiles USING fts5(body, tokenize='trigram');
+
+-- 摘要的全文索引（v2.18）。此前 mem_summaries 连写入路径都没有，自然也没有索引。
+-- rowid 与 mem_summaries 对齐，由 putSummary 在同一事务里维护。
+CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_summaries USING fts5(body, tokenize='trigram');
 
 -- 向量（v2.17）：只对派生项（fact / profile）建，不对 turn 建——turn 是 24.6 万级，
 -- 全量余弦不划算；且 turn 的瓶颈在粒度不在语义（v2.11）。
@@ -229,6 +237,7 @@ export function openMemoryDb(path: string): DatabaseSync {
   db.exec('PRAGMA secure_delete = ON')
   db.exec(SCHEMA)
   ensureFactIdentityColumn(db)
+  ensureDerivedOriginColumns(db)
   ensureFtsIndexed(db)
   ensureSessionsBuilt(db)
   return db
@@ -280,6 +289,27 @@ function ensureFactIdentityColumn(db: DatabaseSync): void {
  * @param inTransaction 调用方已开事务时传 true——SQLite 不允许嵌套 BEGIN，
  *   `rebuildProjections` 就是在自己的事务里调它。
  */
+/**
+ * `origin` 列的自愈迁移（v2.18）。
+ *
+ * profile 与 summary 都是派生项，既有评测产物也有生产数据，必须能区分——否则
+ * benchmark 的画像会混进生产检索（设计稿 §6.4）。旧库执行 SCHEMA 时表已存在，
+ * `CREATE TABLE IF NOT EXISTS` 不会补列，只能 ALTER。
+ *
+ * 老数据回填成 `'live'`：没有依据判断它们原本属于哪一类，而「评测数据混进生产」
+ * 比「生产数据被错标成评测」代价小——后者会让真实记忆凭空查不到。
+ * 索引不写进 SCHEMA：旧库执行 SCHEMA 时列还不存在，建索引会抛 no such column，
+ * 迁移函数根本没机会跑（v2.9 踩过同一个坑）。
+ */
+function ensureDerivedOriginColumns(db: DatabaseSync): void {
+  for (const table of ['mem_profiles', 'mem_summaries']) {
+    const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name)
+    if (!cols.includes('origin')) db.exec(`ALTER TABLE ${table} ADD COLUMN origin TEXT NOT NULL DEFAULT 'live'`)
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_profiles_origin ON mem_profiles(scope, origin, deleted_at_ms)')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_summaries_origin ON mem_summaries(scope, origin, deleted_at_ms)')
+}
+
 export function ensureSessionsBuilt(db: DatabaseSync, inTransaction = false): void {
   const missing = db.prepare(
     `SELECT t.session_id AS sid, t.scope AS scope, t.origin AS origin,

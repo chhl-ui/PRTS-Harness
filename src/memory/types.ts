@@ -55,8 +55,7 @@ export interface RecordTurnInput {
   dedupeKey?: string
 }
 
-export interface ImportStats {
-  sessions: number
+export interface ImportStats {  sessions: number
   turns: number
   /** 标了证据的 turn 数（LongMemEval 的 `has_answer`）。LOCOMO 无此概念，恒 0。 */
   evidence: number
@@ -135,6 +134,13 @@ export interface MemoryQuery {
   spreadMinWeight?: number
   /** 用作种子的直接命中条数，默认 5。抽实体是正则，种太多会拖慢每次查询。 */
   spreadSeeds?: number
+  /**
+   * 摘要（情景大意）的独立名额，默认 0（关闭）。
+   *
+   * 与 profileQuota 同理：摘要与 turn 在同一个 RRF 池里竞争时，摘要文本短、
+   * 字面命中密度高，不分名额会把 turn 挤掉。默认 0 保证不开摘要路时基线一字不变。
+   */
+  summaryQuota?: number
 }
 
 export interface MemoryHit {

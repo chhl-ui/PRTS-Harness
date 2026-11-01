@@ -14,6 +14,7 @@ import { appendChained, sha256hex, verifyChainRows, type ChainVerifyResult } fro
 import { applyMemoryEvent } from './fold.ts'
 import { cosineSimilarity, decodeVector, encodeVector, type Embedder } from './embedding.ts'
 import { extractEntities } from './extract.ts'
+import { writeProfile, writeSummary } from './write.ts'
 import {
   readConsolidationCursor, runConsolidation, consolidationStats as readConsolidationStats,
   type ConsolidateOptions, type ConsolidateResult,
@@ -438,9 +439,10 @@ export class MemoryStore {
            JOIN mem_profiles p ON p.rowid = mem_fts_profiles.rowid
           WHERE mem_fts_profiles MATCH ?
             AND p.scope = ? AND p.deleted_at_ms IS NULL
+            AND p.origin IN (${originSlots})
           ORDER BY bm25(mem_fts_profiles)
           LIMIT ?`,
-      ).all(ftsMatch, scope, profileQuota * 4) as Array<{
+      ).all(ftsMatch, scope, ...origins, profileQuota * 4) as Array<{
         profile_id: string
         subject: string
         aspect: string
@@ -459,9 +461,35 @@ export class MemoryStore {
       recallPath: 'profile' as RecallPath,
     }))
 
+    // ---- 摘要路（Wave B）：情景大意 ----
+    // 与画像路同构：独立表、独立 FTS、独立名额。默认 0，保证不开摘要路时基线一字不变。
+    const summaryQuota = q.summaryQuota ?? 0
+    const summaryHits: MemoryHit[] = summaryQuota <= 0 || ftsMatch === null ? [] : (
+      this.db.prepare(
+        `SELECT s.summary_id, b.body
+           FROM mem_fts_summaries
+           JOIN mem_summaries s ON s.rowid = mem_fts_summaries.rowid
+           LEFT JOIN mem_bodies b ON b.body_ref = s.body_ref
+          WHERE mem_fts_summaries MATCH ?
+            AND s.scope = ? AND s.deleted_at_ms IS NULL
+            AND s.origin IN (${originSlots})
+          ORDER BY bm25(mem_fts_summaries)
+          LIMIT ?`,
+      ).all(ftsMatch, scope, ...origins, summaryQuota * 4) as unknown as Array<{ summary_id: string; body: string | null }>
+    ).map((r) => ({
+      kind: 'summary' as const,
+      // 命名空间前缀：fused 是按 id 合并的 Map，与 fact 同 id 时 kind 会被吞
+      id: `summary-${r.summary_id}`,
+      score: 1 + RECENCY_WEIGHT * 0.5,
+      origin: origins[0] ?? 'live',
+      text: r.body ?? '',
+      recallPath: 'fts-trigram' as RecallPath,
+    }))
+
     rank(ftsFacts, 'fts-trigram')
     rank(ftsTurns, 'fts-trigram')
     rank(profileHits, 'profile')
+    rank(summaryHits, 'fts-trigram')
 
     // ---- 路 3：向量语义近邻（v2.17）----
     // 只覆盖派生项（fact / profile）：turn 是 24.6 万级，全量余弦不划算，且 turn 的
@@ -534,8 +562,9 @@ export class MemoryStore {
         const rows = this.db.prepare(
           `SELECT profile_id, profile_body, confidence FROM mem_profiles
             WHERE profile_id IN (${profIds.map(() => '?').join(',')})
-              AND scope = ? AND deleted_at_ms IS NULL`,
-        ).all(...profIds, scope) as unknown as Array<{
+              AND scope = ? AND deleted_at_ms IS NULL
+              AND origin IN (${originSlots})`,
+        ).all(...profIds, scope, ...origins) as unknown as Array<{
           profile_id: string
           profile_body: string
           confidence: number
@@ -769,13 +798,16 @@ export class MemoryStore {
       .map(({ hit, rrf }) => ({ ...hit, score: rrf * hit.score }))
       .sort((a, b) => b.score - a.score)
     const profiles = scored.filter((h) => h.kind === 'profile').slice(0, profileQuota)
-    const factQuota = q.factQuota ?? Math.ceil((limit - profiles.length) / 2)
+    // 摘要也要独立名额：与 turn 同池竞争时，短文本的命中密度更高，不分名额会把 turn 挤掉
+    const summaries = scored.filter((h) => h.kind === 'summary').slice(0, summaryQuota)
+    const reserved = profiles.length + summaries.length
+    const factQuota = q.factQuota ?? Math.ceil((limit - reserved) / 2)
     const facts = scored.filter((h) => h.kind === 'fact').slice(0, factQuota)
-    const rest = scored.filter((h) => h.kind !== 'fact' && h.kind !== 'profile')
-      .slice(0, Math.max(0, limit - profiles.length - facts.length))
+    const rest = scored.filter((h) => h.kind !== 'fact' && h.kind !== 'profile' && h.kind !== 'summary')
+      .slice(0, Math.max(0, limit - reserved - facts.length))
     // 分组配额决定「谁入选」，组内已按 score 排好；合并后总量已 <= limit，
     // 不能再全局重排后截断——那会把配额保证的小组整体挤掉（实测 profile 被 fact 挤出）。
-    return [...profiles, ...facts, ...rest].slice(0, limit)
+    return [...profiles, ...summaries, ...facts, ...rest].slice(0, limit)
   }
 
   /**
@@ -884,6 +916,83 @@ export class MemoryStore {
       `SELECT owner_kind AS ownerKind, model, COUNT(*) AS count
          FROM mem_vectors GROUP BY owner_kind, model ORDER BY owner_kind, model`,
     ).all() as unknown as Array<{ ownerKind: string; model: string; count: number }>
+  }
+
+  /**
+   * 写入一条归纳画像（Wave 3）。
+   *
+   * 为什么单独一张表而不是塞进 mem_facts：`gold` 是画像不是事实——实测同一批 10 题，
+   * fact 组 1/10、画像组 4/10，差别只在产物形态。混进 fact 池还会被字面匹配挤掉
+   * （v2.15 的画像闸门就是为此而加）。
+   *
+   * 传 `profileId` 时是幂等覆盖，便于巩固管线重跑同一批 turn。
+   */
+  putProfile(input: {
+    subject: string
+    aspect: string
+    profileText: string
+    evidenceFactIds?: string[]
+    confidence?: number
+    origin?: Origin
+    profileId?: string
+  }): string {
+    // 实现抽到 write.ts：巩固管线只拿得到 DatabaseSync、拿不到 store 实例，
+    // 两处各写一份 SQL 迟早漂移（FTS 少同步一行就静默查不到）。
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const id = writeProfile(this.db, input)
+      this.db.exec('COMMIT')
+      return id
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
+  /**
+   * 写入一条情景摘要（Wave B）。
+   *
+   * 在此之前 `mem_summaries` 是**零写入**：表建了、`rebuildProjections` 里会清它，
+   * 但全仓没有一处往里写。正文走 `mem_bodies`（与 fact/turn 同一条外置路线），
+   * FTS 在同一事务里同步——不同步的话摘要条目永远检索不到。
+   */
+  putSummary(input: {
+    subjectKind: string
+    subjectId: string
+    text: string
+    sourceTurnIds?: string[]
+    origin?: Origin
+    summaryId?: string
+  }): string {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const id = writeSummary(this.db, input)
+      this.db.exec('COMMIT')
+      return id
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
+
+  /** 统计摘要数量。 */
+  countSummaries(opts: { origin?: Origin } = {}): number {
+    const row = (opts.origin === undefined
+      ? this.db.prepare('SELECT COUNT(*) AS c FROM mem_summaries WHERE scope = ? AND deleted_at_ms IS NULL').get(SCOPE)
+      : this.db.prepare('SELECT COUNT(*) AS c FROM mem_summaries WHERE scope = ? AND deleted_at_ms IS NULL AND origin = ?').get(SCOPE, opts.origin)) as { c: number }
+    return row.c
+  }
+
+  /** 统计画像数量——排查「画像路为什么没结果」时先看这个。 */
+  countProfiles(opts: { origin?: Origin } = {}): number {
+    const sql = opts.origin === undefined
+      ? 'SELECT COUNT(*) AS c FROM mem_profiles WHERE scope = ? AND deleted_at_ms IS NULL'
+      : 'SELECT COUNT(*) AS c FROM mem_profiles WHERE scope = ? AND deleted_at_ms IS NULL AND origin = ?'
+    const row = (opts.origin === undefined
+      ? this.db.prepare(sql).get(SCOPE)
+      : this.db.prepare(sql).get(SCOPE, opts.origin)) as { c: number }
+    return row.c
   }
 
   /**
@@ -1023,11 +1132,11 @@ export class MemoryStore {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       // 全文索引也是投影：重建时先清空，再由 applyMemoryEvent 逐条重建。
-      this.db.exec('DELETE FROM mem_fts_sessions; DELETE FROM mem_sessions; DELETE FROM mem_fts_turns; DELETE FROM mem_fts_facts; DELETE FROM mem_turns; DELETE FROM mem_facts; DELETE FROM mem_summaries; DELETE FROM mem_deletions')
-      // mem_topics 不在清理范围内：它由巩固管线写入（Wave 2），与 mem_profiles 同类，
-      // 是链外派生项而不是事件序列的纯函数。这里删掉它会造成难查的丢失：
-      // 游标（mem_consolidation）不跟着重置，巩固不会重算已跳过的 turn，
-      // 主题于是永久消失且无任何报错。
+      this.db.exec('DELETE FROM mem_fts_sessions; DELETE FROM mem_sessions; DELETE FROM mem_fts_turns; DELETE FROM mem_fts_facts; DELETE FROM mem_turns; DELETE FROM mem_facts; DELETE FROM mem_deletions')
+      // mem_topics / mem_profiles / mem_summaries 都不在清理范围内：它们由巩固管线写入，
+      // 与 mem_profiles 同类，是**链外派生项**而不是事件序列的纯函数（巩固依赖 turn 正文，
+      // 而正文外置在 mem_bodies）。这里删掉它们会造成难查的丢失：游标不跟着重置，
+      // 巩固不会重算已跳过的 turn，派生项于是永久消失且无任何报错。
       const rows = this.db.prepare('SELECT * FROM memory_events ORDER BY seq')
         .all() as unknown as MemoryEventRow[]
       for (const r of rows) applyMemoryEvent(this.db, r)

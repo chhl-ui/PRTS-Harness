@@ -16,6 +16,8 @@
  */
 import type { DatabaseSync } from 'node:sqlite'
 import { extractEntities, type ExtractedEntity } from './extract.ts'
+import { extractJsonArray, type TextGenerator } from './generate.ts'
+import { writeProfile } from './write.ts'
 
 const DEFAULT_SCOPE = 'prts'
 const DEFAULT_BATCH_TURNS = 100
@@ -252,4 +254,139 @@ export function runConsolidation(db: DatabaseSync, opts: ConsolidateOptions = {}
   }
 
   return { turns, entityMentions, linkUpdates, topicMentions, cursor, stopped }
+}
+
+// ---------------------------------------------------------------------------
+// 模型巩固（Wave C）
+// ---------------------------------------------------------------------------
+
+const PROFILE_PROMPT = `You are consolidating a user's conversation history into durable preference profiles.
+
+Read the turns below and extract ONLY durable preferences, tastes, constraints, or recurring habits of the user that would help a future assistant personalize its recommendations.
+
+Rules:
+- Write each profile as 1-2 ENGLISH sentences, starting with the concrete entity or topic, then the preference and any stated constraint.
+- Include stated constraints (times, places, product requirements) inside the sentence.
+- State what the user PREFERS, not what they asked about.
+- Do NOT invent. Only what these turns support.
+- If a turn contains no durable preference, skip it.
+
+Example:
+
+Turns:
+[0] I've been using Adobe Premiere Pro for years but still struggle with the Lumetri panel. Any advanced tutorials?
+[1] I usually shoot with a Sony A7R IV and a Godox V1 flash.
+
+Output:
+[{"subject":"user","aspect":"video_editing_tool","profile":"The user edits video in Adobe Premiere Pro and wants advanced, tool-specific material rather than beginner overviews."},
+ {"subject":"user","aspect":"camera_gear","profile":"The user shoots with a Sony A7R IV body and a Godox V1 flash, so recommendations should be Sony-compatible."}]
+
+Return only the JSON array. If nothing is extractable, return [].`
+
+export interface ConsolidateModelOptions {
+  generator: TextGenerator
+  /** 水位线 scope。默认 'prts:profile'——与规则巩固的游标分开，否则会互相跳过。 */
+  scope?: string
+  batchTurns?: number
+  maxTurns?: number
+  origin?: 'live' | 'benchmark'
+  signal?: AbortSignal
+}
+
+export interface ConsolidateModelResult {
+  profiles: number
+  turns: number
+  failed: number
+  cursor: number
+  /** `failed` 表示模型调用出错，游标**未推进**，下次重跑同一批。 */
+  stopped: 'done' | 'budget' | 'cancelled' | 'failed'
+}
+
+/**
+ * 用模型把 turn 归纳成画像（Wave 3）。
+ *
+ * 三条不变量与规则巩固一致，但模型层多一条：**调用失败不推进游标**——
+ * 否则一次网络抖动就会把整批 turn 永久跳过，且不会有任何报错。
+ *
+ * 游标 scope 默认 `'prts:profile'`：规则巩固已经把 `'prts'` 游标推到 24.6 万，
+ * 共用会直接跳过全部 turn（静默零产出）。
+ */
+export async function consolidateProfiles(
+  db: DatabaseSync,
+  opts: ConsolidateModelOptions,
+): Promise<ConsolidateModelResult> {
+  const cursorScope = opts.scope ?? `${DEFAULT_SCOPE}:profile`
+  const batchTurns = Math.max(1, opts.batchTurns ?? 60)
+  const maxTurns = Math.max(0, opts.maxTurns ?? 600)
+  const origin = opts.origin ?? 'live'
+
+  let cursor = readConsolidationCursor(db, cursorScope)
+  let profiles = 0
+  let turns = 0
+  let failed = 0
+  let stopped: ConsolidateModelResult['stopped'] = 'done'
+
+  const upsertCursor = db.prepare(
+    `INSERT INTO mem_consolidation (scope, cursor_turn_rowid, cursor_event_seq, updated_at_ms, budget_spent)
+     VALUES (?,?,0,?,?)
+     ON CONFLICT(scope) DO UPDATE SET
+       cursor_turn_rowid = MAX(mem_consolidation.cursor_turn_rowid, excluded.cursor_turn_rowid),
+       updated_at_ms = excluded.updated_at_ms,
+       budget_spent = mem_consolidation.budget_spent + excluded.budget_spent`,
+  )
+
+  for (;;) {
+    if (opts.signal?.aborted === true) { stopped = 'cancelled'; break }
+    if (turns >= maxTurns) { stopped = 'budget'; break }
+
+    const limit = Math.min(batchTurns, maxTurns - turns)
+    // turn 的 scope 恒为 'prts'，与游标 scope 无关——游标只是「处理到哪」的记账
+    const batch = db.prepare(
+      `SELECT t.rowid AS rid, t.turn_id AS turnId, t.session_id AS sessionId, b.body AS body
+         FROM mem_turns t JOIN mem_bodies b ON b.body_ref = t.body_ref
+        WHERE t.scope = ? AND t.rowid > ? AND t.deleted_at_ms IS NULL
+          AND b.body IS NOT NULL AND b.body != ''
+        ORDER BY t.rowid LIMIT ?`,
+    ).all(DEFAULT_SCOPE, cursor, limit) as unknown as Array<{ rid: number; turnId: string; sessionId: string; body: string }>
+    if (batch.length === 0) { stopped = 'done'; break }
+
+    const text = batch.map((t, i) => `[${i}] (${t.sessionId}) ${t.body.slice(0, 300)}`).join('\n')
+    let raw: string
+    try {
+      raw = await opts.generator.generate(`\n
+Turns:
+`)
+    } catch {
+      failed += batch.length
+      stopped = 'failed'
+      break // 不推进游标：下次重跑同一批
+    }
+    const arr = extractJsonArray(raw)
+
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const p of arr) {
+        const o = p as { subject?: unknown; aspect?: unknown; profile?: unknown }
+        if (typeof o.profile !== 'string' || o.profile.trim() === '') continue
+        writeProfile(db, {
+          subject: String(o.subject ?? 'user').slice(0, 60),
+          aspect: String(o.aspect ?? 'preference').slice(0, 60),
+          profileText: o.profile.slice(0, 600),
+          origin,
+        })
+        profiles++
+      }
+      const newCursor = batch[batch.length - 1].rid
+      upsertCursor.run(cursorScope, newCursor, Date.now(), batch.length)
+      db.exec('COMMIT')
+      cursor = newCursor
+      turns += batch.length
+      if (batch.length < limit) { stopped = 'done'; break }
+    } catch (e) {
+      db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
+  return { profiles, turns, failed, cursor, stopped }
 }
