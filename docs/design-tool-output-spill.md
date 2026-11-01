@@ -194,6 +194,22 @@ T5 不是反证：删掉 spillRoots 后 read 仍然 allow，不会变红。v1 �
 - **不做 per-session 保留期与清理**。只做体积上界（4.5），清理另立项。
 - **不卸载图片**。PRTS 当前没有图片工具结果路径。
 
+## 七之二、与上游工具自身截断的关系（落码实测发现）
+
+接线级测试（`test/spill/live-wiring.test.ts`）跑出的事实：让 pwsh 输出 40000 字符，`tools/post-execute` 收到的只有 **16244 字符**。查证来源——`@deepseek-ai/dsh-tool-pwsh-persistent` 自带 `maxOutputChars` 上限，`maybeTruncate` 截到 16000 后追加一段截断提示（`lib/index.js:76-78`）。
+
+这改变了 spill 对 pwsh 的价值判断：
+
+- **pwsh 的截断是纯丢失**：模型只看到前 16000 字符，没有回读途径，超出的部分对本次会话永久不可得。
+- **spill 的卸载是可回读**：存全文，给路径，模型需要时能 `read` 回来。
+- 两者叠加时，spill 只能卸载 pwsh 已经丢掉一部分之后的内容——**超长的部分在到达 spill 之前就没了**。
+
+正确的处理不是让两者竞争，而是**把上游上限调高、让 spill 接管卸载**（`maxOutputChars` 是 config 参数）。但调高会付出内存与延迟代价，且 PRTS 当前没有实测数据，故不在本设计范围内改动，记为待办：
+
+- 待办：测 `maxOutputChars` 调高到多少时，pwsh 的峰值内存与延迟仍在可接受范围；有了数据再把上游上限与 spill 阈值一起定。
+
+同理要注意 `read`：它被本设计排除在卸载之外（防套娃），所以「读超大文件」这条路径当前没有卸载保护。真正该做的是让 `read` 支持分页而不是靠 spill——那条另立。
+
 ## 八、议事会意见与处置
 
 四席一致指出 v1 的硬伤：**根在 `<dataRoot>/spill/`，而 `protectedRoots = [dataRoot]`（实测 `start.ts:138`），`fs.read` 分支先判 protectedRoots 就 deny，spillRoots 永远轮不到被查**。我核实成立，v2 移根。
