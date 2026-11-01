@@ -10,6 +10,7 @@ import { IntegrityError } from '../integrity/errors.ts'
 import { initCoreDb } from '../core/init.ts'
 import { startupCheck } from '../core/startup-check.ts'
 import { AuditLog } from '../audit/index.ts'
+import { memoryCommand } from './memory.ts'
 
 function arg(args: string[], name: string): string | undefined {
   const i = args.indexOf(name)
@@ -107,7 +108,15 @@ function upgrade(args: string[]): number {
 
 const args = process.argv.slice(2)
 try {
-  const code = args[0] === 'upgrade' ? upgrade(args.slice(1)) : (console.error('usage: prts upgrade ...'), 2)
+  // 子命令分发：每个子命令返回退出码，process.exit 只在这一处调用。
+  // 不用嵌套三元——两个以上分支时链式 if 更不容易读错。
+  let code: number
+  if (args[0] === 'upgrade') code = upgrade(args.slice(1))
+  else if (args[0] === 'memory') code = memoryCommand(args.slice(1))
+  else {
+    console.error('usage: prts upgrade ... | prts memory <stats|consolidate|retire|restore> ...')
+    code = 2
+  }
   process.exit(code)
 } catch (e) {
   if (e instanceof IntegrityError) { console.error(`${e.code}: ${e.message}`); process.exit(3) }
