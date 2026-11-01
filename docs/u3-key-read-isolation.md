@@ -175,7 +175,9 @@ arm3 排除了「什么都没跑起来」的假阳性；arm4 排除了「AppCont
 **实施前的已知风险（未验证）：**
 
 1. ~~AppContainer 里 `pwsh` / `node` 能否正常工作没测~~ **已测（2026-11-01，`.scratch/acruntime.cs`）**：
-   - **Windows PowerShell 5.1 完全可用**——在 AppContainer 里执行 `Set-Content` 写出了文件，exit 0。本机未装 PowerShell 7，`pwsh` 未单独验证。
+   - **Windows PowerShell 5.1 完全可用**——在 AppContainer 里执行 `Set-Content` 写出了文件，exit 0。
+   - **pwsh 7.6.9 完全可用，包括 `-File` 跑脚本文件**（`.scratch/acpwsh.cs`，便携版 zip 解压，未装到 Program Files）。`pwsh -NoProfile -File x.ps1` 与 `pwsh -NoProfile -Command "..."` 两种方式都 exit 0 并写出预期内容。这一点比 node 强：**node 的 main-module 解析路径失败，pwsh 的 `-File` 成功**——所以 PRTS 的 shell 载体（DSH 用 `pwsh -Command`）在 AppContainer 里没有障碍。
+     - 安装说明：`winget install Microsoft.PowerShell` 在本机失败（`0x80072efd`，走代理时 winget 自己的网络栈连不上），改用 GitHub release 的 win-x64.zip 便携版即可，`curl` 通、解压即用。
    - **node 可用，但要区分启动方式**：`node -e "<inline>"` 正常工作（输出 `node-e=v24.19.0`）；`node <script.js>` 失败于 `EPERM: lstat 'C:\'`——node 解析 main module 时从根目录逐级 realpath，而 AppContainer 对 `C:\` 没有 traverse。补授 `C:\` 的 `(RX)` 需要 WRITE_DAC：**本机未提权，`icacls 'C:\' /grant` 返回「拒绝访问」**。
    - 结论：PowerShell 路线开箱可用；node 走脚本文件需要在安装阶段提权做一次 `C:\` traverse 授权（一次性配置，不是运行时提权）。若不想动根目录，可约束 shell 只用 `node -e`。
 2. AppContainer 进程的网络访问默认关闭，需要 `internetClient` capability 才能开。PRTS 的模型调用在宿主进程里，不受影响；但如果将来 shell 里要联网，要单独评估。
