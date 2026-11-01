@@ -1,4 +1,4 @@
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 import { AuditLog } from '../audit/index.ts'
@@ -28,6 +28,7 @@ export class Authority {
   private readonly workspaceRoots: string[]
   private readonly protectedRoots: string[]
   private readonly spillRoots: string[]
+  private readonly readOnlySubpaths: string[]
   private readonly now: () => number
 
   private constructor(audit: AuditLog, config: AuthorityConfig, now: () => number) {
@@ -36,6 +37,8 @@ export class Authority {
     this.workspaceRoots = config.workspaceRoots.map(realpathBestEffort)
     this.protectedRoots = config.protectedRoots.map(realpathBestEffort)
     this.spillRoots = (config.spillRoots ?? []).map(realpathBestEffort)
+    // 只读子路径是相对名（如 '.git'），不做 realpath——它由 workspace 根现拼。
+    this.readOnlySubpaths = config.readOnlySubpaths ?? ['.git']
     this.now = now
   }
 
@@ -73,6 +76,20 @@ export class Authority {
     this.audit.close()
   }
 
+  /**
+   * 该已归一化路径落在哪个 workspace 的只读子路径下？返回子路径名或 undefined。
+   *
+   * 只按段边界匹配：`.git` 不会命中 `.github`，`notgit` 也不会命中。
+   */
+  private readOnlySubpathOf(rp: string): string | undefined {
+    for (const root of this.workspaceRoots) {
+      for (const sub of this.readOnlySubpaths) {
+        if (isWithin(rp, join(root, sub))) return sub
+      }
+    }
+    return undefined
+  }
+
   private validGrants(): { grantId: string; capability: string }[] {
     const now = this.now()
     return this.audit.listGrants()
@@ -105,6 +122,10 @@ export class Authority {
           return { kind: 'deny', reason: `fs.write denied: ${p.arg} is inside spill root` }
         }
         if (this.workspaceRoots.some((r) => isWithin(rp, r))) {
+          const sub = this.readOnlySubpathOf(rp)
+          if (sub !== undefined) {
+            return { kind: 'deny', reason: `fs.write denied: ${p.arg} is inside read-only subpath '${sub}'` }
+          }
           return { kind: 'allow', via: 'policy' }
         }
         const g = grants.find((g) => g.capability.startsWith('fs.write:')
@@ -119,6 +140,10 @@ export class Authority {
         }
         if (this.spillRoots.some((r) => isWithin(rp, r))) {
           return { kind: 'deny', reason: `fs.delete denied: ${p.arg} is inside spill root` }
+        }
+        const roSub = this.readOnlySubpathOf(rp)
+        if (roSub !== undefined) {
+          return { kind: 'deny', reason: `fs.delete denied: ${p.arg} is inside read-only subpath '${roSub}'` }
         }
         return { kind: 'ask', reason: `fs.delete requires per-call approval: ${p.arg}` }
       }

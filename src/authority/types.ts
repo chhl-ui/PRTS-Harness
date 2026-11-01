@@ -13,6 +13,14 @@ export interface AuthorityConfig {
    * 缺省视为空数组，旧调用方行为不变。见 docs/design-tool-output-spill.md §5.1。
    */
   spillRoots?: string[]
+  /**
+   * workspace 内保持只读的子路径（相对于 workspace 根的路径段，如 `.git`）。
+   *
+   * 动机参照 codex 的 `WritableRoot.read_only_subpaths`：即使整个 workspace 可写，
+   * 也不能让模型改自己的元数据——`.git` 被改可以伪造提交历史。
+   * 只影响 `fs.write` / `fs.delete`；读取不受限。缺省 `['.git']`，传 `[]` 关闭。
+   */
+  readOnlySubpaths?: string[]
 }
 
 export interface ToolCall {
