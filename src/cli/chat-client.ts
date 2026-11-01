@@ -90,13 +90,15 @@ socket.on('data', lineParser(onPush, (raw) => {
 socket.on('close', () => {
   if (closing) return
   closing = true
-  process.stdout.write('\n[prts] 与服务端的连接已断开\n')
   rl.close()
-  process.exitCode = 0
+  // 显式退出，不等事件循环自然排空。
+  // 实测：服务端结束会话、进程已退出、endpoint 已删，客户端却一直挂着直到被外部
+  // timeout 杀掉——readline 与 socket 都释放后仍有残留句柄。写回调保证这一行走完。
+  process.stdout.write('\n[prts] 与服务端的连接已断开\n', () => process.exit(0))
 })
 
 socket.on('error', (error: Error) => {
-  process.stdout.write(`\n[prts] 连接错误：${error.message}\n`)
+  process.stdout.write(`\n[prts] 连接错误：${error.message}\n`, () => process.exit(1))
 })
 
 rl.on('line', (raw: string) => {

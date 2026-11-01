@@ -67,6 +67,16 @@ export function createTerminalServer(pipeName: string): TerminalServer {
   let client: Socket | undefined
   let phase: OwnerPhase = 'idle'
   let pending: { callId: string; resolve: (allow: boolean) => void; settled: boolean } | undefined
+  /**
+   * 客户端连上之前产生的宿主输出。
+   *
+   * 实测痛点：chat-serve 在 runChat 之前就 push 开场白与未结任务提示，
+   * 那一刻还没有客户端，按「没有 client 就丢弃」处理会让开场消息永久消失——
+   * 而人连上后看到的是一片空白，没有任何线索说明为什么。
+   * 只缓存 host 类（delta / turn-end 是回合内产生的，没有客户端时本就不该发）。
+   */
+  const preamble: string[] = []
+  const PREAMBLE_LIMIT = 50
 
   const pipe = listenPipe(pipeName)
 
@@ -159,6 +169,8 @@ export function createTerminalServer(pipeName: string): TerminalServer {
     socket.on('data', lineParser(onLine, onBadLine))
     socket.on('close', onClientClose)
     socket.on('error', onClientClose)
+    // 补发客户端连上之前产生的宿主输出（开场白、未结任务提示），否则人会看到一片空白。
+    for (const text of preamble.splice(0)) push(eventPush('host', text))
     push(statusPush(phase))
   })
 
@@ -183,7 +195,10 @@ export function createTerminalServer(pipeName: string): TerminalServer {
   return {
     lines,
     pushModelDelta(text: string): void { push(eventPush('delta', text)) },
-    pushHostOutput(text: string): void { push(eventPush('host', text)) },
+    pushHostOutput(text: string): void {
+      if (client === undefined && preamble.length < PREAMBLE_LIMIT) preamble.push(text)
+      push(eventPush('host', text))
+    },
     pushTurnEnd(text: string): void { push(eventPush('turn-end', text)) },
     requestApproval(info: ApprovalAskInfo): Promise<boolean> {
       return new Promise<boolean>((resolve) => {
@@ -202,6 +217,9 @@ export function createTerminalServer(pipeName: string): TerminalServer {
     close(): void {
       settle(false)
       pipe.close()
+      // 主动断开客户端：只把引用置空的话，对端要等服务端进程真正退出才能感知，
+      // 而进程退出前还可能有一段 dispose 时间——实测客户端会一直挂着。
+      try { client?.destroy() } catch { /* 已断 */ }
       client = undefined
       eof()
     },
