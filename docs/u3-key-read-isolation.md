@@ -68,6 +68,8 @@ shell 与 PRTS 是同一 SID（`S-1-5-21-...-500`，H3 探针实测）。deny �
 
 ## 3. 唯一剩余路径：专用账号 + 自研 spawn 层
 
+> **2026-11-01 更新：本节判断已被 Wave 0b 推翻。** 实测证明 AppContainer 在未提权上下文中可启动且能做读隔离，不需要专用账号、不需要 `CreateProcessAsUser` 的三项特权。**首选方案改为 AppContainer**，本节降级为备选（适用于需要真实用户身份而非包身份的场景）。详见 Wave 0 末尾的「Wave 0b 实测结果」。
+
 ```mermaid
 flowchart TB
     subgraph host["PRTS 主进程（Administrator）"]
@@ -146,6 +148,39 @@ node --test --test-force-exit .scratch/probe-shell-identity.test.ts
 - 确定具备这三项特权的是 **LocalSystem 服务**形态。这与 HANDOFF 里「若撞上明文密码那关，方案要退化为 PRTS 以服务形式运行」的判断一致，且现在有了实测支撑。
 
 **结论档位：当前上下文不具备，不是机制不可行。** 后续若要做，第一条不是写 spawn 层，是决定 PRTS 以什么身份常驻（服务 / 提权 / 维持现状）。
+
+#### Wave 0b 实测结果（2026-11-01）：AppContainer 可行，且不需要提权
+
+上面那条「专用账号 + CreateProcessAsUser」被特权卡死之后，换了一个机制：**AppContainer**。它走 `CreateProcess` + `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`，不走 `CreateProcessAsUser`，因此完全绕开 `SeAssignPrimaryToken` / `SeIncreaseQuota` / `SeImpersonate` 三项缺失的特权。
+
+探针：`.scratch/acspawn.cs`（编译成 exe 跑；**不要用 PowerShell 的 Add-Type 调这些 Win32 结构体**——PowerShell 对嵌套值类型字段的赋值改的是副本，`$si.StartupInfo.cb` 设不上，表现为 `CreateProcess` 返回 87/123）。
+
+四条臂，缺一不可：
+
+| 臂 | 内容 | 实测 |
+|---|---|---|
+| arm1 | 宿主（无 AppContainer）读 `C:\prts-data\secrets\deepseek.key` | exit 10 = **读得到**（基线有效） |
+| arm2 | AppContainer 子进程读同一个文件 | exit 20 = **读不到** |
+| arm3 | AppContainer 子进程执行 `cmd /c exit 7` | exit 7 = **进程能正常启动执行** |
+| arm4 | 给 AppContainer SID 授权 `C:\prts-workspace` 及其下文件后，再读 | exit 10 = **授权后可读** |
+
+arm3 排除了「什么都没跑起来」的假阳性；arm4 排除了「AppContainer 什么用户文件都读不到」的过度隔离——**它是可配置的最小权限，不是全隔离**。
+
+**这意味着：**
+
+- 「读隔离必须靠专用账号 + 提权」的判断**不成立**。AppContainer 在未提权的 Administrator 上下文中可以启动进程、可以做读隔离。
+- 原 §3「唯一剩余路径：专用账号 + 自研 spawn 层」应改读为：**首选 AppContainer，专用账号退为备选**。
+- 与已证伪的四条路径不矛盾：那四条走的是「换身份 / 换 SACL / 打 DACL」，AppContainer 走的是「给进程一个受限的包身份 + 按需 ACL 授权」，是第五类机制。
+
+**实施前的已知风险（未验证）：**
+
+1. AppContainer 里 `pwsh` / `node` 能否正常工作没测。它们要读系统目录以外的运行时文件（Node 的 `node_modules`、PowerShell 模块），需要逐项授权；arm3 只证明了 `cmd.exe` 能跑。
+2. AppContainer 进程的网络访问默认关闭，需要 `internetClient` capability 才能开。PRTS 的模型调用在宿主进程里，不受影响；但如果将来 shell 里要联网，要单独评估。
+3. 授权面会随工作区增长。`icacls /grant *SID:(OI)(CI)(RX)` 是一次性批量，但要处理新增目录与清理残留。
+4. arm4 的授权是**探针自己用 icacls 做的**，不是产品代码；产品化后需要把「建 profile → 授权工作区 → 启动 → 清理」做成幂等的生命周期，且清理失败要能发现（参考 `dsh-sandbox-windows-acl` 的 `dispose()` 聚合错误做法）。
+
+**复现**：`.scratch/acspawn.cs`，`Add-Type -Path acspawn.cs -OutputAssembly acspawn.exe -OutputType ConsoleApplication` 后直接运行。探针会自建并删除 AppContainer profile；若中途失败，用 `DeleteAppContainerProfile('PRTS.U3.Probe2')` 清理。
+
 
 
 ### Wave 1：账号与 ACL（一次性，需提权，不可逆）
