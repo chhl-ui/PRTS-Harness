@@ -151,7 +151,9 @@ export function openMemoryDb(path: string): DatabaseSync {
 function ensureFactIdentityColumn(db: DatabaseSync): void {
   const cols = (db.prepare('PRAGMA table_info(mem_facts)').all() as Array<{ name: string }>).map((c) => c.name)
   if (!cols.includes('identity_key')) db.exec('ALTER TABLE mem_facts ADD COLUMN identity_key TEXT')
-  db.exec("UPDATE mem_facts SET identity_key = lower(trim(subject)) || '|' || lower(trim(predicate)) WHERE identity_key IS NULL")
+  // 老行没有 sha256 可当指纹，回填成逐行唯一的键（legacy:<fact_id>）：
+  // 宁可让它们互不去重，也不能把两条不同的老事实错判成同一条。
+  db.exec("UPDATE mem_facts SET identity_key = lower(trim(subject)) || '|' || lower(trim(predicate)) || '|legacy:' || fact_id WHERE identity_key IS NULL")
   db.exec('CREATE INDEX IF NOT EXISTS idx_facts_identity ON mem_facts(identity_key, retired_at_ms, deleted_at_ms)')
 }
 

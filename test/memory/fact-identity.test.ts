@@ -1,16 +1,17 @@
 /**
- * `mem_facts` 的身份键与冲突语义（RED 先行）。
+ * `mem_facts` 的身份键语义（RED 先行 → 已被一次实测推翻并修正）。
  *
- * 议事会（2026-11-01，五席）一致指出的结构缺陷：`fold.ts` 的 fact 插入是
- * `ON CONFLICT(fact_id) DO NOTHING`，而 `fact_id = fact-${randomUUID()}`——
- * 同一个 (subject, predicate) 再断言时只会**插入一条新行**，旧的不会被退役，
- * `revision` 列硬编码为 1、永远没有递增路径。
+ * 议事会（2026-11-01 五席）指出 `fold.ts` 的 fact 插入是
+ * `ON CONFLICT(fact_id) DO NOTHING` 而 `fact_id` 来自 `randomUUID()`——
+ * 同一事实反复写入只会不断插新行，`revision` 列硬编码 1 永不递增。
  *
- * 后果：一旦引入写时抽取（同一偏好会在多轮对话里被反复抽到），事实库会堆出
- * 大量互相矛盾的副本，而架构需求 §5.3 要求「冲突保留，不静默覆盖」——
- * 保留不等于堆积，正确形态是「旧行退役 + 新行升版，双方都可查」。
+ * **第一版实现把它当成「更新」判定（subject|predicate 相同就退役旧的），
+ * 被既有用例 M2 当场证伪**：「博士 偏好 光学镜头设计」与「博士 偏好 光学仪器校准」
+ * 的 subject+predicate 完全相同，但它们是两条**并存**的取值，不是谁取代谁。
  *
- * 这个文件钉住的是 identity_key 的语义，先于抽取实现。
+ * 修正后的语义：身份键是**去重键**（subject|predicate|object 全内容），
+ * 只保证「完全相同的事实不重复插入」。「哪条取代哪条」是 `fact.corrected`
+ * 的显式职责，不能从字符串推断。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -18,74 +19,58 @@ import { DatabaseSync } from 'node:sqlite'
 import { MemoryStore } from '../../src/memory/index.ts'
 import { makeTmp } from '../support/tmp.ts'
 
-test('F1 同一 (subject, predicate) 再断言：旧行退役、新行 revision 递增', () => {
+const countFacts = (path: string): number => {
+  const raw = new DatabaseSync(path, { readOnly: true })
+  const c = (raw.prepare('SELECT count(*) c FROM mem_facts').get() as { c: number }).c
+  raw.close()
+  return c
+}
+
+test('F1 完全相同的事实重复断言：幂等，库里不产生第二条', () => {
   const t = makeTmp('prts-mem-identity-')
   const path = t.db('memory.sqlite')
   const m = MemoryStore.open(path)
   try {
-    const first = m.assertFact({
-      actor: 'owner', subject: '博士', predicate: '偏好镜头',
-      object: '50mm 定焦',
-      provenance: 'stated', confirmationBasis: 'owner-stated',
-    })
-    const second = m.assertFact({
-      actor: 'owner', subject: '博士', predicate: '偏好镜头',
-      object: '85mm 定焦',
-      provenance: 'stated', confirmationBasis: 'owner-stated',
-    })
-    assert.notEqual(first, second, '两次断言必须是两条独立的事实行')
-
-    // 直接查表：这是投影层的不变量，不走检索路径
-    const raw = new DatabaseSync(path, { readOnly: true })
-    const rows = raw.prepare(
-      `SELECT fact_id, revision, retired_at_ms, deleted_at_ms FROM mem_facts ORDER BY revision`,
-    ).all() as Array<{ fact_id: string; revision: number; retired_at_ms: number | null; deleted_at_ms: number | null }>
-    raw.close()
-
-    assert.equal(rows.length, 2, '两条都要留着——冲突保留，不静默覆盖')
-    const oldRow = rows.find((r) => r.fact_id === first)
-    const newRow = rows.find((r) => r.fact_id === second)
-    assert.ok(oldRow && newRow, '两条 id 都必须能查到')
-    assert.notEqual(oldRow.retired_at_ms, null, '旧的必须退役（默认不参与检索）')
-    assert.equal(oldRow.revision, 1)
-    assert.equal(newRow.revision, 2, '新的 revision 必须在旧的基础上递增')
-    assert.equal(newRow.retired_at_ms, null, '新的不得退役')
+    const input = {
+      actor: 'owner' as const, subject: '博士', predicate: '偏好镜头', object: '50mm 定焦',
+      provenance: 'stated' as const, confirmationBasis: 'owner-stated' as const,
+    }
+    m.assertFact(input)
+    m.assertFact(input)
+    m.assertFact(input)
+    assert.equal(countFacts(path), 1, '同一句事实写三次，库里只能有一条')
   } finally {
     t.cleanup(m)
   }
 })
 
-test('F2 退役的事实默认不进检索，但库里的行仍在（可追溯）', () => {
+test('F2 同 subject+predicate 但 object 不同：两条并存，谁也不退役谁', () => {
   const t = makeTmp('prts-mem-identity-')
   const path = t.db('memory.sqlite')
   const m = MemoryStore.open(path)
   try {
     m.assertFact({
       actor: 'owner', subject: '博士', predicate: '偏好镜头',
-      object: '50mm 定焦',
-      provenance: 'stated', confirmationBasis: 'owner-stated',
+      object: '50mm 定焦', provenance: 'stated', confirmationBasis: 'owner-stated',
     })
     m.assertFact({
       actor: 'owner', subject: '博士', predicate: '偏好镜头',
-      object: '85mm 定焦',
-      provenance: 'stated', confirmationBasis: 'owner-stated',
+      object: '85mm 定焦', provenance: 'stated', confirmationBasis: 'owner-stated',
     })
 
+    assert.equal(countFacts(path), 2, '两条并存的偏好，不能互相取代')
     const hits = m.search({ text: '定焦' })
-    const texts = hits.map((h) => h.text)
-    assert.equal(hits.length, 1, '只有未退役的那条进检索')
-    assert.match(texts[0] ?? '', /85mm/, '检索返回的必须是新值')
-
-    const raw = new DatabaseSync(path, { readOnly: true })
-    const total = (raw.prepare('SELECT count(*) c FROM mem_facts').get() as { c: number }).c
-    raw.close()
-    assert.equal(total, 2, '旧事实仍然留在库里——不静默覆盖')
+    assert.equal(hits.length, 2, '两条都要能被检索到')
+    assert.equal(
+      hits.filter((h) => /50mm/.test(h.text)).length, 1,
+      '旧值不得被退役——它是并存的另一条偏好',
+    )
   } finally {
     t.cleanup(m)
   }
 })
 
-test('F3 不同 predicate 不互相退役', () => {
+test('F3 不同 predicate 不互相影响', () => {
   const t = makeTmp('prts-mem-identity-')
   const m = MemoryStore.open(t.db('memory.sqlite'))
   try {
@@ -99,7 +84,7 @@ test('F3 不同 predicate 不互相退役', () => {
     })
 
     const hits = m.search({ text: '定焦 光学设计' })
-    assert.equal(hits.length, 2, '身份键只看 subject+predicate，不同 predicate 不该互相退役')
+    assert.equal(hits.length, 2)
   } finally {
     t.cleanup(m)
   }

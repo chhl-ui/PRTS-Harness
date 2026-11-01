@@ -80,6 +80,11 @@ export class MemoryStore {
       fact_id: factId,
       subject: input.subject,
       predicate: input.predicate,
+      // 身份键用于**去重**，不是判定「更新」：含 object 才算同一条事实。
+      // 但**不能用 object 明文**——payload 在事件链上，正文外置（路线 D）的全部意义
+      // 就是链上只留 body_ref + sha256，链上形状是唯一不可逆点（§八 不变量 9，M14 钉住）。
+      // 用 body_sha256 当 object 的指纹：相同正文 → 相同键，不同正文 → 不同键。
+      identity_key: `${input.subject.trim().toLowerCase()}|${input.predicate.trim().toLowerCase()}|${bodySha}`,
       body_ref: bodyRef,
       body_sha256: bodySha,
       provenance: input.provenance,

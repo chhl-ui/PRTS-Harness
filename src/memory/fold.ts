@@ -30,37 +30,32 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
   switch (e.kind) {
     case 'fact.asserted': {
       const p = JSON.parse(e.payload_json) as FactAssertedPayload
-      // 身份键 = 主体 + 谓词（规范化）。同一身份键再断言时：旧行退役、新行升版。
-      // 「冲突保留，不静默覆盖」（架构需求 §5.3）——保留不等于堆积：不退役的话
-      // 每一轮对话都会留下一条互相矛盾的副本，检索时随机命中其中之一。
-      const identityKey = `${p.subject.trim().toLowerCase()}|${p.predicate.trim().toLowerCase()}`
-      const prev = db.prepare(
-        `SELECT fact_id, revision FROM mem_facts
-          WHERE identity_key = ? AND retired_at_ms IS NULL AND deleted_at_ms IS NULL
-          ORDER BY revision DESC LIMIT 1`,
-      ).get(identityKey) as { fact_id: string; revision: number } | undefined
+      // 身份键是**去重键**（subject|predicate|object 规范化），不是「更新」判定：
+      // 「博士 偏好 50mm」与「博士 偏好 85mm」是两条并存的取值，字符串分不出哪个
+      // 取代哪个——那是 fact.corrected 的显式职责，不能自动推断。这里只保证
+      // 「完全相同的事实重复写入不产生第二条」，抽取反复抽到同一句时靠它兜住。
+      const identityKey = (p as { identity_key?: string }).identity_key
+        ?? `${p.subject.trim().toLowerCase()}|${p.predicate.trim().toLowerCase()}|${p.body_sha256 ?? ''}`
+      const dup = db.prepare(
+        `SELECT fact_id FROM mem_facts WHERE identity_key = ? AND deleted_at_ms IS NULL LIMIT 1`,
+      ).get(identityKey) as { fact_id: string } | undefined
 
-      let revision = 1
-      if (prev !== undefined && prev.fact_id !== p.fact_id) {
-        revision = (prev.revision ?? 1) + 1
-        db.prepare('UPDATE mem_facts SET retired_at_ms = ? WHERE fact_id = ?')
-          .run(e.recorded_at_ms, prev.fact_id)
+      if (dup === undefined) {
+        db.prepare(
+          `INSERT INTO mem_facts (
+             fact_id, scope, subject, predicate, identity_key, body_ref, valid_from_ms, valid_to_ms,
+             recorded_at_ms, provenance, confirmation_basis, origin, confidence,
+             revision, applicable_when, retention_class, source_turn_ids, importance
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(fact_id) DO NOTHING`,
+        ).run(
+          p.fact_id, e.scope, p.subject, p.predicate, identityKey, p.body_ref,
+          p.valid_from_ms, p.valid_to_ms, e.recorded_at_ms,
+          p.provenance, p.confirmation_basis, p.origin, p.confidence,
+          1, p.applicable_when, p.retention_class,
+          JSON.stringify(p.source_turn_ids ?? []), p.importance,
+        )
       }
-
-      db.prepare(
-        `INSERT INTO mem_facts (
-           fact_id, scope, subject, predicate, identity_key, body_ref, valid_from_ms, valid_to_ms,
-           recorded_at_ms, provenance, confirmation_basis, origin, confidence,
-           revision, applicable_when, retention_class, source_turn_ids, importance
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT(fact_id) DO NOTHING`,
-      ).run(
-        p.fact_id, e.scope, p.subject, p.predicate, identityKey, p.body_ref,
-        p.valid_from_ms, p.valid_to_ms, e.recorded_at_ms,
-        p.provenance, p.confirmation_basis, p.origin, p.confidence,
-        revision, p.applicable_when, p.retention_class,
-        JSON.stringify(p.source_turn_ids ?? []), p.importance,
-      )
       // FTS 是投影的一部分，与 mem_facts 同一事务同步。索引文本含 subject / predicate
       // ——此前 LIKE 路径也搜这两列，换成 FTS 后不能把这份能力丢掉。
       const rid = (db.prepare('SELECT rowid AS r FROM mem_facts WHERE fact_id = ?')
