@@ -24,6 +24,47 @@ const WIN = process.platform === 'win32'
 const prtsYml = fileURLToPath(new URL('../../config/prts.yml', import.meta.url))
 const disableLlm = [{ id: 'llm-deepseek', disabled: true }]
 
+test('L3 config 的 maxOutputChars 200000 真的生效（不 patch 时）', { skip: !WIN, timeout: 180000 }, async () => {
+  const t = makeTmp('prts-spill-live3-')
+  const spillRoot = join(t.dir, 'spill-root')
+  process.env.PRTS_SPILL_MAX_INLINE_TOKENS = '100'
+  process.env.PRTS_SPILL_ROOT = spillRoot
+  let app: Awaited<ReturnType<typeof startRuntime>> | undefined
+  try {
+    const dataRoot = join(t.dir, 'data')
+    const workspace = join(t.dir, 'ws')
+    mkdirSync(dataRoot, { recursive: true })
+    mkdirSync(workspace, { recursive: true })
+
+    // 不 patch persistent-pwsh：验证 config/prts.yml 的 200000 生效。
+    // 10 万字符在默认 16000 下会被截到约 16200，在 200000 下应完整通过。
+    app = await startRuntime({ configPath: prtsYml, dataRoot, workspace, mode: 'normal', patches: disableLlm })
+
+    const script: ScriptedStep[] = [
+      { toolCalls: [{ name: 'pwsh', arguments: { command: "[Console]::Out.Write('x' * 100000)" } }] },
+      { text: 'done' },
+    ]
+    scriptedLlmPlugin(script).apply(app.ctx as Context)
+
+    await runTurn(app.ctx as Context, 'run the command', { cwd: workspace })
+
+    const entries = readdirSync(spillRoot, { recursive: true, encoding: 'utf8' }) as string[]
+    const spilled = entries.filter((f) => f.endsWith('.txt'))
+    assert.ok(spilled.length >= 1, `spill 目录下没有结果文件，实际内容：${JSON.stringify(entries)}`)
+
+    const content = readFileSync(join(spillRoot, spilled[0]), 'utf8')
+    assert.ok(
+      content.length >= 90000,
+      `落盘只有 ${content.length} 字符；config 的 maxOutputChars: 200000 应让 10 万字符完整通过（默认 16000 只能拿到约 16200）`,
+    )
+  } finally {
+    delete process.env.PRTS_SPILL_MAX_INLINE_TOKENS
+    delete process.env.PRTS_SPILL_ROOT
+    if (app) await app.dispose()
+    t.cleanup()
+  }
+})
+
 test('L2 调高 maxOutputChars 后 spill 存下完整输出（上限与卸载是一套组合）', { skip: !WIN, timeout: 180000 }, async () => {
   const t = makeTmp('prts-spill-live2-')
   const spillRoot = join(t.dir, 'spill-root')
@@ -81,7 +122,12 @@ test('L1 真实 runtime：超阈值工具结果落盘（钩子确实被调用）
     mkdirSync(dataRoot, { recursive: true })
     mkdirSync(workspace, { recursive: true })
 
-    app = await startRuntime({ configPath: prtsYml, dataRoot, workspace, mode: 'normal', patches: disableLlm })
+    // 显式固定上游上限为默认值 16000：这条测的是「上游先截断、spill 只能存到截断处」
+    // 这个事实。config/prts.yml 现在配的是 200000，不显式固定就测不到这条。
+    app = await startRuntime({
+      configPath: prtsYml, dataRoot, workspace, mode: 'normal',
+      patches: [...disableLlm, { id: 'persistent-pwsh', config: { maxOutputChars: 16_000 } }],
+    })
 
     const script: ScriptedStep[] = [
       // 必须用 [Console]::Out.Write 而不是裸字符串输出：PowerShell 的格式化系统

@@ -147,6 +147,11 @@
   disabled: !!js process.platform !== 'win32'
   config:
     timeoutMs: 300000
+    # 上游输出上限。默认 16000 会让大结果在到达 spill 之前就被截断（纯丢失、无回读），
+    # 调到 200000 把截断交给 spill 变成「可回读的卸载」。这个值的定位是 spill 失效
+    # （未启用 / isError / read / sessionId 为空）时的兜底：最坏情况约 5 万 token，
+    # 仍在 128K 窗口内。数据与取舍见 docs/design-tool-output-spill.md §7之二。
+    maxOutputChars: 200000
     description: |-
       Run commands in a PowerShell shell
       * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
