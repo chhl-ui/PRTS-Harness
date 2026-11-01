@@ -177,10 +177,18 @@ export interface MemoryHit {
   recallPaths?: RecallPath[]
 }
 
-/** 事件种类。第一版只实现 fact.asserted，其余为后续扩展预留。 */
+/**
+ * 事件种类。
+ *
+ * `fact.retired` / `fact.restored` 是生命周期（Wave 5）的状态跃迁：退役默认不进检索，
+ * 两者都可逆（`retired_at_ms` 置位 / 清空）。**衰减本身不是事件**——它是纯函数，
+ * 见 `lifecycle.ts` 的头部说明。
+ */
 export type MemoryEventKind =
   | 'fact.asserted'
   | 'fact.corrected'
+  | 'fact.retired'
+  | 'fact.restored'
   | 'turn.recorded'
   | 'summary.generated'
   | 'memory.deleted'

@@ -15,6 +15,11 @@ export {
 } from './consolidate.ts'
 export { OllamaGenerator, extractJsonArray, type TextGenerator } from './generate.ts'
 export { writeProfile, writeSummary, type WriteProfileInput, type WriteSummaryInput } from './write.ts'
+export {
+  decayedImportance, shouldRetire,
+  IMPORTANCE_HALF_LIFE_DAYS, RETIRE_IMPORTANCE_FLOOR, RETIRE_MIN_AGE_DAYS,
+  type RetireCandidate,
+} from './lifecycle.ts'
 export type {
   ActorKind,
   AssertFactInput,

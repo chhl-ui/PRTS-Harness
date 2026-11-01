@@ -20,6 +20,11 @@ import {
   type ConsolidateOptions, type ConsolidateResult,
 } from './consolidate.ts'
 import { ensureSessionsBuilt, openMemoryDb } from './schema.ts'
+import {
+  decayedImportance, shouldRetire,
+  IMPORTANCE_HALF_LIFE_DAYS, RETIRE_IMPORTANCE_FLOOR, RETIRE_MIN_AGE_DAYS,
+  type RetireCandidate,
+} from './lifecycle.ts'
 import { parseTime } from './time.ts'
 import { tokenize } from './tokenize.ts'
 import type {
@@ -236,6 +241,187 @@ export class MemoryStore {
   }
 
   /**
+   * 生命周期作业：把「已淡忘」的事实置为退役（Wave 5）。
+   *
+   * 只处理 `origin='live'` 且 `retention_class <> 'permanent'` 的行：
+   * - benchmark 是评测数据，不该被生产作业改写；
+   * - permanent 是身份性事实，淡忘它等于人格漂移。
+   *
+   * 幂等：已退役的行不在候选里，重复跑不会追加第二条事件。`dryRun` 只算不写，
+   * 用来在真机上先看会退役多少条——退役虽然可逆，但批量改检索可见性之前先看数。
+   *
+   * 判定用的是 `shouldRetire()` 的**折算后**重要性，`mem_facts.importance` 本身不动
+   * （衰减不写回，理由见 lifecycle.ts 头部）。
+   */
+  retireFacts(opts: {
+    actor?: ActorKind
+    nowMs?: number
+    limit?: number
+    dryRun?: boolean
+    floor?: number
+    minAgeDays?: number
+    halfLifeDays?: number
+  } = {}): { scanned: number; candidates: RetireCandidate[]; retired: string[] } {
+    const nowMs = opts.nowMs ?? Date.now()
+    const limit = Math.max(1, opts.limit ?? 500)
+    const minAgeDays = opts.minAgeDays ?? RETIRE_MIN_AGE_DAYS
+    const floor = opts.floor ?? RETIRE_IMPORTANCE_FLOOR
+    const rows = this.db.prepare(
+      `SELECT fact_id, importance, recorded_at_ms, retention_class
+         FROM mem_facts
+        WHERE scope = ? AND origin = 'live'
+          AND deleted_at_ms IS NULL AND retired_at_ms IS NULL
+          AND retention_class <> 'permanent'
+          AND recorded_at_ms <= ?
+        ORDER BY recorded_at_ms ASC
+        LIMIT ?`,
+    ).all(SCOPE, nowMs - minAgeDays * 86_400_000, limit) as Array<{
+      fact_id: string
+      importance: number
+      recorded_at_ms: number
+      retention_class: string
+    }>
+
+    const candidates: RetireCandidate[] = []
+    for (const r of rows) {
+      const c = shouldRetire(
+        {
+          factId: r.fact_id,
+          importance: r.importance,
+          recordedAtMs: r.recorded_at_ms,
+          retentionClass: r.retention_class,
+        },
+        nowMs,
+        { floor, minAgeDays, halfLifeDays: opts.halfLifeDays },
+      )
+      if (c !== null) candidates.push(c)
+    }
+    if (opts.dryRun === true || candidates.length === 0) {
+      return { scanned: rows.length, candidates, retired: [] }
+    }
+
+    const actor = opts.actor ?? 'system'
+    const retired: string[] = []
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const c of candidates) {
+        this.appendEvent({
+          kind: 'fact.retired',
+          actor,
+          recordedAtMs: nowMs,
+          payload: {
+            fact_id: c.factId,
+            reason: `importance-decay: ${c.effective.toFixed(4)} < ${floor}`,
+            threshold: floor,
+            // 判定依据必须进链：只记「退役了」，事后无法复查阈值是否合理。
+            effective_importance: Number(c.effective.toFixed(6)),
+            age_days: Number(c.ageDays.toFixed(3)),
+            importance_at_write: c.importance,
+            half_life_days: opts.halfLifeDays ?? IMPORTANCE_HALF_LIFE_DAYS,
+          },
+        })
+        retired.push(c.factId)
+      }
+      this.db.exec('COMMIT')
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+    return { scanned: rows.length, candidates, retired }
+  }
+
+  /**
+   * 恢复退役项（可逆档）。只处理当前确实处于退役状态的行。
+   *
+   * 返回**实际恢复条数**：传入已删除（正文已清空）或未退役的 id 不计入。
+   * 静默返回 0 会让「我以为恢复了」变成无证据的错觉，调用方要据此判断有没有白跑。
+   */
+  restoreFacts(input: { actor?: ActorKind; factIds: string[]; reason?: string }): number {
+    if (input.factIds.length === 0) return 0
+    const now = Date.now()
+    const actor = input.actor ?? 'owner'
+    const rows = this.db.prepare(
+      `SELECT fact_id FROM mem_facts
+        WHERE fact_id IN (${input.factIds.map(() => '?').join(',')})
+          AND deleted_at_ms IS NULL AND retired_at_ms IS NOT NULL`,
+    ).all(...input.factIds) as Array<{ fact_id: string }>
+    if (rows.length === 0) return 0
+
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const r of rows) {
+        this.appendEvent({
+          kind: 'fact.restored',
+          actor,
+          recordedAtMs: now,
+          payload: { fact_id: r.fact_id, reason: input.reason ?? 'manual-restore' },
+        })
+      }
+      this.db.exec('COMMIT')
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+    return rows.length
+  }
+
+  /**
+   * 生命周期现状。`permanentLive` 单独报出来：它永不退役，混在 live 总数里
+   * 会让「为什么退役作业没动那批」看不出原因。
+   */
+  lifecycleStats(nowMs: number = Date.now()): {
+    live: number
+    retired: number
+    deleted: number
+    permanentLive: number
+    liveByClass: Array<{ retentionClass: string; live: number }>
+    nearestCandidate: RetireCandidate | null
+  } {
+    const one = (sql: string): number => (this.db.prepare(sql).get(SCOPE) as { c: number }).c
+    const live = one(
+      "SELECT count(*) c FROM mem_facts WHERE scope = ? AND deleted_at_ms IS NULL AND retired_at_ms IS NULL",
+    )
+    const retired = one(
+      "SELECT count(*) c FROM mem_facts WHERE scope = ? AND deleted_at_ms IS NULL AND retired_at_ms IS NOT NULL",
+    )
+    const deleted = one('SELECT count(*) c FROM mem_facts WHERE scope = ? AND deleted_at_ms IS NOT NULL')
+    const permanentLive = one(
+      "SELECT count(*) c FROM mem_facts WHERE scope = ? AND deleted_at_ms IS NULL AND retired_at_ms IS NULL AND retention_class = 'permanent'",
+    )
+    const liveByClass = (this.db.prepare(
+      `SELECT retention_class AS retentionClass, count(*) AS live FROM mem_facts
+        WHERE scope = ? AND deleted_at_ms IS NULL AND retired_at_ms IS NULL
+        GROUP BY retention_class ORDER BY retention_class`,
+    ).all(SCOPE) as Array<{ retentionClass: string; live: number }>)
+
+    // 最接近退役的一条：给阈值调参提供依据，避免「跑一次才知道会杀多少」。
+    const rows = this.db.prepare(
+      `SELECT fact_id, importance, recorded_at_ms, retention_class FROM mem_facts
+        WHERE scope = ? AND origin = 'live' AND deleted_at_ms IS NULL AND retired_at_ms IS NULL
+          AND retention_class <> 'permanent'`,
+    ).all(SCOPE) as Array<{
+      fact_id: string
+      importance: number
+      recorded_at_ms: number
+      retention_class: string
+    }>
+    let nearestCandidate: RetireCandidate | null = null
+    for (const r of rows) {
+      const effective = decayedImportance(r.importance, r.recorded_at_ms, nowMs)
+      if (nearestCandidate === null || effective < nearestCandidate.effective) {
+        nearestCandidate = {
+          factId: r.fact_id,
+          importance: r.importance,
+          recordedAtMs: r.recorded_at_ms,
+          effective,
+          ageDays: Math.max(0, (nowMs - r.recorded_at_ms) / 86_400_000),
+        }
+      }
+    }
+    return { live, retired, deleted, permanentLive, liveByClass, nearestCandidate }
+  }
+
+  /**
    * 记录一条对话回合。
    *
    * 正文外置到 `mem_bodies`；事件的 `occurred_raw` 保留原始时间串，
@@ -385,7 +571,10 @@ export class MemoryStore {
     ).map((r) => ({
       kind: 'fact' as const,
       id: r.fact_id,
-      score: (1 + RECENCY_WEIGHT * recency(r.recorded_at_ms, nowMs)) * (0.5 + r.importance),
+      // importance 是写入时的强度，这里是**折算后的有效强度**（Wave 5）：
+      // 衰减是纯函数而不是写回，理由见 lifecycle.ts 头部。
+      score: (1 + RECENCY_WEIGHT * recency(r.recorded_at_ms, nowMs))
+        * (0.5 + decayedImportance(r.importance, r.recorded_at_ms, nowMs)),
       provenance: r.provenance,
       origin: r.origin,
       text: r.body ?? '',
@@ -580,7 +769,8 @@ export class MemoryStore {
           semanticHits.push({
             kind: 'fact',
             id: r.fact_id,
-            score: (1 + RECENCY_WEIGHT * recency(r.recorded_at_ms, nowMs)) * (0.5 + r.importance),
+            score: (1 + RECENCY_WEIGHT * recency(r.recorded_at_ms, nowMs))
+              * (0.5 + decayedImportance(r.importance, r.recorded_at_ms, nowMs)),
             provenance: r.provenance,
             origin: r.origin,
             text: r.body ?? '',
@@ -644,7 +834,9 @@ export class MemoryStore {
       }>).map((r) => ({
         kind: 'fact' as const,
         id: r.fact_id,
-        score: (1 + RECENCY_WEIGHT * recency(r.recorded_at_ms, nowMs)) * (0.5 + r.importance) * (1 + countHits(r.body, likeTokens)),
+        score: (1 + RECENCY_WEIGHT * recency(r.recorded_at_ms, nowMs))
+          * (0.5 + decayedImportance(r.importance, r.recorded_at_ms, nowMs))
+          * (1 + countHits(r.body, likeTokens)),
         provenance: r.provenance,
         origin: r.origin,
         text: r.body ?? '',

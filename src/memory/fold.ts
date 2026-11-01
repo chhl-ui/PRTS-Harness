@@ -34,10 +34,15 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       // 「博士 偏好 50mm」与「博士 偏好 85mm」是两条并存的取值，字符串分不出哪个
       // 取代哪个——那是 fact.corrected 的显式职责，不能自动推断。这里只保证
       // 「完全相同的事实重复写入不产生第二条」，抽取反复抽到同一句时靠它兜住。
+      //
+      // **已退役的行不算重复**（Wave 5）：主人重新说了一遍曾淡忘的事，必须能被重新
+      // 记住。若把退役行当 dup，记忆就变成单向失忆——淡忘之后说什么都想不起来。
+      // 新行带新的写入时间与强度，旧行保持退役历史，两者都在链上。
       const identityKey = (p as { identity_key?: string }).identity_key
         ?? `${p.subject.trim().toLowerCase()}|${p.predicate.trim().toLowerCase()}|${p.body_sha256 ?? ''}`
       const dup = db.prepare(
-        `SELECT fact_id FROM mem_facts WHERE identity_key = ? AND deleted_at_ms IS NULL LIMIT 1`,
+        `SELECT fact_id FROM mem_facts
+          WHERE identity_key = ? AND deleted_at_ms IS NULL AND retired_at_ms IS NULL LIMIT 1`,
       ).get(identityKey) as { fact_id: string } | undefined
 
       if (dup === undefined) {
@@ -68,6 +73,33 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
         db.prepare('INSERT INTO mem_fts_facts(rowid, body) VALUES (?,?)')
           .run(rid, `${p.subject} ${p.predicate} ${obj}`)
       }
+      break
+    }
+    case 'fact.retired': {
+      const p = JSON.parse(e.payload_json) as {
+        fact_id: string
+        reason: string
+        threshold: number
+        effective_importance: number
+        age_days: number
+      }
+      // 退役 = 置 `retired_at_ms`，**不动正文、不动 FTS 索引**：这是可逆档，
+      // 与 memory.deleted（清正文 + 删索引，不可逆）是两回事。
+      //
+      // `AND retired_at_ms IS NULL` 让重复退役幂等：重放同一序列时状态一致，
+      // 且不会用第二次的时间覆盖第一次——退役时间是「首次降档」的事实。
+      db.prepare(
+        'UPDATE mem_facts SET retired_at_ms = ? WHERE fact_id = ? AND deleted_at_ms IS NULL AND retired_at_ms IS NULL',
+      ).run(e.recorded_at_ms, p.fact_id)
+      break
+    }
+    case 'fact.restored': {
+      const p = JSON.parse(e.payload_json) as { fact_id: string; reason: string }
+      // 恢复只清退役标记：已删除（deleted_at_ms 非空）的条目正文已清空，
+      // 恢复它等于恢复一条空事实，必须拒绝。
+      db.prepare(
+        'UPDATE mem_facts SET retired_at_ms = NULL WHERE fact_id = ? AND deleted_at_ms IS NULL',
+      ).run(p.fact_id)
       break
     }
     case 'turn.recorded': {
