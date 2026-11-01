@@ -21,6 +21,13 @@ import type {
 
 const SCOPE = 'prts'
 const DEFAULT_LIMIT = 20
+/**
+ * 时近衰减的权重上限（v2.7）。此前的 `score = recency × ...` 让 recency 成为乘性
+ * 因子，实测把 bm25 名次靠前的证据压了下去：纯 FTS 探针 any@8 = 45.1%，
+ * 实现只有 36.9%。改成 `1 + 0.1×recency` 后，时间只提供 ±10% 的微调，
+ * 不再覆盖 RRF 的名次差异（相邻名次差 ~50%）。
+ */
+const RECENCY_WEIGHT = 0.1
 
 /** `LIKE` 通配符转义。不转义时一条含 `%` 的提问会命中全表（设计稿 §6.5）。 */
 export function escapeLike(s: string): string {
@@ -310,7 +317,7 @@ export class MemoryStore {
     ).map((r) => ({
       kind: 'fact' as const,
       id: r.fact_id,
-      score: recency(r.recorded_at_ms, nowMs) * (0.5 + r.importance),
+      score: (1 + RECENCY_WEIGHT * recency(r.recorded_at_ms, nowMs)) * (0.5 + r.importance),
       provenance: r.provenance,
       origin: r.origin,
       text: r.body ?? '',
@@ -342,7 +349,7 @@ export class MemoryStore {
     ).map((r) => ({
       kind: 'turn' as const,
       id: r.turn_id,
-      score: r.occurred_at_ms === null ? 0.5 : recency(r.occurred_at_ms, nowMs),
+      score: 1 + RECENCY_WEIGHT * (r.occurred_at_ms === null ? 0.5 : recency(r.occurred_at_ms, nowMs)),
       origin: r.origin,
       sessionId: r.session_id,
       turnIndex: r.turn_index,
@@ -397,7 +404,7 @@ export class MemoryStore {
       }>).map((r) => ({
         kind: 'fact' as const,
         id: r.fact_id,
-        score: recency(r.recorded_at_ms, nowMs) * (0.5 + r.importance) * (1 + countHits(r.body, likeTokens)),
+        score: (1 + RECENCY_WEIGHT * recency(r.recorded_at_ms, nowMs)) * (0.5 + r.importance) * (1 + countHits(r.body, likeTokens)),
         provenance: r.provenance,
         origin: r.origin,
         text: r.body ?? '',
@@ -428,7 +435,7 @@ export class MemoryStore {
       }>).map((r) => ({
         kind: 'turn' as const,
         id: r.turn_id,
-        score: (r.occurred_at_ms === null ? 0.5 : recency(r.occurred_at_ms, nowMs)) * (1 + countHits(r.body, likeTokens)),
+        score: (1 + RECENCY_WEIGHT * (r.occurred_at_ms === null ? 0.5 : recency(r.occurred_at_ms, nowMs))) * (1 + countHits(r.body, likeTokens)),
         origin: r.origin,
         sessionId: r.session_id,
         turnIndex: r.turn_index,
