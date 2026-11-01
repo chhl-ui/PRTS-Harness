@@ -113,3 +113,23 @@ test('runner: cwd 设到工作区——pwsh 能执行（继承错目录会报「
     rmSync(ws, { recursive: true, force: true })
   }
 })
+
+test('runner: --inherit 透传 stdio（持久 shell / PTY 走这条）', { timeout: 180000 }, async () => {
+  // 持久 shell 在启动时 confine 一次，之后所有命令都在同一个 PTY 进程里跑。
+  // 它需要的是双向交互，不是「跑完返回一段输出」——所以继承调用方句柄，
+  // runner 自己不捕获、也不往 stdout 写东西（否则会污染 PTY 流）。
+  const ws = join('C:\\', `prts-ac-inherit-${process.pid}-${Date.now()}`)
+  mkdirSync(ws, { recursive: true })
+  const profile = `PRTS.RunnerInherit.${process.pid}.${Date.now()}`
+  try {
+    const r = await runRunner([
+      '--profile', profile, '--workspace', ws, '--inherit', '--',
+      CMD, '/c', 'echo INHERIT_OK && exit 4',
+    ])
+    assert.equal(r.code, 4, `退出码应透传为 4，实际 ${r.code}`)
+    assert.match(r.out, /INHERIT_OK/,
+      `inherit 模式下子进程的输出应直接到调用方，实际 ${JSON.stringify(r.out)}`)
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+  }
+})

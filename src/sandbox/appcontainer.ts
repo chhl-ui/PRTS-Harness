@@ -53,6 +53,15 @@ export interface SpawnOptions {
   args?: readonly string[]
   /** 子进程工作目录；缺省用宿主的当前目录。必须在已授权的工作区内。 */
   cwd?: string
+  /**
+   * 透传调用方的 stdio，而不是自建管道捕获。
+   *
+   * 持久 shell（PTY）必须用这个：`dsh-terminal-bash` 在**启动 shell 进程时**调一次
+   * confine，之后每条命令都在同一个 PTY 进程里跑。它需要的是一个能双向交互的
+   * 进程，而不是「跑完返回一段输出」。此时 `wait()` 返回的 `output` 恒为空——
+   * 输出由调用方的 PTY 自己收。
+   */
+  inheritStdio?: boolean
 }
 
 export interface ChildHandle {
@@ -174,6 +183,7 @@ const SetHandleInformation = kernel32.func(
 const ReadFile = kernel32.func(
   'bool ReadFile(void *h, void *buf, uint32_t n, _Out_ uint32_t *got, void *ov)',
 )
+const GetStdHandle = kernel32.func('void *GetStdHandle(uint32_t which)')
 
 const EXTENDED_STARTUPINFO_PRESENT = 0x0008_0000
 const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = 0x0002_0009
@@ -295,33 +305,61 @@ export async function createAppContainer(opts: AppContainerOptions): Promise<App
         throw new Error('prts: UpdateProcThreadAttribute(SECURITY_CAPABILITIES) 失败')
       }
 
-      // 单管道合并 stdout/stderr。分开读两个管道会在其中一个写满（64KB）而
-      // 父进程正在读另一个时双死锁：写端阻塞、读端等 EOF。
-      const saBuf = koffi.alloc(SECURITY_ATTRIBUTES, 1)
-      koffi.encode(saBuf, SECURITY_ATTRIBUTES, {
-        nLength: SIZE_SA,
-        lpSecurityDescriptor: null,
-        bInheritHandle: 1,
-      })
-      const pipeRead: unknown[] = [null]
-      const pipeWriteOut: unknown[] = [null]
-      if (!CreatePipe(pipeRead, pipeWriteOut, saBuf, 0)) {
-        throw new Error('prts: CreatePipe 失败')
+      // inherit 模式不建管道：子进程直接继承调用方的 stdio（PTY 的 slave 端就在
+      // 那里），双向交互才有得谈。capture 模式才自建单管道。
+      const inherit = o.inheritStdio === true
+      let pipeReadHandle: unknown
+      let pipeWrite: unknown
+      // inherit 模式：取调用方 stdio 句柄并设为可继承。Getter 返回的句柄属于本进程，
+      // 不设继承位子进程拿到的是无效值。
+      const inheritHandles = { input: null as unknown, output: null as unknown, error: null as unknown }
+      if (inherit) {
+        inheritHandles.input = GetStdHandle(0xFFFF_FFF6)   // STD_INPUT_HANDLE (-10)
+        inheritHandles.output = GetStdHandle(0xFFFF_FFF5)  // STD_OUTPUT_HANDLE (-11)
+        inheritHandles.error = GetStdHandle(0xFFFF_FFF4)   // STD_ERROR_HANDLE (-12)
+        for (const h of [inheritHandles.input, inheritHandles.output, inheritHandles.error]) {
+          if (h !== null && h !== undefined) SetHandleInformation(h, 1, 1)
+        }
       }
-      // 读端不继承：子进程若也持着读端，EOF 永远不来。
-      SetHandleInformation(pipeRead[0], 1, 0)
-      const pipeReadHandle = pipeRead[0]
-      const pipeWrite = pipeWriteOut[0]
+      if (!inherit) {
+        const saBuf = koffi.alloc(SECURITY_ATTRIBUTES, 1)
+        koffi.encode(saBuf, SECURITY_ATTRIBUTES, {
+          nLength: SIZE_SA,
+          lpSecurityDescriptor: null,
+          bInheritHandle: 1,
+        })
+        const pipeRead: unknown[] = [null]
+        const pipeWriteOut: unknown[] = [null]
+        if (!CreatePipe(pipeRead, pipeWriteOut, saBuf, 0)) {
+          throw new Error('prts: CreatePipe 失败')
+        }
+        // 读端不继承：子进程若也持着读端，EOF 永远不来。
+        SetHandleInformation(pipeRead[0], 1, 0)
+        pipeReadHandle = pipeRead[0]
+        pipeWrite = pipeWriteOut[0]
+      }
 
       const siExBuf = koffi.alloc(STARTUPINFOEX, 1)
       koffi.encode(siExBuf, STARTUPINFOEX, {
-        StartupInfo: {
-          cb: SIZE_SIEX,
-          dwFlags: 0x0000_0100, // STARTF_USESTDHANDLES
-          hStdInput: null,
-          hStdOutput: pipeWrite,
-          hStdError: pipeWrite,
-        },
+        StartupInfo: inherit
+          ? {
+            // 不能只靠 bInheritHandles 让子进程「自动继承」：Node 的 stdio 句柄
+            // 默认不带 HANDLE_FLAG_INHERIT，子进程拿到无效句柄会以
+            // 0xC0000142 (STATUS_DLL_INIT_FAILED) 崩在 DLL 初始化阶段。
+            // 必须显式取句柄、显式设继承位、显式传给子进程。
+            cb: SIZE_SIEX,
+            dwFlags: 0x0000_0100, // STARTF_USESTDHANDLES
+            hStdInput: inheritHandles.input,
+            hStdOutput: inheritHandles.output,
+            hStdError: inheritHandles.error,
+          }
+          : {
+            cb: SIZE_SIEX,
+            dwFlags: 0x0000_0100, // STARTF_USESTDHANDLES
+            hStdInput: null,
+            hStdOutput: pipeWrite,
+            hStdError: pipeWrite,
+          },
         lpAttributeList: list,
       })
       const piBuf = koffi.alloc(PROCESS_INFORMATION, 1)
@@ -342,9 +380,10 @@ export async function createAppContainer(opts: AppContainerOptions): Promise<App
         EXTENDED_STARTUPINFO_PRESENT, null, o.cwd ?? null, siExBuf, piBuf,
       )
       // 无论成功失败，父进程都要关掉写端——否则读端等不到 EOF。
-      CloseHandle(pipeWrite)
+      // inherit 模式下没有管道，跳过。
+      if (!inherit) CloseHandle(pipeWrite)
       if (!ok) {
-        CloseHandle(pipeReadHandle)
+        if (!inherit) CloseHandle(pipeReadHandle)
         throw new Error(`prts: CreateProcessW(AppContainer) 失败：${o.command}`)
       }
 
@@ -361,7 +400,8 @@ export async function createAppContainer(opts: AppContainerOptions): Promise<App
           return new Promise((resolve) => {
             // 先读再等：读会一直阻塞到所有写端关闭（父进程的写端已在上面关掉），
             // 子进程退出即 EOF。反过来「先等再读」会在输出填满管道时死锁。
-            const output = drainPipe(pipeReadHandle)
+            // inherit 模式没有管道可读，输出归调用方，output 恒为空。
+            const output = inherit ? '' : drainPipe(pipeReadHandle)
             WaitForSingleObject(pi.hProcess, 0xFFFF_FFFF)
             const code: unknown[] = [0]
             GetExitCodeProcess(pi.hProcess, code)

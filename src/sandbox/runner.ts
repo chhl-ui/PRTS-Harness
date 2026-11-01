@@ -38,23 +38,26 @@ const EX_SOFTWARE = 70
 function parseArgv(argv: readonly string[]): {
   profile?: string
   workspace?: string
+  inherit: boolean
   command: string[]
 } {
   const sep = argv.indexOf('--')
-  if (sep < 0) return { command: [] }
+  if (sep < 0) return { inherit: false, command: [] }
   const opts = argv.slice(0, sep)
   const command = argv.slice(sep + 1)
   let profile: string | undefined
   let workspace: string | undefined
+  let inherit = false
   for (let i = 0; i < opts.length; i += 1) {
     if (opts[i] === '--profile') profile = opts[i + 1]
     else if (opts[i] === '--workspace') workspace = opts[i + 1]
+    else if (opts[i] === '--inherit') inherit = true
   }
-  return { profile, workspace, command }
+  return { profile, workspace, inherit, command }
 }
 
 async function main(): Promise<number> {
-  const { profile, workspace, command } = parseArgv(process.argv.slice(2))
+  const { profile, workspace, inherit, command } = parseArgv(process.argv.slice(2))
   if (profile === undefined || profile === '') {
     console.error('prts runner: 缺少 --profile')
     return EX_USAGE
@@ -74,7 +77,14 @@ async function main(): Promise<number> {
     // cwd 必须显式设到已授权的工作区。不设的话子进程继承 runner 的当前目录
     // （通常是仓库根，AppContainer 对它没有 traverse），PowerShell 会直接
     // 报「当前目录无效」而根本不执行命令——cmd 不敏感，pwsh 敏感，很容易漏测。
-    const child = box.spawn({ command: command[0], args: command.slice(1), cwd: workspace })
+    const child = box.spawn({
+      command: command[0],
+      args: command.slice(1),
+      cwd: workspace,
+      // 持久 shell（PTY）用 --inherit：子进程直接继承 PTY 的 slave 端，双向交互；
+      // 此时 output 恒为空，输出归调用方的 PTY。默认 capture 模式自建管道。
+      inheritStdio: inherit,
+    })
     const result = await child.wait()
     process.stdout.write(result.output)
     return result.exitCode
