@@ -268,8 +268,19 @@ export class MemoryStore {
     const turnConds = tokens.map(() => "b.body LIKE ? ESCAPE '\\'").join(' OR ')
     const originSlots = origins.map(() => '?').join(',')
 
+    // 相关度必须在 SQL 层表达。`LIMIT` 在 `ORDER BY` 之前生效，不排序的
+    // `LIMIT limit*4` 等于「按扫描顺序随便取 limit*4 行」——LongMemEval 全库口径下
+    // 平均每题有 4113 行满足 `LIKE` 条件，任取 80 行让证据 turn 的召回率掉到 2.1%；
+    // 去掉截断是 43.4%。截断没错，错在没有排序（见 .scratch/probe-recall-decompose.mjs
+    // 与 test/memory/recall.test.ts 的两个用例）。
+    const factHitExpr = tokens
+      .map(() => `(CASE WHEN b.body LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END
+                     + CASE WHEN f.subject LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END
+                     + CASE WHEN f.predicate LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)`)
+      .join(' + ')
     const rows = this.db.prepare(
-      `SELECT f.fact_id, f.provenance, f.origin, f.importance, f.recorded_at_ms, b.body
+      `SELECT f.fact_id, f.provenance, f.origin, f.importance, f.recorded_at_ms, b.body,
+              (${factHitExpr}) AS hit_count
          FROM mem_facts f
          LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
         WHERE f.scope = ?
@@ -277,8 +288,14 @@ export class MemoryStore {
           AND f.retired_at_ms IS NULL
           AND f.origin IN (${originSlots})
           AND (${factConds})
+        ORDER BY hit_count DESC, f.recorded_at_ms DESC
         LIMIT ?`,
-    ).all(scope, ...origins, ...pats.flatMap((p) => [p, p, p]), limit * 4) as Array<{
+    ).all(
+      ...pats.flatMap((p) => [p, p, p]), // SELECT 里的相关度表达式
+      scope, ...origins,
+      ...pats.flatMap((p) => [p, p, p]), // WHERE 里的命中条件
+      limit * 4,
+    ) as Array<{
       fact_id: string
       provenance: 'stated' | 'inferred'
       origin: Origin
@@ -300,17 +317,27 @@ export class MemoryStore {
 
     // turn 与 fact 走同一套 LIKE 召回；turn 没有 importance 列，
     // 排序只用时间（有 occurred_at_ms 就用它，没有就退化为固定值）。
+    const turnHitExpr = tokens
+      .map(() => `(CASE WHEN b.body LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)`)
+      .join(' + ')
     const turnRows = this.db.prepare(
       `SELECT t.turn_id, t.session_id, t.turn_index, t.external_id, t.origin,
-              t.occurred_at_ms, b.body
+              t.occurred_at_ms, b.body,
+              (${turnHitExpr}) AS hit_count
          FROM mem_turns t
          LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref
         WHERE t.scope = ?
           AND t.deleted_at_ms IS NULL
           AND t.origin IN (${originSlots})
           AND (${turnConds})
+        ORDER BY hit_count DESC, t.occurred_at_ms IS NULL, t.occurred_at_ms DESC
         LIMIT ?`,
-    ).all(scope, ...origins, ...pats, limit * 4) as unknown as Array<{
+    ).all(
+      ...pats, // SELECT 里的相关度表达式
+      scope, ...origins,
+      ...pats, // WHERE 里的命中条件
+      limit * 4,
+    ) as unknown as Array<{
       turn_id: string
       session_id: string
       turn_index: number
