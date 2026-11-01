@@ -174,7 +174,10 @@ arm3 排除了「什么都没跑起来」的假阳性；arm4 排除了「AppCont
 
 **实施前的已知风险（未验证）：**
 
-1. AppContainer 里 `pwsh` / `node` 能否正常工作没测。它们要读系统目录以外的运行时文件（Node 的 `node_modules`、PowerShell 模块），需要逐项授权；arm3 只证明了 `cmd.exe` 能跑。
+1. ~~AppContainer 里 `pwsh` / `node` 能否正常工作没测~~ **已测（2026-11-01，`.scratch/acruntime.cs`）**：
+   - **Windows PowerShell 5.1 完全可用**——在 AppContainer 里执行 `Set-Content` 写出了文件，exit 0。本机未装 PowerShell 7，`pwsh` 未单独验证。
+   - **node 可用，但要区分启动方式**：`node -e "<inline>"` 正常工作（输出 `node-e=v24.19.0`）；`node <script.js>` 失败于 `EPERM: lstat 'C:\'`——node 解析 main module 时从根目录逐级 realpath，而 AppContainer 对 `C:\` 没有 traverse。补授 `C:\` 的 `(RX)` 需要 WRITE_DAC：**本机未提权，`icacls 'C:\' /grant` 返回「拒绝访问」**。
+   - 结论：PowerShell 路线开箱可用；node 走脚本文件需要在安装阶段提权做一次 `C:\` traverse 授权（一次性配置，不是运行时提权）。若不想动根目录，可约束 shell 只用 `node -e`。
 2. AppContainer 进程的网络访问默认关闭，需要 `internetClient` capability 才能开。PRTS 的模型调用在宿主进程里，不受影响；但如果将来 shell 里要联网，要单独评估。
 3. 授权面会随工作区增长。`icacls /grant *SID:(OI)(CI)(RX)` 是一次性批量，但要处理新增目录与清理残留。
 4. arm4 的授权是**探针自己用 icacls 做的**，不是产品代码；产品化后需要把「建 profile → 授权工作区 → 启动 → 清理」做成幂等的生命周期，且清理失败要能发现（参考 `dsh-sandbox-windows-acl` 的 `dispose()` 聚合错误做法）。
