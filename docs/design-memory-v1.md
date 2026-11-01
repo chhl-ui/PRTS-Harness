@@ -603,6 +603,40 @@ Accuracy 0.75（4 题 3 对），与构造时的预期一致。
 
 **仍未解决**：`calib` 集 24 题含 **0 道 abstention**（该分支零覆盖）；负样本缺乏「近似错误」；每型仅 4 题，Wilson 95% CI 约 [0.51, 1.00]，统计功效不足以分辨题型间差异。
 
+### 9.5 第二轮校准（2026-11-01，重造校准集）
+
+首轮的问题被两个子代理指出后重造：负样本不再是「离题」，而是**同题干扰项**与**数值近似**；正样本不再是**标准答案逐字复制**，而是**同义改写**。
+
+`scripts\calibrate-judge.py`：生成用 `deepseek-chat`，判分用 `deepseek-reasoner`。
+
+| 变体 | 怎么造 | 应判 | n | 判对 |
+|---|---|---|---|---|
+| `paraphrase` | 同义改写，同一事实不同措辞 | yes | 20 | 20 |
+| `nearmiss` | 数值差一位 / 实体换成同题干扰项 | no | 20 | 20 |
+| `partial` | 提到主题但省略关键事实 | no | 20 | 19（1 条标签错） |
+| `offtopic` | 流畅但完全离题 | no | 20 | 20 |
+| `abs-refuse` | abstention 题如实说不知道 | yes | 4 | 4 |
+| `abs-fabricate` | abstention 题硬编 | no | 4 | 0（4 条标签错） |
+
+**初判有 5 个 FP，逐条核实后全部是标注错误，不是判分器误判**：
+
+| 案例 | 我的标签 | 实际情况 |
+|---|---|---|
+| `gpt4_2312f94c [partial]` | no | hypothesis 是「You got the Samsung Galaxy S22.」，gold 就是 `Samsung Galaxy S22`——**partial 被生成成与标准答案等价**，应判 yes |
+| 4 条 `abs-fabricate` | no | 构造代码 `f"It was {a[:60]}"` 假设 abstention 的 `answer` 是「应该给的答案」，实际它是**为什么无法回答的解释**——造出来的是正确拒答，应判 yes |
+
+修正标签后：**TP=29 / FN=0 / FP=0 / TN=59，真准确率 1.0000，n=88**。
+
+**这个 1.0 能说明什么、不能说明什么**：
+
+- 能说明：判分器在「同义改写」「同题近似错误」「部分正确」「完全离题」「正确拒答」「错误硬编」六种形态上都没有误判。**这是首轮那个「只能分开离题」的版本给不出的结论。**
+- **不能说明**：
+  1. **校准集是 DeepSeek 生成的**。生成器（`deepseek-chat`）与判分器（`deepseek-reasoner`）同供应商，可能系统性地造出「同族模型都容易判对」的样本。
+  2. 生成样本的分布 ≠ 真实模型输出的分布。PRTS 自己的错误形态还没被观察过。
+  3. 88 条仍是小样本。
+
+**过程教训（已记在脚本头注释里）**：`nearmiss` 生成器有可能把正确答案也包进去——抽查发现一条 `"…before the 'Data Analysis with Python' webinar"` 直接包含了 gold。**生成后必须人工扫一遍，不能直接信任生成器给的标签。**
+
 **数据落位（已定）**：`C:\prts-benchmark\<dataset>\`——**独立的根，不在 `protectedRoots` 也不在 `workspaceRoots` 内**，理由与 spill 根相同：基准数据含标准答案，模型 shell 不能读到。
 
 **版本锁定**：`longmemeval_oracle.json` 实测 **15,388,478 字节**，500 题，6 种 `question_type`（temporal-reasoning 133 / multi-session 133 / knowledge-update 78 / single-session-user 70 / single-session-assistant 56 / single-session-preference 30），abstention 30 题。**基线数字必须与这个字节数一起记录**——架构需求 §11 第 13 条自陈基准属「未经审读的资料级引用」，不锁版本就不可复现。
