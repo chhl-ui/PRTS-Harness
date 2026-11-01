@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS mem_facts (
   scope              TEXT NOT NULL DEFAULT 'prts',
   subject            TEXT NOT NULL,
   predicate          TEXT NOT NULL,
+  identity_key       TEXT,
   body_ref           TEXT,
   valid_from_ms      INTEGER,
   valid_to_ms        INTEGER,
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS mem_facts (
   CHECK (retention_class IN ('permanent','retirable','clearable'))
 );
 CREATE INDEX IF NOT EXISTS idx_facts_scope ON mem_facts(scope, deleted_at_ms, retired_at_ms);
+CREATE INDEX IF NOT EXISTS idx_facts_identity ON mem_facts(identity_key, retired_at_ms, deleted_at_ms);
 
 CREATE TABLE IF NOT EXISTS mem_summaries (
   summary_id     TEXT PRIMARY KEY,
@@ -122,6 +124,7 @@ export function openMemoryDb(path: string): DatabaseSync {
   db.exec('PRAGMA journal_mode = WAL')
   db.exec('PRAGMA secure_delete = ON')
   db.exec(SCHEMA)
+  ensureFactIdentityColumn(db)
   ensureFtsIndexed(db)
   return db
 }
@@ -134,6 +137,24 @@ export function openMemoryDb(path: string): DatabaseSync {
  * 实测：10,960 turn 的旧库打开后 recallPath 全是 'like'，无任何报错。
  * 计数不一致就按投影重建：这是唯一不需要重放事件链就能修复索引的时点。
  */
+/**
+ * `identity_key` 列的自愈迁移（v2.9）。
+ *
+ * 新旧库都要能用：新库由 SCHEMA 直接建列；旧库执行到这里时列不存在，需要
+ * ALTER 并**回填**——没有回填的老行身份键为 NULL，冲突检测永远不命中，
+ * 会静默退化成「重复堆积」的旧行为。
+ *
+ * 身份键 = lower(trim(subject)) + '|' + lower(trim(predicate))。
+ * 语义：同一主体同一谓词的新值取代旧值，旧行 retired 而非删除——即架构需求
+ * §5.3 的「冲突保留，不静默覆盖」；保留不等于堆积。
+ */
+function ensureFactIdentityColumn(db: DatabaseSync): void {
+  const cols = (db.prepare('PRAGMA table_info(mem_facts)').all() as Array<{ name: string }>).map((c) => c.name)
+  if (!cols.includes('identity_key')) db.exec('ALTER TABLE mem_facts ADD COLUMN identity_key TEXT')
+  db.exec("UPDATE mem_facts SET identity_key = lower(trim(subject)) || '|' || lower(trim(predicate)) WHERE identity_key IS NULL")
+  db.exec('CREATE INDEX IF NOT EXISTS idx_facts_identity ON mem_facts(identity_key, retired_at_ms, deleted_at_ms)')
+}
+
 function ensureFtsIndexed(db: DatabaseSync): void {
   const count = (sql: string): number => (db.prepare(sql).get() as { c: number }).c
   const turnsExpect = count(

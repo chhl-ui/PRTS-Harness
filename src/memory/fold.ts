@@ -30,18 +30,35 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
   switch (e.kind) {
     case 'fact.asserted': {
       const p = JSON.parse(e.payload_json) as FactAssertedPayload
+      // 身份键 = 主体 + 谓词（规范化）。同一身份键再断言时：旧行退役、新行升版。
+      // 「冲突保留，不静默覆盖」（架构需求 §5.3）——保留不等于堆积：不退役的话
+      // 每一轮对话都会留下一条互相矛盾的副本，检索时随机命中其中之一。
+      const identityKey = `${p.subject.trim().toLowerCase()}|${p.predicate.trim().toLowerCase()}`
+      const prev = db.prepare(
+        `SELECT fact_id, revision FROM mem_facts
+          WHERE identity_key = ? AND retired_at_ms IS NULL AND deleted_at_ms IS NULL
+          ORDER BY revision DESC LIMIT 1`,
+      ).get(identityKey) as { fact_id: string; revision: number } | undefined
+
+      let revision = 1
+      if (prev !== undefined && prev.fact_id !== p.fact_id) {
+        revision = (prev.revision ?? 1) + 1
+        db.prepare('UPDATE mem_facts SET retired_at_ms = ? WHERE fact_id = ?')
+          .run(e.recorded_at_ms, prev.fact_id)
+      }
+
       db.prepare(
         `INSERT INTO mem_facts (
-           fact_id, scope, subject, predicate, body_ref, valid_from_ms, valid_to_ms,
+           fact_id, scope, subject, predicate, identity_key, body_ref, valid_from_ms, valid_to_ms,
            recorded_at_ms, provenance, confirmation_basis, origin, confidence,
            revision, applicable_when, retention_class, source_turn_ids, importance
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(fact_id) DO NOTHING`,
       ).run(
-        p.fact_id, e.scope, p.subject, p.predicate, p.body_ref,
+        p.fact_id, e.scope, p.subject, p.predicate, identityKey, p.body_ref,
         p.valid_from_ms, p.valid_to_ms, e.recorded_at_ms,
         p.provenance, p.confirmation_basis, p.origin, p.confidence,
-        1, p.applicable_when, p.retention_class,
+        revision, p.applicable_when, p.retention_class,
         JSON.stringify(p.source_turn_ids ?? []), p.importance,
       )
       // FTS 是投影的一部分，与 mem_facts 同一事务同步。索引文本含 subject / predicate
