@@ -411,6 +411,56 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     }
   }) as never)
 
+  // 助手回复同样要落盘：只记 user 的记忆，问「上次聊了什么」时缺一半。
+  //
+  // 事件形状（`src/cli/chat.ts:27-45` 按同一契约处理）：
+  //   `agent/assistant-stream` → { agent, frame }；只有 frame.type='chunk' 且
+  //     frame.chunk.type='text-delta' 才承载可见文本增量；
+  //   `agent/turn-stopping` → { agent, turn }，回合边界，在这里落盘。
+  // **不用 `assistant/message`**：它在 runtime-types.d.ts:132 是 `eventType` 字段，
+  // 不是可订阅的事件名，拿不到正文。
+  //
+  // 写失败同样只打日志，绝不影响对话。
+  const assistantBuffers = new Map<string, string>()
+
+  const offMemoryAssistantStream = memory === undefined ? undefined : events?.on('agent/assistant-stream', ((payload: unknown) => {
+    try {
+      const p = payload as {
+        agent?: { session?: { id?: string } }
+        frame?: { type?: string; chunk?: { type?: string; text?: string } }
+      }
+      const sid = p.agent?.session?.id
+      if (typeof sid !== 'string' || sid === '') return
+      const frame = p.frame
+      if (frame?.type !== 'chunk' || frame.chunk?.type !== 'text-delta') return
+      const text = frame.chunk.text
+      if (typeof text !== 'string' || text === '') return
+      assistantBuffers.set(sid, (assistantBuffers.get(sid) ?? '') + text)
+    } catch (error) {
+      console.error(`[prts] memory stream buffer failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }) as never)
+
+  const offMemoryTurnStop = memory === undefined ? undefined : events?.on('agent/turn-stopping', ((payload: unknown) => {
+    try {
+      const p = payload as { agent?: { session?: { id?: string } }; turn?: number }
+      const sid = p.agent?.session?.id
+      if (typeof sid !== 'string' || sid === '') return
+      const text = (assistantBuffers.get(sid) ?? '').trim()
+      assistantBuffers.delete(sid)
+      if (text === '') return
+      memory?.recordTurn({
+        actor: 'system',
+        sessionId: sid,
+        turnIndex: typeof p.turn === 'number' ? p.turn : 0,
+        speaker: 'assistant',
+        text,
+      })
+    } catch (error) {
+      console.error(`[prts] memory recordTurn(assistant) failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }) as never)
+
   // W4b/D2：模型侧账本工具集。清单严格来自 MODEL_OPS（ledger.ts:122-125），
   // 固定 actor 通道（activate/cancel/setBudget/resumeFromStop/verify/ownerAccept/
   // ownerReject）不注册为工具。实现与路径域收敛见 src/runtime/task-tools.ts 头部。
@@ -459,6 +509,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       offToolExecute()
       offToolResult?.()
       offMemoryTurn?.()
+      offMemoryAssistantStream?.()
+      offMemoryTurnStop?.()
       memory?.close()
       spillWiring.dispose()
       taskTools.dispose()

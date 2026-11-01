@@ -64,6 +64,33 @@ test('MW1: 一个真实 turn 之后，记忆库里有对应的 user turn', { ski
   }
 })
 
+test('MW3: 助手回复也要落盘——只记一半的记忆答不上「上次聊了什么」', { skip: !WIN, timeout: 120000 }, async () => {
+  const t = makeTmp('prts-rt-memory-assistant-')
+  let app: Awaited<ReturnType<typeof boot>> | undefined
+  try {
+    app = await boot(t, [{ type: 'text', text: '你的镜头偏好已记下，是 50mm 定焦。' } as ScriptedStep])
+    await runTurn(app.ctx as Context, '帮我记一下镜头偏好', { cwd: app.workspace })
+
+    const raw = new DatabaseSync(join(app.dataRoot, 'memory.sqlite'), { readOnly: true })
+    const rows = raw.prepare(
+      `SELECT t.speaker, t.origin, b.body FROM mem_turns t
+         LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref`,
+    ).all() as Array<{ speaker: string; origin: string; body: string | null }>
+    raw.close()
+
+    const assistant = rows.find((r) => r.speaker === 'assistant')
+    assert.ok(
+      assistant,
+      `助手回复必须落盘，实际 speaker 只有：${JSON.stringify([...new Set(rows.map((r) => r.speaker))])}`,
+    )
+    assert.match(assistant.body ?? '', /50mm 定焦/, '落盘的必须是助手的实际回复内容')
+    assert.equal(assistant.origin, 'live')
+  } finally {
+    await app?.dispose()
+    t.cleanup()
+  }
+})
+
 test('MW2: 记忆库不可用时不影响对话', { skip: !WIN, timeout: 120000 }, async () => {
   const t = makeTmp('prts-rt-memory-degraded-')
   let app: Awaited<ReturnType<typeof boot>> | undefined
