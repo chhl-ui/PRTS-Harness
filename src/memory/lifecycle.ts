@@ -52,17 +52,28 @@ export const RETIRE_IMPORTANCE_FLOOR = 0.05
  */
 export const RETIRE_MIN_AGE_DAYS = 90
 
-/** 衰减后的有效重要性。`importance` 非法（NULL / NaN）时按 0 处理，不当作「很重要」。 */
+/**
+ * 衰减后的有效重要性。
+ *
+ * `accessCount`（用进废退）：每被检索命中一次，半衰期延长 50%，最多计 10 次
+ * （即最长 6 倍）。这样「常用的事实衰减得慢」，而从未被召回的事实按基准速率淡忘。
+ * **缺省 0 时结果与没有这一维之前完全一致**——既有基线与被钉住的测试因此不受影响。
+ *
+ * `importance` 非法（NULL / NaN）时按 0 处理，不当作「很重要」。
+ */
 export function decayedImportance(
   importance: number,
   recordedAtMs: number,
   nowMs: number,
   halfLifeDays: number = IMPORTANCE_HALF_LIFE_DAYS,
+  accessCount = 0,
 ): number {
   if (!Number.isFinite(importance)) return 0
-  const halfLife = Number.isFinite(halfLifeDays) && halfLifeDays > 0
+  const base = Number.isFinite(halfLifeDays) && halfLifeDays > 0
     ? halfLifeDays
     : IMPORTANCE_HALF_LIFE_DAYS
+  const hits = Number.isFinite(accessCount) ? Math.min(Math.max(accessCount, 0), 10) : 0
+  const halfLife = base * (1 + hits * 0.5)
   const ageDays = Math.max(0, (nowMs - recordedAtMs) / DAY_MS)
   return importance * Math.pow(2, -ageDays / halfLife)
 }

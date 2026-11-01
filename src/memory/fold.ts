@@ -102,6 +102,21 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       ).run(p.fact_id)
       break
     }
+    case 'fact.reinforced': {
+      const p = JSON.parse(e.payload_json) as {
+        fact_id: string
+        access_count: number
+        last_access_ms: number
+      }
+      // 存**绝对量**而不是 `access_count = access_count + 1`：重放时同一批事件
+      // 必然得到同一结果，不会因为重建次数不同而漂移。
+      // 幂等性是「重放确定性」，不是「重复执行无副作用」——后者由 reinforceFacts
+      // 只在当前值基础上 +1 保证。
+      db.prepare(
+        'UPDATE mem_facts SET access_count = ?, last_access_ms = ? WHERE fact_id = ? AND deleted_at_ms IS NULL',
+      ).run(p.access_count, p.last_access_ms, p.fact_id)
+      break
+    }
     case 'turn.recorded': {
       const p = JSON.parse(e.payload_json) as {
         turn_id: string

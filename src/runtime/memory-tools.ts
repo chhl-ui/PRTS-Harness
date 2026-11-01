@@ -123,6 +123,19 @@ export function createMemoryTools(tools: ToolRegistry, deps: MemoryToolDeps): Me
         ? `记忆检索「${query}」没有命中。可能确实没记过，也可能换一组关键词再试。`
         : `记忆检索「${query}」命中 ${hits.length} 条（按相关度排序）：\n${
           hits.map((h, i) => `${i + 1}. [${h.kind}] ${toWire(h).occurredAt ?? '时间未知'} — ${h.text}`).join('\n')}`
+
+      // 用进废退：模型真的拿到了这些记忆才算「用过」。只强化 fact——
+      // turn 没有重要性列，强化它没有落点。
+      // 失败只打日志：记忆是辅助，不能因为回写失败让模型拿不到检索结果。
+      const factIds = [...new Set(hits.filter((h) => h.kind === 'fact').map((h) => h.id))]
+      if (factIds.length > 0) {
+        try {
+          deps.store.reinforceFacts({ actor: 'system', factIds })
+        } catch (error) {
+          console.error(`[prts] memory reinforce failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+
       return { message: body, hits: hits.map(toWire) }
     },
   })

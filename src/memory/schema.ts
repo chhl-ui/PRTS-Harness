@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS mem_facts (
   retention_class    TEXT NOT NULL DEFAULT 'clearable',
   source_turn_ids    TEXT,
   importance         REAL NOT NULL DEFAULT 0.5,
+  -- 强化（用进废退）：被检索命中一次 +1。衰减用 access_count 延长半衰期，
+  -- 但**不在检索路径直写**——search() 是纯只读，写回由显式的 reinforceFacts 触发，
+  -- 并且必须走 fact.reinforced 事件，否则 rebuildProjections 后会丢失。
+  access_count       INTEGER NOT NULL DEFAULT 0,
+  last_access_ms     INTEGER,
   retired_at_ms      INTEGER,
   deleted_at_ms      INTEGER,
   CHECK (provenance IN ('stated','inferred')),
@@ -237,6 +242,7 @@ export function openMemoryDb(path: string): DatabaseSync {
   db.exec('PRAGMA secure_delete = ON')
   db.exec(SCHEMA)
   ensureFactIdentityColumn(db)
+  ensureFactAccessColumns(db)
   ensureDerivedOriginColumns(db)
   ensureFtsIndexed(db)
   ensureSessionsBuilt(db)
@@ -269,6 +275,23 @@ function ensureFactIdentityColumn(db: DatabaseSync): void {
   // 宁可让它们互不去重，也不能把两条不同的老事实错判成同一条。
   db.exec("UPDATE mem_facts SET identity_key = lower(trim(subject)) || '|' || lower(trim(predicate)) || '|legacy:' || fact_id WHERE identity_key IS NULL")
   db.exec('CREATE INDEX IF NOT EXISTS idx_facts_identity ON mem_facts(identity_key, retired_at_ms, deleted_at_ms)')
+}
+
+/**
+ * `access_count` / `last_access_ms` 列的自愈迁移（用进废退）。
+ *
+ * 与 `ensureFactIdentityColumn` 同一个理由：旧库执行 SCHEMA 时表已存在，
+ * `CREATE TABLE IF NOT EXISTS` 不会补列，只能 ALTER。默认值让既有行等价于
+ * 「从未被召回」，迁移本身不改变任何检索结果。
+ *
+ * 不加索引：这两列只在单行 UPDATE 和排序打分里读，没有按它过滤的查询。
+ */
+function ensureFactAccessColumns(db: DatabaseSync): void {
+  const cols = (db.prepare('PRAGMA table_info(mem_facts)').all() as Array<{ name: string }>).map((c) => c.name)
+  if (!cols.includes('access_count')) {
+    db.exec('ALTER TABLE mem_facts ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0')
+  }
+  if (!cols.includes('last_access_ms')) db.exec('ALTER TABLE mem_facts ADD COLUMN last_access_ms INTEGER')
 }
 
 /**

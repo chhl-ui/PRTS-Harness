@@ -366,6 +366,46 @@ export class MemoryStore {
   }
 
   /**
+   * 用进废退：把「被检索命中」的事实强化一次。
+   *
+   * 为什么不在 `search()` 里自动做：检索是纯只读路径，写库会让「查一次就改一次库」，
+   * 违反读路径无副作用的约定，也让每次检索多一次写事务。改由调用方显式触发——
+   * 目前是 `prts_memory_recall` 工具：模型真的拿到了这些记忆才算「用过」。
+   *
+   * 计数以**绝对量**写进事件，`rebuildProjections()` 后能精确还原。
+   * 已删除的事实不参与（正文已清空，强化它没有意义）。
+   */
+  reinforceFacts(input: { actor?: ActorKind; factIds: string[]; nowMs?: number }): number {
+    if (input.factIds.length === 0) return 0
+    const now = input.nowMs ?? Date.now()
+    const actor = input.actor ?? 'system'
+    // 去重：同一个 fact 在一次检索里可能被多路召回，重复计数会把强化效果放大
+    const unique = [...new Set(input.factIds)]
+    const rows = this.db.prepare(
+      `SELECT fact_id, access_count FROM mem_facts
+        WHERE fact_id IN (${unique.map(() => '?').join(',')}) AND deleted_at_ms IS NULL`,
+    ).all(...unique) as Array<{ fact_id: string; access_count: number }>
+    if (rows.length === 0) return 0
+
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const r of rows) {
+        this.appendEvent({
+          kind: 'fact.reinforced',
+          actor,
+          recordedAtMs: now,
+          payload: { fact_id: r.fact_id, access_count: r.access_count + 1, last_access_ms: now },
+        })
+      }
+      this.db.exec('COMMIT')
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+    return rows.length
+  }
+
+  /**
    * 生命周期现状。`permanentLive` 单独报出来：它永不退役，混在 live 总数里
    * 会让「为什么退役作业没动那批」看不出原因。
    */

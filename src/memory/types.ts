@@ -189,6 +189,7 @@ export type MemoryEventKind =
   | 'fact.corrected'
   | 'fact.retired'
   | 'fact.restored'
+  | 'fact.reinforced'
   | 'turn.recorded'
   | 'summary.generated'
   | 'memory.deleted'
