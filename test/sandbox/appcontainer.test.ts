@@ -73,3 +73,44 @@ test('AppContainer: 授权后的工作区可读写，dispose 撤销授权', { ti
     rmSync(ws, { recursive: true, force: true })
   }
 })
+
+test('AppContainer: 子进程输出能读到（stdout/stderr 合并）', { timeout: 180000 }, async () => {
+  // 上一条用例靠退出码表达结果，是因为当时没有 stdio 捕获。这条直接验输出——
+  // shell 工具要返回给模型的是文本，不是退出码。
+  const ws = join(tmpdir(), `prts-ac-out-${process.pid}-${Date.now()}`)
+  mkdirSync(ws, { recursive: true })
+  const name = `PRTS.TestO.${process.pid}.${Date.now()}`
+  const box = await createAppContainer({ name, workspace: ws })
+  try {
+    const child = box.spawn({ command: CMD, args: ['/c', 'echo HELLO_FROM_BOX && echo BOX_ERR 1>&2'] })
+    const r = await child.wait()
+    assert.equal(r.exitCode, 0, `退出码应为 0，实际 ${r.exitCode}`)
+    assert.match(r.output, /HELLO_FROM_BOX/, `stdout 没被捕获：${JSON.stringify(r.output)}`)
+    assert.match(r.output, /BOX_ERR/, `stderr 没合并进输出：${JSON.stringify(r.output)}`)
+  } finally {
+    await box.dispose()
+    rmSync(ws, { recursive: true, force: true })
+  }
+})
+
+test('AppContainer: 大输出不触发管道死锁', { timeout: 180000 }, async () => {
+  // 分开读两个管道时，写满一个就会死锁。这条用超过管道缓冲（64KB）的输出钉住
+  // 「合并成单管道 + 先读后等」这个设计。
+  const ws = join(tmpdir(), `prts-ac-big-${process.pid}-${Date.now()}`)
+  mkdirSync(ws, { recursive: true })
+  const name = `PRTS.TestB.${process.pid}.${Date.now()}`
+  const box = await createAppContainer({ name, workspace: ws })
+  try {
+    // 生成 ~200KB：远超 64KB 管道缓冲
+    const child = box.spawn({
+      command: CMD,
+      args: ['/c', 'for /L %i in (1,1,5000) do @echo 0123456789012345678901234567890123456789'],
+    })
+    const r = await child.wait()
+    assert.equal(r.exitCode, 0, `大输出导致非零退出 ${r.exitCode}`)
+    assert.ok(r.output.length > 150_000, `输出被截断，实际 ${r.output.length} 字节——疑似管道死锁或读提前结束`)
+  } finally {
+    await box.dispose()
+    rmSync(ws, { recursive: true, force: true })
+  }
+})

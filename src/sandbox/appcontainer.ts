@@ -16,8 +16,10 @@
  *
  * ## 第一版的两条边界（明确写死，不当成缺陷来「修」）
  *
- * 1. **不捕获 stdio**。子进程的 stdout/stderr 直接继承调用方的终端，程序拿不到。
- *    要拿得用 CreatePipe + 异步读，是下一步的工作。`spawn` 只返回 pid 与退出码。
+ * 1. **stdout 与 stderr 合并捕获**。走同一个管道：分开读两个管道时，若子进程
+ *    写满其中一个（64KB）而父进程正在读另一个，写端阻塞、读端等 EOF，双死锁。
+ *    `wait()` 返回 `{ exitCode, output }`，`output` 是合并文本。要区分两者得
+ *    同时实现异步并发读，不是把管道拆成两个就行。
  * 2. **授权走 `icacls` 子进程**，不手写 `SetNamedSecurityInfo`。理由：icacls 是
  *    系统自带且行为稳定，而后者有「pSacl 要 ACL 指针而不是整个 SD」这类坑
  *    （本轮踩过），没必要重踩。
@@ -55,8 +57,14 @@ export interface SpawnOptions {
 
 export interface ChildHandle {
   readonly pid: number
-  /** 等子进程结束。永不 reject——非零退出是结果而不是异常。 */
-  wait(): Promise<{ exitCode: number }>
+  /**
+   * 等子进程结束。
+   *
+   * `output` 是 stdout 与 stderr 的**合并**文本。不分开读是有原因的：两个管道
+   * 各自只有 64KB 缓冲，若子进程写满其中一个而父进程正在读另一个，写端阻塞、
+   * 读端等 EOF，双死锁。合并成一个管道后只有单一读端，读到 EOF 即结束。
+   */
+  wait(): Promise<{ exitCode: number; output: string }>
 }
 
 export interface AppContainer {
@@ -109,13 +117,19 @@ const SECURITY_CAPABILITIES = koffi.struct('SECURITY_CAPABILITIES', {
   CapabilityCount: 'uint32_t',
   Reserved: 'uint32_t',
 })
+const SECURITY_ATTRIBUTES = koffi.struct('SECURITY_ATTRIBUTES', {
+  nLength: 'uint32_t',
+  lpSecurityDescriptor: 'void *',
+  bInheritHandle: 'int',
+})
 
 // 布局自检：cb 不对时 CreateProcess 返回 87（ERROR_INVALID_PARAMETER），
 // 而 87 很容易被误读成「权限不足」。这三个常量对不上就别往下走。
 const SIZE_SIEX = koffi.sizeof(STARTUPINFOEX)
 const SIZE_SI = koffi.sizeof(STARTUPINFO)
 const SIZE_CAPS = koffi.sizeof(SECURITY_CAPABILITIES)
-if (SIZE_SIEX !== 112 || SIZE_SI !== 104 || SIZE_CAPS !== 24) {
+const SIZE_SA = koffi.sizeof(SECURITY_ATTRIBUTES)
+if (SIZE_SIEX !== 112 || SIZE_SI !== 104 || SIZE_CAPS !== 24 || SIZE_SA !== 24) {
   throw new Error(
     `prts: AppContainer 结构体布局与原生不符 `
     + `(STARTUPINFOEX=${SIZE_SIEX}/112, STARTUPINFO=${SIZE_SI}/${104}, `
@@ -151,6 +165,15 @@ const WaitForSingleObject = kernel32.func('uint32_t WaitForSingleObject(void *h,
 const GetExitCodeProcess = kernel32.func('bool GetExitCodeProcess(void *h, _Out_ uint32_t *code)')
 const CloseHandle = kernel32.func('bool CloseHandle(void *h)')
 const LocalFree = kernel32.func('void *LocalFree(void *p)')
+const CreatePipe = kernel32.func(
+  'bool CreatePipe(_Out_ void **hRead, _Out_ void **hWrite, void *sa, uint32_t size)',
+)
+const SetHandleInformation = kernel32.func(
+  'bool SetHandleInformation(void *h, uint32_t mask, uint32_t flags)',
+)
+const ReadFile = kernel32.func(
+  'bool ReadFile(void *h, void *buf, uint32_t n, _Out_ uint32_t *got, void *ov)',
+)
 
 const EXTENDED_STARTUPINFO_PRESENT = 0x0008_0000
 const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = 0x0002_0009
@@ -191,6 +214,26 @@ function icacls(args: readonly string[]): Promise<{ code: number; out: string }>
     child.stderr?.on('data', (d: Buffer) => { out += d.toString('utf8') })
     child.on('close', (code: number | null) => resolve({ code: code ?? -1, out }))
   })
+}
+
+/**
+ * 同步读空一个管道句柄直到 EOF，然后关掉它。
+ *
+ * 注意这是阻塞读：调用方必须在「父进程写端已关闭」之后调它，否则永远读不到 EOF。
+ * 同理不能在调用它的同一个线程里等子进程先退出——输出填满管道时子进程会卡在写。
+ */
+function drainPipe(handle: unknown): string {
+  const chunks: Buffer[] = []
+  const buf = Buffer.alloc(65536)
+  for (;;) {
+    const got: unknown[] = [0]
+    const okRead = ReadFile(handle, buf, 65536, got, null)
+    const n = Number(got[0] as number)
+    if (!okRead || n === 0) break
+    chunks.push(Buffer.from(buf.subarray(0, n)))
+  }
+  CloseHandle(handle)
+  return Buffer.concat(chunks).toString('utf8')
 }
 
 // ---------------------------------------------------------------- 实现
@@ -252,9 +295,33 @@ export async function createAppContainer(opts: AppContainerOptions): Promise<App
         throw new Error('prts: UpdateProcThreadAttribute(SECURITY_CAPABILITIES) 失败')
       }
 
+      // 单管道合并 stdout/stderr。分开读两个管道会在其中一个写满（64KB）而
+      // 父进程正在读另一个时双死锁：写端阻塞、读端等 EOF。
+      const saBuf = koffi.alloc(SECURITY_ATTRIBUTES, 1)
+      koffi.encode(saBuf, SECURITY_ATTRIBUTES, {
+        nLength: SIZE_SA,
+        lpSecurityDescriptor: null,
+        bInheritHandle: 1,
+      })
+      const pipeRead: unknown[] = [null]
+      const pipeWriteOut: unknown[] = [null]
+      if (!CreatePipe(pipeRead, pipeWriteOut, saBuf, 0)) {
+        throw new Error('prts: CreatePipe 失败')
+      }
+      // 读端不继承：子进程若也持着读端，EOF 永远不来。
+      SetHandleInformation(pipeRead[0], 1, 0)
+      const pipeReadHandle = pipeRead[0]
+      const pipeWrite = pipeWriteOut[0]
+
       const siExBuf = koffi.alloc(STARTUPINFOEX, 1)
       koffi.encode(siExBuf, STARTUPINFOEX, {
-        StartupInfo: { cb: SIZE_SIEX },
+        StartupInfo: {
+          cb: SIZE_SIEX,
+          dwFlags: 0x0000_0100, // STARTF_USESTDHANDLES
+          hStdInput: null,
+          hStdOutput: pipeWrite,
+          hStdError: pipeWrite,
+        },
         lpAttributeList: list,
       })
       const piBuf = koffi.alloc(PROCESS_INFORMATION, 1)
@@ -270,12 +337,14 @@ export async function createAppContainer(opts: AppContainerOptions): Promise<App
 
       const ok = CreateProcessW(
         o.command, cmdline, null, null,
-        // 第一版不捕获 stdio：不继承、也不设 STARTF_USESTDHANDLES，
-        // 子进程拿不到调用方的句柄。要捕获得用 CreatePipe。
-        false,
+        // 必须继承：否则子进程拿不到管道写端，输出全丢。
+        true,
         EXTENDED_STARTUPINFO_PRESENT, null, o.cwd ?? null, siExBuf, piBuf,
       )
+      // 无论成功失败，父进程都要关掉写端——否则读端等不到 EOF。
+      CloseHandle(pipeWrite)
       if (!ok) {
+        CloseHandle(pipeReadHandle)
         throw new Error(`prts: CreateProcessW(AppContainer) 失败：${o.command}`)
       }
 
@@ -288,13 +357,16 @@ export async function createAppContainer(opts: AppContainerOptions): Promise<App
 
       return {
         pid: pi.dwProcessId,
-        wait(): Promise<{ exitCode: number }> {
+        wait(): Promise<{ exitCode: number; output: string }> {
           return new Promise((resolve) => {
+            // 先读再等：读会一直阻塞到所有写端关闭（父进程的写端已在上面关掉），
+            // 子进程退出即 EOF。反过来「先等再读」会在输出填满管道时死锁。
+            const output = drainPipe(pipeReadHandle)
             WaitForSingleObject(pi.hProcess, 0xFFFF_FFFF)
             const code: unknown[] = [0]
             GetExitCodeProcess(pi.hProcess, code)
             CloseHandle(pi.hProcess)
-            resolve({ exitCode: Number(code[0] as number) })
+            resolve({ exitCode: Number(code[0] as number), output })
           })
         },
       }

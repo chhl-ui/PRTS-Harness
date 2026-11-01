@@ -47,9 +47,10 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   - 模块加载时自检 `STARTUPINFOEX=112 / STARTUPINFO=104 / SECURITY_CAPABILITIES=24`，对不上直接抛。`cb` 错了会得到 `87 (ERROR_INVALID_PARAMETER)`，**87 是参数错误不是权限错误**——权限类是 `5` / `740`。
   - 任何 Win32 失败都抛，不降级成不受限运行。
 - **第一版边界（写死的，不要当成 bug 去"修"）**：
-  - **不捕获 stdio**：子进程输出继承调用方终端，程序拿不到。要拿得用 `CreatePipe` + 异步读。
+  - **stdio 合并捕获**：stdout 与 stderr 走**同一个**管道。分开读两个管道时，若子进程写满其中一个（64KB）而父进程正在读另一个，写端阻塞、读端等 EOF——双死锁。合并后单一读端，读到 EOF 即结束。`wait()` 返回 `{ exitCode, output }`，`output` 是两者合并的文本。**不要为了「区分 stderr」改成两个管道**，除非同时实现异步并发读。
+  - **读必须先于等**：`wait()` 里先 `drainPipe` 再 `WaitForSingleObject`。反过来「先等子进程退出再读」会在输出超过管道缓冲时死锁。父进程的写端必须在 `CreateProcessW` 之后立刻关闭，否则读端永远等不到 EOF。
   - 授权走 `icacls` 子进程而非手写 `SetNamedSecurityInfo`（后者有「pSacl 要 ACL 指针而不是整个 SD」的坑）。
-  - **尚未接线到运行时**：`createAppContainer` 目前是独立可用的库，PRTS 的 shell 工具还没有走它。接线需要决定「哪些命令进容器、stdio 怎么回传」，是下一步。
+  - **尚未接线到运行时**：`createAppContainer` 目前是独立可用的库，PRTS 的 shell 工具还没有走它。接线需要决定「哪些命令进容器、输出如何回传」，是下一步。
 
 ### 所有者通道（P2）：管道、双通道输出、断开语义、E10
 
