@@ -35,7 +35,7 @@
 | **1 人格设定是数据不是写死提示词** | **部分** | 两个源码级实现。Tianshu-harness：**类型化数据表定义 16 个域人格**，字段含 `id/name/motto/volatileBlock/decisionStyle/courageThreshold/keywords/toolWhitelist/systemPromptSuffix/uiPersona` 等 **[实测]** `src/agent/star-domain-data.ts:24-59`（接口）、`:61`（`STAR_DOMAINS` 数据表）。hermes：YAML 配置，内置 13 个人格 + 用户按名覆盖，支持 `dict{system_prompt,tone,style}`，且**只有一条受控写路径** `persist_personality`（原子 round-trip、`0600`）**[探查]** `hermes_cli/personality.py:19,58,100,127`。**两者都没有版本化、没有「修改需博士确认」**（无内容版本号、无 diff/审批/回滚）|
 | **2 多个人格共存、共享任务/工具/权限、各有独立设定与关系记忆** | **部分** | Tianshu 是本地最接近的：16 域共存可切换（`/domain` 显式 + 关键词路由 + 委派），**各域 `toolWhitelist` 逐字相同**—— **实测**：16 个数组去重后只剩 1 种（692 字符），域间差异只在 `volatileBlock`/`systemPromptSuffix`/`courageThreshold`/`decisionStyle`。这直接对应 V1-04「切换前后任务与权限不变」。**缺口：无 per 域独立的情感状态与关系记忆**（`StarDomain` 接口无任何状态字段）**[实测]**。hindsight 的 memory bank 提供另一形态的隔离先例（每 bank 独立记忆/实体/关系 + 可选 disposition，「completely isolated... no data leakage」）**[探查]** |
 | **3 情感状态是持久化状态量、由事件更新、随时间回落、不影响事实** | **无** | 本地 11 个条目**零实现**。hermes 的 `derive_pet_state` 是纯函数（优先级 error→FAILED / celebrate→JUMP / … / IDLE），入参只有本次 turn 的布尔信号，**无持久字段**；`cli_init_mixin.py` 的 `_pet_event` 是会话内 mutable state **[探查]**。mempalace 只在写入时抽情绪标签；Open-LLM-VTuber 是情绪 tag→Live2D 表情的单轮映射 **[探查]**。hindsight 的 `disposition`（skepticism/literalism/empathy 各 1–5 分）是**静态特质**，不成曲线、不回落 **[探查]** |
-| **4 状态维度与更新规则** | **理论有、实现无** | 业界三层可参考：OCC 评估式情绪生成（事件→情绪，含 per-emotion 强度衰减）、Mehrabian PAD 三维连续表示、Sentipolis（连续 PAD + 双速情绪动力学 + 情绪-记忆耦合，ACL Findings 2026）**[摘要级]** `aclanthology.org/2026.findings-acl.368`、`arxiv.org/abs/2601.18027`、Springer OCC 章节。**全部只到搜索摘要，未读正文** |
+| **4 状态维度与更新规则** | **理论有、实现无；参数可直接照** | Sentipolis 已拿到正文（**[正文]** arXiv 2601.18027v2, 2026-04-21）：PAD 三维各维取值 `[−1, 1]`；**半衰期 120 分钟**的指数衰减 `s(t+Δt) = s(t)·2^(−Δt/T½)`；双速更新（快＝会话轮次级，慢＝ reflection 期整合检索历史，依据 EMA 的 appraisal/inference 之分）；**不把裸数值交给 LLM**，而是 KNN 到真实人类 PAD 数据点映射成 Plutchik 情绪标签再注入 prompt。另：OCC 评估式情绪生成（per-emotion 强度衰减）仍未取到正文 |
 | **5 事实规则高于角色表演** | **部分** | hindsight 的 reflect 是好的工程形态：`directives`（硬规则）压制 `disposition`，答案必须基于实际检索到的记忆**且逐条校验引用 ID**（只允许引用真正检索到的），guardrail 禁止空答复 **[探查]** `skills/hindsight-docs/references/developer/reflect.md:40,193`。Tianshu 把证据纪律写进人格文本（「把未读实现的推断当事实写进方案，会把错误传染给下游」）——**但那是提示词自觉，不是代码强制** **[实测]** `star-domain-data.ts` 的天枢 `systemPromptSuffix` |
 | **6 人格隔离的工程质量：不持有权限、卸载不影响他人格、版本化与回滚** | **部分** | 隔离有先例：hindsight bank 无数据泄漏 **[探查]**；DSH 把 persona 做成 preset 级可插拔插件、可 disable **[探查]** `dsh-superagent-prototype/cordis.patch.yml:28,123`；hermes 单写路径 + `0600` **[探查]**。**「人格设定的版本化和回滚」在 11 个条目中零实现** |
 
@@ -45,7 +45,7 @@
 |---|---|---|
 | 上下文装配 | **借鉴设计** | 单点机制成熟（工具结果卸载有两个独立实现），但没有任何一个项目把九条做全；DSH 是 TypeScript 但在 DSH 生态内、依赖 Cordis 的 waterfall，不能直接嵌 |
 | 人格设定与切换 | **借鉴 + 一处可评估「适配」** | Tianshu-harness 是**同语言 TypeScript**、字段模型与 §5.1 逐条对得上（结构化数据表 + 全域共享白名单 + 差异只在提示词块），是这轮唯一值得正式评估「适配」的候选。但要先确认它与 PRTS 的插件/配置体系能否共存 |
-| 情感状态量 | **自建** | 零实现。理论骨架（OCC / PAD / 双速动力学）可照，**但现有证据只到摘要级，不能据此动工** |
+| 情感状态量 | **自建，但参数已可照** | 零实现。Sentipolis 正文已到手，维度（PAD）、范围（[-1,1]）、回落速率（半衰期 120 分钟）、更新节奏（双速）都有明确取值；需自建的是与 PRTS 账本、人格版本化的接合 |
 
 ## 四、三条最值得拿的机制
 
@@ -62,9 +62,10 @@
 
 ## 附：证据限制（必须记下）
 
-本轮**所有 web 证据都只到搜索摘要级**。`aclanthology.org`、`arxiv.deeppaper.ai`、`airi.moeru.ai` 三个域名的 `web_fetch` 全部被本机代理的 fake-IP 拦截（解析到 `198.18.0.x`），两次搜索查询也降级。因此：
+这些结论取证时有两条路径：`web_fetch` 被本机代理的 fake-IP 拦截（`aclanthology.org` / `arxiv.deeppaper.ai` / `airi.moeru.ai` 解析到 `198.18.0.x`），但 **`curl` 直连不受影响**。Sentipolis 因此拿到了正文；其余仍未取到。因此：
 
-- Sentipolis 的具体 PAD 公式与双速动力学参数、OCC 的 per-emotion 衰减系数、SillyTavern CCv3 的 `version` 字段语义，**都没有读到原文**。
-- 「情感状态维度与更新规则」这一条（§5.1 的待验证假设）**不能据此定稿**。要动工前必须先拿到论文正文（换镜像或 PDF 直连）。这是下一轮的前置条件，不是可选项。
+- **已解决**：Sentipolis 正文已下载（`arxiv.org/html/2601.18027` 全文 + PDF），PAD 维度范围、半衰期 120 分钟、双速更新、语义富集管线均已核实，证据等级从 [摘要级] 升为 **[正文]**。
+- **仍未解决**：OCC 的 per-emotion 衰减系数（Springer 章节未取）、SillyTavern CCv3 的 `version` 字段语义（只到摘要）、AIRI（站点被 fake-IP 拦截）。这三项不影响情感状态量动工；写人格设定的版本化时要另行取证。
+- 方法结论：`web_fetch` 工具被代理 fake-IP 拦截时，`curl` 直连是最短的解法——下次遇到“摘要级”阻塞先试它，不要直接判定为不可取。
 
 本地四项关键断言已回代码核实：Tianshu `StarDomain` 接口字段与 16 域 **[实测]**、16 个 `toolWhitelist` 去重后 1 种（692 字符）**[实测]**、mempalace `Layer0`/`Layer1`/`MemoryStack`/`MAX_DRAWERS=15`/`MAX_CHARS=3200` **[实测]**、DSH `spill.md` 与 hermes `personality.py` 路径存在 **[实测]**。探查给的一条路径需修正：DSH spill 文档在 `agent-code/20261029/repos/deepseek-harness/docs/subsystems/spill.md`，不是 `agent-code/20261029/docs/...`。
