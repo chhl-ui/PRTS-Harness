@@ -2,6 +2,8 @@
 export { MemoryStore, escapeLike } from './store.ts'
 export { SCHEMA, openMemoryDb } from './schema.ts'
 export { applyMemoryEvent } from './fold.ts'
+export { parseTime } from './time.ts'
+export { tokenize } from './tokenize.ts'
 export type {
   ActorKind,
   AssertFactInput,

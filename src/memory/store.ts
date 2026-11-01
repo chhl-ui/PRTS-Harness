@@ -14,6 +14,7 @@ import { appendChained, sha256hex, verifyChainRows, type ChainVerifyResult } fro
 import { applyMemoryEvent } from './fold.ts'
 import { openMemoryDb } from './schema.ts'
 import { parseTime } from './time.ts'
+import { tokenize } from './tokenize.ts'
 import type {
   ActorKind, AssertFactInput, ImportStats, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput,
 } from './types.ts'
@@ -24,6 +25,13 @@ const DEFAULT_LIMIT = 20
 /** `LIKE` 通配符转义。不转义时一条含 `%` 的提问会命中全表（设计稿 §6.5）。 */
 export function escapeLike(s: string): string {
   return s.replace(/[\\%_]/g, (c) => `\\${c}`)
+}
+
+/** 命中几个查询词——`LIKE` 不产生相关度分，这是它的代替品。 */
+function countHits(body: string | null, tokens: string[]): number {
+  if (!body) return 0
+  const lower = body.toLowerCase()
+  return tokens.filter((t) => lower.includes(t)).length
 }
 
 /** 时近衰减：半衰期 30 天。与 importance 一起构成第一版的全部排序信号。 */
@@ -250,7 +258,14 @@ export class MemoryStore {
     if (origins.length === 0) return []
     const scope = q.scope ?? SCOPE
     const limit = q.limit ?? DEFAULT_LIMIT
-    const pattern = `%${escapeLike(q.text)}%`
+    const tokens = tokenize(q.text)
+    if (tokens.length === 0) return []
+    const pats = tokens.map((t) => `%${escapeLike(t)}%`)
+    // 任一词命中即召回；命中数与 score 相乘充当相关度代理。
+    const factConds = tokens
+      .map(() => "(b.body LIKE ? ESCAPE '\\' OR f.subject LIKE ? ESCAPE '\\' OR f.predicate LIKE ? ESCAPE '\\')")
+      .join(' OR ')
+    const turnConds = tokens.map(() => "b.body LIKE ? ESCAPE '\\'").join(' OR ')
     const originSlots = origins.map(() => '?').join(',')
 
     const rows = this.db.prepare(
@@ -261,11 +276,9 @@ export class MemoryStore {
           AND f.deleted_at_ms IS NULL
           AND f.retired_at_ms IS NULL
           AND f.origin IN (${originSlots})
-          AND (b.body LIKE ? ESCAPE '\\'
-               OR f.subject LIKE ? ESCAPE '\\'
-               OR f.predicate LIKE ? ESCAPE '\\')
+          AND (${factConds})
         LIMIT ?`,
-    ).all(scope, ...origins, pattern, pattern, pattern, limit * 4) as Array<{
+    ).all(scope, ...origins, ...pats.flatMap((p) => [p, p, p]), limit * 4) as Array<{
       fact_id: string
       provenance: 'stated' | 'inferred'
       origin: Origin
@@ -278,7 +291,7 @@ export class MemoryStore {
     const factHits: MemoryHit[] = rows.map((r) => ({
       kind: 'fact' as const,
       id: r.fact_id,
-      score: recency(r.recorded_at_ms, nowMs) * (0.5 + r.importance),
+      score: recency(r.recorded_at_ms, nowMs) * (0.5 + r.importance) * (1 + countHits(r.body, tokens)),
       provenance: r.provenance,
       origin: r.origin,
       text: r.body ?? '',
@@ -295,9 +308,9 @@ export class MemoryStore {
         WHERE t.scope = ?
           AND t.deleted_at_ms IS NULL
           AND t.origin IN (${originSlots})
-          AND b.body LIKE ? ESCAPE '\\'
+          AND (${turnConds})
         LIMIT ?`,
-    ).all(scope, ...origins, pattern, limit * 4) as unknown as Array<{
+    ).all(scope, ...origins, ...pats, limit * 4) as unknown as Array<{
       turn_id: string
       session_id: string
       turn_index: number
@@ -310,7 +323,7 @@ export class MemoryStore {
     const turnHits: MemoryHit[] = turnRows.map((r) => ({
       kind: 'turn' as const,
       id: r.turn_id,
-      score: r.occurred_at_ms === null ? 0.5 : recency(r.occurred_at_ms, nowMs),
+      score: (r.occurred_at_ms === null ? 0.5 : recency(r.occurred_at_ms, nowMs)) * (1 + countHits(r.body, tokens)),
       origin: r.origin,
       sessionId: r.session_id,
       turnIndex: r.turn_index,
