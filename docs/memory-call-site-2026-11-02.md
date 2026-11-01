@@ -143,11 +143,44 @@ reject 原样透传；query 少于 4 字符不检索；同一 step 只注入一�
 - `test/runtime/memory-inject.test.ts` 的 I1/I6 已改回整句中文作为查询——自动注入链路
   在真实问句形状下可用。
 
+### 4. 模型层事实抽取：`mem_facts` 首次有生产来源
+
+在此之前 `assertFact` 零生产调用方，`mem_facts` 长期为 0——生命周期、用进废退、
+检索的 fact 通道全部空转。本轮接上：
+
+- `src/memory/consolidate-facts.ts`：prompt 构造 + 解析（部分条目非法时丢弃单条，
+  不整体失败）。
+- `MemoryStore.consolidateFacts({ generator, limit, batchSize })`：按批抽 live turn，
+  写入 `mem_facts`（`provenance=inferred` / `confirmation_basis=model-inferred`，
+  库的 CHECK 白名单不允许别的组合），`source_index` 翻译成真实 `turn_id` 存进
+  `source_turn_ids`。
+- 独立水位线 `mem_consolidation.fact_cursor_turn_rowid`：与规则巩固的水位线分开，
+  否则「跑过规则巩固」会变成「事实抽取也跳过」。
+- **幂等靠去重不靠水位线**：同一句重复抽取命中同一 identity_key，不产生第二条；
+  水位线只省成本，中途失败重跑安全。
+- CLI：`prts memory extract-facts --apply [--limit N] [--batch N] [--model M]`，
+  默认只报规模不调模型。
+
+**真实组件端到端**（本地 Ollama q38，零 API，`.rivet/scratch/probe-fact-extract-local.mjs`）：
+
+```
+result = {"turns":3,"extracted":7,"added":7,"skipped":0,"cursor":3,"stop":"done"} (8.5s)
+[闪光灯] 1 条 fact  - Godox V1 闪光灯 (inferred)
+[项目]   1 条 fact  - PRTS agent 运行时项目 (inferred)
+```
+
+这是首个「模型抽取 → 事件落链 → 可检索」的真实闭环。真机库上跑同一条命令返回
+`{"turns":0,...}`——`memory-s.sqlite` 的 24.6 万条 turn 全是 benchmark，没有 live 对话，
+所以既不炸也没有浪费推理。
+
 ### 仍未验证
 
-**真机对话未跑。** `prts memory` 子命令已真机验过（`memory-s.sqlite`，1.3 秒，迁移成功）；
-但「自动注入 + 中文检索」的端到端要在真实 `prts chat` 里跑一轮才能确认，需消耗 PRTS key，
-按约束未执行。替代证据是 `test/runtime/memory-inject.test.ts` 的 6 个用例。
+**真机对话未跑。** `prts memory` 子命令已真机验过；「自动注入 + 中文检索 + 抽取出的事实」
+要在真实 `prts chat` 里跑一轮才能确认，需消耗 PRTS key，按约束未执行。
 
-**强化效果的评测证据仍然没有。** 召回延长半衰期的方向有理论依据，但 30 题偏好集上的
-增益未被测量（且那 30 条题本身处在噪声带内）。
+**3 字中文查询仍命中不了。** 2-gram 展开只对 ≥4 字的串生效：「住哪里」是 3 字，
+仍作为一个 token 走 FTS，命中不了谓词为「住在」的事实（探针里 `[住哪里] 0 条` 即此）。
+修法要么把阈值降到 3（仍有「住哪/哪里」对不上「住在」的问题），要么上分词/语义检索。
+
+**强化与退役的效果没有评测证据。** 召回延长半衰期、淡忘后退役，方向有依据，
+但 30 题偏好集处在噪声带内，增益未被测量。
