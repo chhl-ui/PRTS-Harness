@@ -584,6 +584,67 @@ M8/M9 的缺失比 M15 更值得优先补：它们验证的是一个选型的正
 - 合规判据是**分母变化必须可观测**：输出同时给 `n=<valid> valid` 与 `<invalid> invalid`，invalid 率作为独立指标盯住。只报 Accuracy 而不报 invalid 数，才构成违宪章。
 - 实测：2026-11-01 的 24 题分层样本重判后为 `n=24 valid, 0 invalid`，准确率 0.2083 未变——本次修正没有改变任何结论。
 
+**基线的两条线必须分开报（v2.6 更正，2026-11-01）**
+
+此前本文只报一个数字 0.3760，并把「检索层 R@8 43.4%」当作检索能力。**这是设置错配**：`longmemeval_oracle.json` 的官方定义是「history 里**只含证据会话**」（README 原文 "Only the evidence sessions are included in the history"），它是 **reading 测试集**，不是 retrieval 测试集。在它上面做 top-8 检索，等于先被官方筛一遍、自己再筛一遍——数字既不是检索能力，也不是阅读能力。
+
+| 数据集 | 每题 turn（中位） | 总 turn | 用途 |
+|---|---|---|---|
+| `longmemeval_oracle.json` | **24** | 10,960 | 测 reading（证据已筛好） |
+| `longmemeval_s_cleaned.json` | **491** | **246,750** | 测 retrieval + reading |
+
+两档已核实为官方 HuggingFace `xiaowu0162/longmemeval-cleaned` 的当前版本：oracle **15,388,478 字节**（与本地一致），s_cleaned **277,383,467 字节**（已下载）。`longmemeval_m_cleaned.json` 2,737,100,077 字节未拉。
+
+### 线一：reading（oracle，整段 haystack 全给 reader）
+
+| 项 | 值 |
+|---|---|
+| 准确率 | **0.5640** |
+| judged_by | `deepseek-reasoner`（被测 `deepseek-chat`） |
+| 样本 | n=500 valid / 0 invalid |
+| 输入形态 | 整题 haystack 全放 prompt（截断上限 80 turn，实际 0 题触发），每条前缀会话时间 + 给出 `question_date` |
+
+| 题型 | 准确率 | n |
+|---|---|---|
+| single-session-assistant | **1.0000** | 56 |
+| single-session-user | 0.8714 | 70 |
+| knowledge-update | 0.6923 | 78 |
+| temporal-reasoning | 0.4586 | 133 |
+| multi-session | 0.3534 | 133 |
+| single-session-preference | 0.1000 | 30 |
+
+对照同一份数据上「top-8 检索」的 0.3760：**全给比检索高 18.8pp**。分型差异最大的是 temporal-reasoning（0.1880 → 0.4586）与 single-session-user（0.6286 → 0.8714）。**single-session-assistant 满分 1.0000** 说明「单证据 + 短会话」这条链路已经完全通。
+
+**single-session-preference 全给反而更差（0.1333 → 0.1000）**，且在 s_cleaned 上检索 any@K 恒为 0——这类题的 gold 是「用户偏好描述」，问题却是「你能推荐些资源吗」，字面上不可能重叠。它需要的是**把偏好抽取成 `mem_facts` 再检索事实**，不是改进 turn 检索。
+
+### 线二：retrieval（s_cleaned，每题 491 turn / 48 sessions）
+
+| 题型 | n | any@8 | all@8 | any@32 | all@32 | MRR |
+|---|---|---|---|---|---|---|
+| knowledge-update | 72 | 48.6% | 25.0% | 61.1% | 36.1% | 0.3021 |
+| single-session-assistant | 56 | 48.2% | 48.2% | 71.4% | 71.4% | 0.3083 |
+| single-session-user | 64 | 23.4% | 23.4% | 40.6% | 39.1% | 0.1356 |
+| multi-session | 125 | 8.0% | **0.0%** | 14.4% | 4.0% | 0.0281 |
+| temporal-reasoning | 132 | 5.3% | 2.3% | 18.9% | 5.3% | 0.0237 |
+| single-session-preference | 30 | **0.0%** | 0.0% | **0.0%** | 0.0% | 0.0000 |
+| **加权** | 479 | **≈19.6%** | **≈13.2%** | ≈32% | ≈21% | — |
+
+**这是第一个真正的检索基线**。此前所有「R@8 43.4%」的讨论都高估了 2.2 倍——那个数字是在已筛过的 24 turn 上测的。
+
+三条结论直接改变优先级：
+
+1. **占用 266 题（53%）的 temporal / multi-session 检索几乎全失**（any@8 5.3% / 8.0%，multi-session 的 all@8 是 **0.0%**）。这两类不是「排序差一点」，是根本捞不出来。
+2. **扩 K 的收益有上限但不小**：any@8→any@32 提升 2–3 倍，仍只有 14–19%。所以扩 K 值得做，但它不是解法。
+3. **single-session-preference 在任何 K 下都是 0.0%**——检索对它无效，只能靠 fact 抽取。
+
+### LIKE 全表扫描的规模上限（填 §十一 #5 的空白）
+
+246,750 turn 的库上，`MemoryStore.search()` 平均 **3,125 ms/题**（分型 2,085–5,400 ms）。V1-16 要求「工作区装配（含检索）P95 不超过 1 秒」——**当前实现超预算 3 倍以上**。导入 246,750 turn 耗时 553 秒。
+
+这不是「数据量上去后」的将来问题，是现在就已经发生的。换检索后端从「优化」变成「V1-16 的硬前置」。
+
+**旧记录（保留作对照，勿再引用为基线）**
+
 **首次全量基线（2026-11-01，V1-17 达成）**
 
 | 项 | 值 |
@@ -755,7 +816,7 @@ Accuracy 0.75（4 题 3 对），与构造时的预期一致。
 | 2 | ~~删除路线选 D 还是 D'~~ **已定（2026-11-01）：走 D** | `mem_bodies` 表外置正文，删除置 NULL。理由：V1-06 的 10 条规模用 D 足够；D' 会把事务边界从单库扩到「库 + 文件系统」，代价超过收益。**D 的边界已写在 §7.2**：自由页残留需 VACUUM，不等于物理不可恢复。要真正不可恢复时升级 D' |
 | 3 | ~~判分用 OpenAI 还是 DeepSeek 改写~~ **已定（2026-11-01）：DeepSeek** | 脚本 `scripts\eval-longmemeval.py` 已落盘并实测（4 题对照全判对）。判分用 `deepseek-reasoner` 与被测 `deepseek-chat` 区分；`judged_by` 写进每条记录。已知偏差见 §9.3 |
 | 4 | ~~基准版本锁定与数据入库位置~~ **已定（2026-11-01）** | 数据落 `C:\prts-benchmark\<dataset>\`（独立根，不入 protectedRoots / workspaceRoots）。`longmemeval_oracle.json` 已下载并锁定 **15,388,478 字节 / 500 题**；基线数字必须与字节数一起记录 |
-| 5 | `LIKE` 全表扫描的规模上限 | 未定；数据量上去后需换后端并重测基线 |
+| 5 | `LIKE` 全表扫描的规模上限 | **已实测（2026-11-01）**：246,750 turn 上平均 **3,125 ms/题**（2,085–5,400），超 V1-16「装配含检索 P95 ≤ 1s」3 倍以上；导入 246,750 turn 耗时 553s。结论：**不是将来问题，是当前就超预算**，换后端是 V1-16 的硬前置。基线见 §9.3 线二 |
 | 6 | `retired` / `deleted` 的保留期与清理策略 | 未定；参考 spill 的单会话上界思路 |
 | 7 | 关系记忆 / 技能经验 / 意图库 / 关联图 | 各自立项 |
 | 8 | Letta / Generative Agents / Graphiti 三个补拉 | `memory-landscape.md` §五 已排，本文不阻塞 |
