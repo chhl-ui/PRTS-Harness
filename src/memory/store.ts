@@ -38,10 +38,16 @@ const DEFAULT_LIMIT = 20
 /**
  * 时近衰减的权重上限（v2.7）。此前的 `score = recency × ...` 让 recency 成为乘性
  * 因子，实测把 bm25 名次靠前的证据压了下去：纯 FTS 探针 any@8 = 45.1%，
- * 实现只有 36.9%。改成 `1 + 0.1×recency` 后，时间只提供 ±10% 的微调，
- * 不再覆盖 RRF 的名次差异（相邻名次差 ~50%）。
+ * 实现只有 36.9%。改成 `1 + w×recency` 后，时间只提供微调，不覆盖 RRF 名次差异。
+ *
+ * `PRTS_RECENCY_WEIGHT` 可覆盖 w（默认 0.1）：它是「时间该有多大话语权」这一问题的
+ * 实验旋钮。实测动机是 knowledge-update 的失败样本——top-5 全是比 gold 更新但无关
+ * 的内容，说明时间信号在该题型上是负资产。改默认值之前必须用评测对照，不靠直觉。
  */
-const RECENCY_WEIGHT = 0.1
+const RECENCY_WEIGHT = (() => {
+  const raw = Number(process.env.PRTS_RECENCY_WEIGHT ?? '0.1')
+  return Number.isFinite(raw) && raw >= 0 ? raw : 0.1
+})()
 
 /**
  * 向量路的扫描上限（v2.17）。全量余弦在百千级是毫秒级，但无上限会把 24.6 万条
