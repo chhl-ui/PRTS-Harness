@@ -12,7 +12,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startRuntime } from '../../src/runtime/start.ts'
@@ -21,12 +21,14 @@ import { createTerminalServer } from '../../src/runtime/terminal-server.ts'
 import { ownerTermPipeName, pipeConnect, lineParser, encode } from '../../src/runtime/owner-protocol.ts'
 import type { OwnerPush } from '../../src/runtime/owner-protocol.ts'
 import { scriptedLlmPlugin } from '../support/scripted-llm.ts'
+import { prtsYml, PATCHES } from '../support/composition.ts'
 import type { ScriptedStep } from '../support/scripted-llm.ts'
 import { makeTmp } from '../support/tmp.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Socket } from 'node:net'
 
-const prtsYml = fileURLToPath(new URL('../../config/prts.yml', import.meta.url))
+// prtsYml / PATCHES 来自 test/support/composition.ts，与 e3-approval.test.ts 共用——
+// 「审批在管道入口下依然可达」依赖两边组装参数逐项相同，这只能靠共用常量保证。
 
 interface Rig {
   pipeName: string
@@ -47,7 +49,7 @@ async function rig(dataRoot: string, ws: string, script: ScriptedStep[]): Promis
     dataRoot,
     workspace: ws,
     mode: 'normal',
-    patches: [{ id: 'llm-deepseek', disabled: true }],
+    patches: PATCHES,
   })
   scriptedLlmPlugin(script).apply(app.ctx as Context)
 
@@ -243,6 +245,42 @@ test('② 审批态：无 pending 的应答被拒；错 callId 被拒；正确 c
     await c.waitFor((p) => p.type === 'error' && p.code === 'bad-request')
     c.send({ type: 'approval.answer', callId: 'call-2', allow: false })
     assert.equal(await pending2, false)
+  } finally {
+    c.end()
+    await r.close()
+    t.cleanup()
+  }
+})
+
+test('② 真实链路：模型调工作区外 write → pre-execute ask → 管道审批 → 工具执行', { timeout: 180000 }, async () => {
+  // 与上面那条注入式用例的分工：那条验状态机边界（无 pending / 错 callId / 审批期 prompt），
+  // 这条验端到端——审批请求是模型的动作真的触发的，不是测试塞进去的。
+  // 没有这条，「管道里的审批」只能证明我们能自己把消息喂给自己。
+  const t = makeTmp('pipe-e2e-approval-')
+  const dataRoot = join(t.dir, 'data')
+  const ws = join(t.dir, 'ws')
+  const outside = join(t.dir, 'outside')
+  mkdirSync(outside, { recursive: true })
+  const target = join(outside, 'approved.txt')
+
+  const r = await rig(dataRoot, ws, [
+    { toolCalls: [{ name: 'write', arguments: { file_path: target, content: 'p2-payload' } }] },
+    { text: 'done' },
+  ])
+  const c = await connect(r.pipeName)
+  try {
+    await c.waitFor((p) => p.type === 'status')
+    c.send({ type: 'prompt', text: 'write it' })
+
+    const req = await c.waitFor((p) => p.type === 'approval.request')
+    assert.equal((req as { tool: string }).tool, 'write', '审批请求应来自模型发起的 write')
+    assert.equal(existsSync(target), false, '审批还没应答，文件不该已经落盘')
+
+    c.send({ type: 'approval.answer', callId: (req as { callId: string }).callId, allow: true })
+    await c.waitFor((p) => p.type === 'event' && p.kind === 'turn-end')
+
+    assert.equal(existsSync(target), true, '已批准但文件未落盘——审批结果没走到 guard')
+    assert.equal(readFileSync(target, 'utf8'), 'p2-payload', '落盘内容不符')
   } finally {
     c.end()
     await r.close()

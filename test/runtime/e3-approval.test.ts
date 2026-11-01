@@ -17,9 +17,11 @@ import { fileURLToPath } from 'node:url'
 import { startRuntime } from '../../src/runtime/start.ts'
 import { runChat } from '../../src/cli/chat.ts'
 import { scriptedLlmPlugin } from '../support/scripted-llm.ts'
+import { prtsYml, PATCHES } from '../support/composition.ts'
 import { makeTmp } from '../support/tmp.ts'
 
-const prtsYml = fileURLToPath(new URL('../../config/prts.yml', import.meta.url))
+// prtsYml 与 patches 统一来自 test/support/composition.ts——与管道用例共用同一组
+// 组装参数，否则「审批在管道入口下可达」只能靠人读两个文件比对。
 
 async function* lines(...xs: string[]): AsyncIterable<string> {
   for (const x of xs) yield x
@@ -78,7 +80,7 @@ async function runWrite(where: Where, answer: 'y' | 'n' | null): Promise<RunResu
     dataRoot,
     workspace: ws,
     mode: 'normal',
-    patches: [{ id: 'llm-deepseek', disabled: true }],
+    patches: PATCHES,
   })
   const chunks: string[] = []
   try {
