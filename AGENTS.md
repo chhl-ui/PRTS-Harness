@@ -50,7 +50,8 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   - **stdio 合并捕获**：stdout 与 stderr 走**同一个**管道。分开读两个管道时，若子进程写满其中一个（64KB）而父进程正在读另一个，写端阻塞、读端等 EOF——双死锁。合并后单一读端，读到 EOF 即结束。`wait()` 返回 `{ exitCode, output }`，`output` 是两者合并的文本。**不要为了「区分 stderr」改成两个管道**，除非同时实现异步并发读。
   - **读必须先于等**：`wait()` 里先 `drainPipe` 再 `WaitForSingleObject`。反过来「先等子进程退出再读」会在输出超过管道缓冲时死锁。父进程的写端必须在 `CreateProcessW` 之后立刻关闭，否则读端永远等不到 EOF。
   - 授权走 `icacls` 子进程而非手写 `SetNamedSecurityInfo`（后者有「pSacl 要 ACL 指针而不是整个 SD」的坑）。
-  - **尚未接线到运行时**：`createAppContainer` 目前是独立可用的库，PRTS 的 shell 工具还没有走它。
+  - **尚未接线到运行时**：`createAppContainer` 与 `runner.ts` 都是可用件，但 PRTS 的 shell 工具还没有走它们——还缺 `SandboxProvider` 的实现层。
+- **runner 协议（`src/sandbox/runner.ts`）**：`node runner.ts --profile <名称> --workspace <路径> -- <命令> [参数...]`。子进程 stdout/stderr 合并写入本进程 stdout，退出码**原样透传**；自身失败用 sysexits 风格（64 用法错误 / 70 内部错误），**失败绝不返回 0**——静默成功会让上游把「沙箱没起来」当成「命令跑完了」。实测两层管道（子进程→CreatePipe→runner→调用方）在 210KB 输出下不丢不死锁。
 - **接线形态：必须是 runner，不能直接接 `SandboxProvider`**（2026-11-01 查证）：
   `dsh-sandbox` 的 `SandboxProvider.confine()` 返回 `ConfinedArgv`，其 `argv` 是
   「runner + profile + 分隔符 + 调用方 argv」，由上层用普通 `child_process` 启动
