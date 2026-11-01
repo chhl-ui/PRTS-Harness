@@ -173,10 +173,31 @@ result = {"turns":3,"extracted":7,"added":7,"skipped":0,"cursor":3,"stop":"done"
 `{"turns":0,...}`——`memory-s.sqlite` 的 24.6 万条 turn 全是 benchmark，没有 live 对话，
 所以既不炸也没有浪费推理。
 
-### 仍未验证
+### 真机对话验证（2026-11-02，已执行）
 
-**真机对话未跑。** `prts memory` 子命令已真机验过；「自动注入 + 中文检索 + 抽取出的事实」
-要在真实 `prts chat` 里跑一轮才能确认，需消耗 PRTS key，按约束未执行。
+用真 DeepSeek + 空会话历史 + 预置记忆跑了一轮（`.rivet/scratch/probe-live-injection-v2.mjs`）：
+
+```
+=== pre-step 最终决策 ===
+{ "sid": "fresh-session", "step": 1, "messages": 3, "injected": 1,
+  "injectedHead": ["[记忆检索] ... 1. [turn] 我平时用 Godox V1 闪光灯配 85mm 定焦拍人像。"] }
+
+注入条数合计=1；答案提到 Godox/V1=true
+结论：注入生效，且模型用上了注入的记忆
+```
+
+关键设计：会话历史是空的，记忆库里只有一条预置 turn——答案里的「Godox V1」只可能来自注入。
+
+**这次验证抓到一个真缺陷并已修**：注入器原来把 `payload.messages` 的最后一条当查询，
+而 `agent/inbox/claimed` 在 pre-step **之前**就把本轮 user 消息落成了 turn，于是检索
+把「本轮问题自己」也当历史带回来（真机可见注入的第 2 条就是用户原话）。现在按
+归一化后完全相等过滤掉这一类自引，`I7` 钉住。
+
+**第一版探针为什么误判**：两个 sessionId 下模型都看得到前文，答对不能证明注入生效；
+且旁听器注册在 `startRuntime` 之后处于 waterfall 内层，看到的是注入**之前**的决策。
+第二版用 `{ prepend: true }` 提到最外层才看到最终态。
+
+### 仍未解决
 
 **3 字中文查询仍命中不了。** 2-gram 展开只对 ≥4 字的串生效：「住哪里」是 3 字，
 仍作为一个 token 走 FTS，命中不了谓词为「住在」的事实（探针里 `[住哪里] 0 条` 即此）。

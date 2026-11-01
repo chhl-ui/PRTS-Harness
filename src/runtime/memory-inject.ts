@@ -67,6 +67,11 @@ function textOf(message: unknown): string {
     .trim()
 }
 
+/** 归一化后比较：去掉空白与常见标点、统一小写。 */
+function normalizeText(s: string): string {
+  return s.replace(/\s+/g, '').replace(/[，。？！；：、,.?!;:]/g, '').toLowerCase()
+}
+
 function formatTime(hit: MemoryHit): string {
   if (hit.occurredAtMs === null || hit.occurredAtMs === undefined) return hit.occurredRaw ?? '时间未知'
   return new Date(hit.occurredAtMs).toISOString()
@@ -102,7 +107,13 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
       const query = textOf(messages[messages.length - 1])
       if (query.length < minQueryChars) return decision
 
-      const hits = deps.store.search({ text: query, limit, includeOrigin: ['live'] })
+      // 本轮问题自己也在库里：`agent/inbox/claimed` 在 pre-step 之前就把这条 user
+      // 消息落成了 turn，检索会把它当「历史记录」带回来——既占名额又对模型零信息。
+      // 真机实测见过注入里第 2 条就是本轮原话。
+      const queryKey = normalizeText(query)
+      const hits = deps.store
+        .search({ text: query, limit, includeOrigin: ['live'] })
+        .filter((h) => h.kind !== 'turn' || normalizeText(h.text) !== queryKey)
       if (hits.length === 0) return decision
 
       if (step >= 0) lastStep.set(sessionId, step)

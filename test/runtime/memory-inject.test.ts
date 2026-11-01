@@ -179,3 +179,37 @@ test('I6 同一 step 不重复注入；dispose 注销钩子', async () => {
     cleanup()
   }
 })
+
+test('I7 不把本轮问题自己当历史注入（inbox/claimed 先于 pre-step 落盘）', async () => {
+  const t = makeTmp('prts-inject-selfref-')
+  const store = MemoryStore.open(t.db())
+  try {
+    const question = '光学 偏好 是什么？'
+    // 模拟真实时序：本轮问题在 pre-step 之前已被 recordTurn 写成 turn
+    store.recordTurn({
+      actor: 'system', sessionId: 'sess-inject', turnIndex: 0, speaker: 'user', text: question,
+    })
+    store.recordTurn({
+      actor: 'system', sessionId: 'sess-old', turnIndex: 0, speaker: 'user',
+      text: '博士偏好光学镜头设计，常用 85mm。',
+    })
+
+    const fake = fakeHookCtx()
+    const att = attachMemoryInjection(fake.ctx, { store })
+    try {
+      const payload = payloadOf(question)
+      const out = await fake.fire(payload, async () => enter([...payload.messages])) as {
+        messages: Array<{ content: Array<{ text?: string }> }>
+      }
+      assert.equal(out.messages.length, 2, '仍然应该注入（有一条真实历史）')
+      const text = out.messages[1]?.content?.[0]?.text ?? ''
+      assert.match(text, /光学镜头设计/, '真实历史要在')
+      const occurrences = text.split(question).length - 1
+      assert.equal(occurrences, 0, '本轮原话不该出现在注入里')
+    } finally {
+      att.dispose()
+    }
+  } finally {
+    t.cleanup(store)
+  }
+})
