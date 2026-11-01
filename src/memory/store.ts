@@ -14,7 +14,7 @@ import { appendChained, sha256hex, verifyChainRows, type ChainVerifyResult } fro
 import { applyMemoryEvent } from './fold.ts'
 import { openMemoryDb } from './schema.ts'
 import type {
-  AssertFactInput, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath,
+  ActorKind, AssertFactInput, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath,
 } from './types.ts'
 
 const SCOPE = 'prts'
@@ -85,46 +85,12 @@ export class MemoryStore {
          VALUES (?,?,?,?,?)`,
       ).run(bodyRef, bodySha, input.object, Buffer.byteLength(input.object, 'utf8'), now)
 
-      const chained = appendChained(
-        this.db,
-        'memory_events',
-        {
-          event_id: `evt-${randomUUID()}`,
-          kind: 'fact.asserted',
-          occurred_at_ms: payload.valid_from_ms,
-          occurred_raw: null,
-          recorded_at_ms: now,
-          actor_kind: input.actor,
-          scope: SCOPE,
-          payload_json: JSON.stringify(payload),
-        },
-        (f) => ({
-          event_id: f.event_id as string,
-          kind: f.kind as string,
-          occurred_at_ms: f.occurred_at_ms as number | null,
-          occurred_raw: f.occurred_raw as string | null,
-          recorded_at_ms: f.recorded_at_ms as number,
-          actor_kind: f.actor_kind as string,
-          scope: f.scope as string,
-          payload_json: f.payload_json as string,
-          seq: f.seq as number,
-          prev_hash: f.prev_hash as string,
-          hash: f.hash as string,
-        }),
-      )
-
-      applyMemoryEvent(this.db, {
-        seq: chained.seq,
-        event_id: '',
+      this.appendEvent({
         kind: 'fact.asserted',
-        occurred_at_ms: payload.valid_from_ms,
-        occurred_raw: null,
-        recorded_at_ms: now,
-        actor_kind: input.actor,
-        scope: SCOPE,
-        payload_json: JSON.stringify(payload),
-        prev_hash: chained.prev_hash,
-        hash: chained.hash,
+        actor: input.actor,
+        recordedAtMs: now,
+        occurredAtMs: payload.valid_from_ms,
+        payload,
       })
 
       this.db.exec('COMMIT')
@@ -139,6 +105,90 @@ export class MemoryStore {
    * 检索。`origin` 默认只含 `'live'`——基准数据不进验收路径（设计稿 §6.4）。
    * 永不返回 `deleted_at_ms` 非空的行；`retired_at_ms` 非空的默认也不返回。
    */
+  /** 追加一条事件并把投影、正文在**同一事务**内更新（调用方负责 BEGIN/COMMIT）。 */
+  private appendEvent(input: {
+    kind: MemoryEventKind
+    actor: ActorKind
+    recordedAtMs: number
+    payload: Record<string, unknown>
+    occurredAtMs?: number | null
+    occurredRaw?: string | null
+  }): void {
+    const fields = {
+      event_id: `evt-${randomUUID()}`,
+      kind: input.kind,
+      occurred_at_ms: input.occurredAtMs ?? null,
+      occurred_raw: input.occurredRaw ?? null,
+      recorded_at_ms: input.recordedAtMs,
+      actor_kind: input.actor,
+      scope: SCOPE,
+      payload_json: JSON.stringify(input.payload),
+    }
+    const chained = appendChained(this.db, 'memory_events', fields, (f) => ({
+      event_id: f.event_id as string,
+      kind: f.kind as string,
+      occurred_at_ms: f.occurred_at_ms as number | null,
+      occurred_raw: f.occurred_raw as string | null,
+      recorded_at_ms: f.recorded_at_ms as number,
+      actor_kind: f.actor_kind as string,
+      scope: f.scope as string,
+      payload_json: f.payload_json as string,
+      seq: f.seq as number,
+      prev_hash: f.prev_hash as string,
+      hash: f.hash as string,
+    }))
+    applyMemoryEvent(this.db, {
+      seq: chained.seq,
+      event_id: fields.event_id,
+      kind: input.kind,
+      occurred_at_ms: fields.occurred_at_ms,
+      occurred_raw: fields.occurred_raw,
+      recorded_at_ms: fields.recorded_at_ms,
+      actor_kind: input.actor,
+      scope: SCOPE,
+      payload_json: fields.payload_json,
+      prev_hash: chained.prev_hash,
+      hash: chained.hash,
+    })
+  }
+
+  /**
+   * 删除一条事实。
+   *
+   * 追加两条事件（`memory.deleted` + `deletion.derivative-done`）；投影与正文
+   * 在同一事务内更新。**链保持完整**——删除是追加，不是改历史（设计稿 §6.6）。
+   */
+  deleteFact(input: { actor: ActorKind; factId: string }): string {
+    const now = Date.now()
+    const deletionId = `del-${randomUUID()}`
+
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.appendEvent({
+        kind: 'memory.deleted',
+        actor: input.actor,
+        recordedAtMs: now,
+        payload: {
+          deletion_id: deletionId,
+          target_kind: 'fact',
+          target_id: input.factId,
+          derivatives: ['body', 'projection'],
+        },
+      })
+      this.appendEvent({
+        kind: 'deletion.derivative-done',
+        actor: input.actor,
+        recordedAtMs: now,
+        payload: { deletion_id: deletionId },
+      })
+      this.db.exec('COMMIT')
+      return deletionId
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
   search(q: MemoryQuery): MemoryHit[] {
     const nowMs = q.nowMs ?? Date.now()
     const origins = q.includeOrigin ?? ['live']
@@ -182,6 +232,27 @@ export class MemoryStore {
       }))
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
+  }
+
+  /**
+   * 按 seq 重放事件，重建全部投影。
+   *
+   * 与增量路径调用**同一个** `applyMemoryEvent`（`src/ledger/fold.ts:50-53` 的形态），
+   * 因此投影是事件序列的纯函数。`mem_bodies` 不在重建范内——它是链外正文，
+   * 不是投影（设计稿 §6.2）。
+   */
+  rebuildProjections(): void {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.exec('DELETE FROM mem_turns; DELETE FROM mem_facts; DELETE FROM mem_summaries; DELETE FROM mem_topics; DELETE FROM mem_deletions')
+      const rows = this.db.prepare('SELECT * FROM memory_events ORDER BY seq')
+        .all() as unknown as MemoryEventRow[]
+      for (const r of rows) applyMemoryEvent(this.db, r)
+      this.db.exec('COMMIT')
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
   }
 
   /** 链校验。投影是事件序列的纯函数，链断则投影不可信。 */
