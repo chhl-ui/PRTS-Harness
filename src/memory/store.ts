@@ -394,8 +394,41 @@ export class MemoryStore {
       recallPath: 'fts-trigram' as RecallPath,
     }))
 
+    // ---- 画像路（v2.15 闸门）：独立表 + 独立 FTS + 独立名额 ----
+    // Wave 0 实测：画像与普通 fact 混池时，37–43 条画像里无关的靠字面匹配挤进 top-8。
+    // 身份独立是前提，名额独立是保证——两者缺一，画像永远选不中。
+    const profileQuota = q.profileQuota ?? 0
+    const profileHits: MemoryHit[] = profileQuota <= 0 || ftsMatch === null ? [] : (
+      this.db.prepare(
+        `SELECT p.profile_id, p.subject, p.aspect, p.profile_body, p.confidence
+           FROM mem_fts_profiles
+           JOIN mem_profiles p ON p.rowid = mem_fts_profiles.rowid
+          WHERE mem_fts_profiles MATCH ?
+            AND p.scope = ? AND p.deleted_at_ms IS NULL
+          ORDER BY bm25(mem_fts_profiles)
+          LIMIT ?`,
+      ).all(ftsMatch, scope, profileQuota * 4) as Array<{
+        profile_id: string
+        subject: string
+        aspect: string
+        profile_body: string
+        confidence: number
+      }>
+    ).map((r) => ({
+      kind: 'profile' as const,
+      // id 必须带命名空间前缀：`fused` 是按 id 合并的 Map，若 profile 与某条 fact
+      // 同 id，后者的 kind 会被吞掉——实测就是「12 条画像命中、最终 0 条进结果」。
+      id: `profile-${r.profile_id}`,
+      // 画像没有时间衰减——它是归纳产物，不随原对话变旧
+      score: 0.5 + r.confidence,
+      origin: origins[0] ?? 'live',
+      text: r.profile_body,
+      recallPath: 'profile' as RecallPath,
+    }))
+
     rank(ftsFacts, 'fts-trigram')
     rank(ftsTurns, 'fts-trigram')
+    rank(profileHits, 'profile')
 
     // ---- 路 2：LIKE 兜底（中文 2 字等短 token；FTS 颗粒无收时用全部 token 再兜一次）----
     const likeTokens = shortTokens.length > 0
@@ -489,10 +522,14 @@ export class MemoryStore {
     const scored = [...fused.values()]
       .map(({ hit, rrf }) => ({ ...hit, score: rrf * hit.score }))
       .sort((a, b) => b.score - a.score)
-    const factQuota = q.factQuota ?? Math.ceil(limit / 2)
+    const profiles = scored.filter((h) => h.kind === 'profile').slice(0, profileQuota)
+    const factQuota = q.factQuota ?? Math.ceil((limit - profiles.length) / 2)
     const facts = scored.filter((h) => h.kind === 'fact').slice(0, factQuota)
-    const others = scored.filter((h) => h.kind !== 'fact').slice(0, Math.max(0, limit - facts.length))
-    return [...facts, ...others].sort((a, b) => b.score - a.score).slice(0, limit)
+    const rest = scored.filter((h) => h.kind !== 'fact' && h.kind !== 'profile')
+      .slice(0, Math.max(0, limit - profiles.length - facts.length))
+    // 分组配额决定「谁入选」，组内已按 score 排好；合并后总量已 <= limit，
+    // 不能再全局重排后截断——那会把配额保证的小组整体挤掉（实测 profile 被 fact 挤出）。
+    return [...profiles, ...facts, ...rest].slice(0, limit)
   }
 
   /**

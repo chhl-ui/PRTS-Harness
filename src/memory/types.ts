@@ -17,7 +17,7 @@ export type ActorKind = 'owner' | 'model' | 'system'
  * 走了哪条召回路径。设计稿 §6.5 早已列出这三个值，实现时只写了 `'like'`——
  * 2026-11-01 换成混合检索后补齐。`'fts-unicode61'` 暂未启用（它对中文恒为 0）。
  */
-export type RecallPath = 'like' | 'fts-trigram' | 'fts-unicode61'
+export type RecallPath = 'like' | 'fts-trigram' | 'fts-unicode61' | 'profile'
 
 export interface AssertFactInput {
   actor: ActorKind
@@ -82,6 +82,15 @@ export interface MemoryQuery {
    */
   factQuota?: number
   /**
+   * 画像（归纳层）的独立名额，默认 0（关闭）。
+   *
+   * Wave 0 实测：单题生成 37–43 条画像全塞进 fact 池，而 top-8 里 fact 只有 4 个名额，
+   * 无关画像（"已婚"、"社区剧院"）靠字面匹配挤掉相关画像。闸门两条：身份独立
+   * （`mem_profiles` 独立表 + 独立 FTS）+ 名额独立（本字段）。
+   * 默认 0 保证不开画像路时现有基线一字不变。
+   */
+  profileQuota?: number
+  /**
    * 阶段一（v2.12）：先按 session 级索引取多少个会话，默认 10。
    *
    * 依据：turn 级 any@8 = 38.8%，而 session 级 any@3 = 85.6%、all@10 = 80.8%
@@ -94,7 +103,7 @@ export interface MemoryQuery {
 }
 
 export interface MemoryHit {
-  kind: 'turn' | 'fact' | 'summary'
+  kind: 'turn' | 'fact' | 'summary' | 'profile'
   id: string
   score: number
   /** 仅 fact 有。 */

@@ -130,6 +130,22 @@ CREATE TABLE IF NOT EXISTS mem_sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_scope ON mem_sessions(scope, origin);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_sessions USING fts5(body, tokenize='trigram');
+
+CREATE TABLE IF NOT EXISTS mem_profiles (
+  profile_id         TEXT PRIMARY KEY,
+  scope              TEXT NOT NULL DEFAULT 'prts',
+  subject            TEXT NOT NULL,
+  aspect             TEXT NOT NULL,
+  profile_body       TEXT NOT NULL,
+  evidence_fact_ids  TEXT,
+  confidence         REAL NOT NULL DEFAULT 0.5,
+  updated_at_ms      INTEGER NOT NULL,
+  deleted_at_ms      INTEGER,
+  CHECK (confidence >= 0 AND confidence <= 1)
+);
+CREATE INDEX IF NOT EXISTS idx_profiles_scope ON mem_profiles(scope, aspect, deleted_at_ms);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_profiles USING fts5(body, tokenize='trigram');
 `
 
 /** 打开（或创建）记忆库。`secure_delete` 是设计稿 §八 第 15 条的硬要求。 */
