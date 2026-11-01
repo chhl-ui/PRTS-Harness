@@ -76,7 +76,7 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   - **stdio 合并捕获**：stdout 与 stderr 走**同一个**管道。分开读两个管道时，若子进程写满其中一个（64KB）而父进程正在读另一个，写端阻塞、读端等 EOF——双死锁。合并后单一读端，读到 EOF 即结束。`wait()` 返回 `{ exitCode, output }`，`output` 是两者合并的文本。**不要为了「区分 stderr」改成两个管道**，除非同时实现异步并发读。
   - **读必须先于等**：`wait()` 里先 `drainPipe` 再 `WaitForSingleObject`。反过来「先等子进程退出再读」会在输出超过管道缓冲时死锁。父进程的写端必须在 `CreateProcessW` 之后立刻关闭，否则读端永远等不到 EOF。
   - 授权走 `icacls` 子进程而非手写 `SetNamedSecurityInfo`（后者有「pSacl 要 ACL 指针而不是整个 SD」的坑）。
-  - **尚未接线到运行时**：`createAppContainer` 与 `runner.ts` 都是可用件，但 PRTS 的 shell 工具还没有走它们——还缺 `SandboxProvider` 的实现层。
+  - **已接线到运行时**（2026-11-01 更正，原记「尚未接线」）：缺的那个实现层就是 `src/sandbox/provider.ts` 的 `AppContainerSandboxProvider`——它继承 `SandboxProvider`（`extends Service`，`new` 出来即顶替 `ctx.sandbox`），`start.ts` 在 `PRTS_SANDBOX_BACKEND=appcontainer` 时实例化它，DSH 的 shell 工具由此走到 `runner.ts`。**默认 `local` 时不实例化**：那条链路上是 `dsh-sandbox-local`，shell 根本不经过 AppContainer。所以「已接线」与「默认能用」是两件事，别混。
 - **runner 协议（`src/sandbox/runner.ts`）**：`node runner.ts --profile <名称> --workspace <路径> -- <命令> [参数...]`。子进程 stdout/stderr 合并写入本进程 stdout，退出码**原样透传**；自身失败用 sysexits 风格（64 用法错误 / 70 内部错误），**失败绝不返回 0**——静默成功会让上游把「沙箱没起来」当成「命令跑完了」。实测两层管道（子进程→CreatePipe→runner→调用方）在 210KB 输出下不丢不死锁。
 - **两条实测出来的硬约束**：
   1. **spawn 必须显式设 `cwd` 到已授权的工作区**。不设就继承 runner 的当前目录，AppContainer 对它没有 traverse：`cmd` 不敏感看不出来，**`pwsh` 直接报「当前目录无效」而根本不执行命令**。runner 早期漏了这一条，靠 pwsh 回归才暴露。
