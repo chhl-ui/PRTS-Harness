@@ -567,6 +567,42 @@ Accuracy 0.75（4 题 3 对），与构造时的预期一致。
 
 **这是判分器管道验证，不是基线成绩。**
 
+### 9.4 判分器校准（2026-11-01，首轮）
+
+用 `calib-pos.jsonl`（标准答案，应判 yes）/ `calib-neg.jsonl`（跨题型错配答案，应判 no）各 24 题跑判分器。
+
+| | 判 yes | 判 no | invalid |
+|---|---|---|---|
+| POS（应 yes，24） | 20 | 4 | 0 |
+| NEG（应 no，24） | 0 | 24 | 0 |
+
+混淆矩阵 **TP=20 / FN=4 / FP=0 / TN=24**：真准确率 0.9167、精确率 1.0000、召回率 0.8333、特异度 1.0000。
+
+**4 个 FN 全是 `single-session-preference` 题**（`8a2466db` / `06878be2` / `75832dbd` / `0edc2aef`）。judge 原话是干净的 `No` / `no`，`finish_reason=stop`——**不是判分器故障**。
+
+原因：preference 题的 `answer` 字段本身就是**评分 rubric**（"The user would prefer responses that suggest…"）。把它原样当 model response 提交，judge 判定「这是复述要求，不是真实回答」，判 no 合理。**这类题的校准不能用「答案逐字复制」构造。**
+
+**排除 preference 后的 5 个题型（20 正 + 20 负）= 40/40 全对。**
+
+**这个数字能说明什么、不能说明什么**：
+
+- 能说明：判分器能把「正确」与「完全离题」分开，三态判定与管道按预期工作。
+- **不能说明**：它能不能分辨「近似错误」——数值差一位、同题的另一选项、部分正确。本轮的负样本与题干零 token 共享（24 条里只有 6 个不同字符串、每个复用 4 次），任务实际退化成「离题检测」。
+
+**子代理对抗审查发现、已修的脚本缺陷**：
+
+| 缺陷 | 修法 |
+|---|---|
+| `'yes' in text.lower()` 子串匹配双向误判 | 改 `re.match(r'^\W*(yes\|no)\b')` + 三态；匹配不到记 `invalid` 不进分母 |
+| `max_tokens=1024` 被 reasoning 吃光 → 空 content 静默判 no | 提到 8192；读 `finish_reason`，`length` 或空 content 记 invalid 并重试一次 |
+| 循环结束才一次性落盘，中途崩溃全丢 | 改逐题 write + flush |
+| `'_abs' in qid` | 改 `endswith('_abs')` |
+| 未知 `question_type` 抛 `NotImplementedError` 中断整批 | 回退通用模板 + stderr 告警 |
+
+**验证**：`parse_verdict` 七个用例全过，含旧版两个误判模式（`"The response is correct."` 与空 content）现在返回 `None`。
+
+**仍未解决**：`calib` 集 24 题含 **0 道 abstention**（该分支零覆盖）；负样本缺乏「近似错误」；每型仅 4 题，Wilson 95% CI 约 [0.51, 1.00]，统计功效不足以分辨题型间差异。
+
 **数据落位（已定）**：`C:\prts-benchmark\<dataset>\`——**独立的根，不在 `protectedRoots` 也不在 `workspaceRoots` 内**，理由与 spill 根相同：基准数据含标准答案，模型 shell 不能读到。
 
 **版本锁定**：`longmemeval_oracle.json` 实测 **15,388,478 字节**，500 题，6 种 `question_type`（temporal-reasoning 133 / multi-session 133 / knowledge-update 78 / single-session-user 70 / single-session-assistant 56 / single-session-preference 30），abstention 30 题。**基线数字必须与这个字节数一起记录**——架构需求 §11 第 13 条自陈基准属「未经审读的资料级引用」，不锁版本就不可复现。

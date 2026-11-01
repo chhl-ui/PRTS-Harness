@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
@@ -38,6 +39,8 @@ import urllib.request
 
 API_BASE = os.environ.get('DEEPSEEK_API_BASE', 'https://api.deepseek.com/v1')
 DEFAULT_MODEL = 'deepseek-reasoner'
+MAX_TOKENS = 8192          # reasoner 的 reasoning token 也占额度，1024 会吃光
+_VERDICT = re.compile(r'^\W*(yes|no)\b', re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +62,9 @@ def get_anscheck_prompt(task, question, answer, response, abstention=False):
             template = "I will give you a question, a rubric for desired personalized response, and a response from a model. Please answer yes if the response satisfies the desired response. Otherwise, answer no. The model does not need to reflect all the points in the rubric. The response is correct as long as it recalls and utilizes the user's personal information correctly.\n\nQuestion: {}\n\nRubric: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
             prompt = template.format(question, answer, response)
         else:
-            raise NotImplementedError(task)
+            sys.stderr.write(f'警告：未知 question_type={task!r}，回退到通用模板\n')
+            template = "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no.\n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
+            prompt = template.format(question, answer, response)
     else:
         template = "I will give you an unanswerable question, an explanation, and a response from a model. Please answer yes if the model correctly identifies the question as unanswerable. The model could say that the information is incomplete, or some other information is given but the asked information is not.\n\nQuestion: {}\n\nExplanation: {}\n\nModel Response: {}\n\nDoes the model correctly identify the question as unanswerable? Answer yes or no only."
         prompt = template.format(question, answer, response)
@@ -75,7 +80,7 @@ def call_judge(prompt, model, api_key, max_retries=5):
         'messages': [{'role': 'user', 'content': prompt}],
         'n': 1,
         'temperature': 0,
-        'max_tokens': 1024,   # reasoner 的 reasoning token 也占额度，给宽一点
+        'max_tokens': MAX_TOKENS,   # reasoner 的 reasoning token 也占额度，1024 会吃光
     }).encode('utf-8')
 
     last_err = None
@@ -92,7 +97,8 @@ def call_judge(prompt, model, api_key, max_retries=5):
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 body = json.loads(resp.read().decode('utf-8'))
-            return body['choices'][0]['message']['content']
+            choice = body['choices'][0]
+            return choice['message'].get('content'), choice.get('finish_reason')
         except urllib.error.HTTPError as e:
             detail = e.read().decode('utf-8', 'replace')[:300]
             last_err = f'HTTP {e.code}: {detail}'
@@ -105,6 +111,16 @@ def call_judge(prompt, model, api_key, max_retries=5):
             time.sleep(2 ** attempt)
             continue
     raise RuntimeError(f'重试 {max_retries} 次仍失败: {last_err}')
+
+
+def parse_verdict(text, finish_reason):
+    """三态判定：True=yes / False=no / None=invalid（不进分母）。"""
+    if finish_reason == 'length' or not text or not text.strip():
+        return None
+    m = _VERDICT.match(text.strip())
+    if not m:
+        return None            # 判分器没按 yes/no 开头回答——不得默认成 False
+    return m.group(1).lower() == 'yes'
 
 
 def load_json_or_jsonl(path):
@@ -162,7 +178,7 @@ def main():
         qtype = ref.get('question_type', 'unknown')
         prompt = get_anscheck_prompt(
             qtype, ref['question'], ref['answer'], entry['hypothesis'],
-            abstention='_abs' in qid,
+            abstention=qid.endswith('_abs'),
         )
 
         if args.dry_run:
@@ -171,11 +187,14 @@ def main():
             print()
             continue
 
-        text = '' if args.always_yes else call_judge(prompt, args.model, api_key)
-        label = True if args.always_yes else ('yes' in text.strip().lower())
+        text, finish_reason = ('', 'always-yes') if args.always_yes else call_judge(prompt, args.model, api_key)
+        label = True if args.always_yes else parse_verdict(text, finish_reason)
 
-        entry['autoeval_label'] = {'model': args.model, 'label': label}
+        entry['autoeval_label'] = {'model': args.model, 'label': label, 'finish_reason': finish_reason, 'raw': (text or '')[:500]}
         logs.append(entry)
+        with open(out_path, 'w', encoding='utf-8') as _f:   # 逐题落盘：中部崩溃不丢已判结果
+            for _e in logs:
+                print(json.dumps(_e, ensure_ascii=False), file=_f)
         qtype2acc.setdefault(qtype, []).append(1 if label else 0)
         print(f'[{i}/{len(hypotheses)}] {qid} type={qtype} -> {"YES" if label else "no"}', flush=True)
 
