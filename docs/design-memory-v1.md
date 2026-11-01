@@ -592,7 +592,7 @@ M8/M9 的缺失比 M15 更值得优先补：它们验证的是一个选型的正
 | judged_by | `deepseek-reasoner`（被测 `deepseek-chat`） |
 | 样本 | 全量 500 题，`n=500 valid` / **0 invalid** |
 | 基准文件 | `C:\prts-benchmark\longmemeval\longmemeval_oracle.json`，**15,388,478 字节** |
-| 代码版本 | commit `e6b8acc` |
+| 代码版本 | commit `79f7374`（`src/` 部分来自其父 `e6b8acc`；本提交补上评测脚本，二者合计才是跑出该数字的完整代码状态） |
 | 检索形态 | LIKE + 分词 + 停用词；SQL 按 `hit_count DESC` 取候选（`LIMIT limit*4`，**带 ORDER BY**）；JS 层按 `相关度 × 时近 × 重要性` 取 top-8；prompt 带 `question_date` 与每条 excerpt 的原始时间串 |
 | 口径 | **全库池**——500 题的 haystack 全部导入一个库（10960 turn）后全局检索，**不是**每题隔离 |
 
