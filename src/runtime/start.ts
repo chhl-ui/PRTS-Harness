@@ -13,6 +13,7 @@ import { Authority, classify } from '../authority/index.ts'
 import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
+import { MemoryStore } from '../memory/index.ts'
 import { attachSpill, resolveSpillRoot } from '../spill/wiring.ts'
 
 export interface StartRuntimeOptions {
@@ -151,6 +152,19 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // :158 以 PRTS_DB 传下来），否则任务事实会落进 K1/K4/K5 都看不见的库。
   // 上面已经 initCoreDb 幂等建过表，这里直接 open 即可。
   const ledger = Ledger.open(dbPath)
+
+  // 记忆库：独立文件，不与 core.sqlite 混（K1/K4/K5 的库是护栏事实，
+  // 记忆是对话内容，两者的保留与删除策略不同——设计稿 §6.6 的删除流程
+  // 只作用于记忆库，不该波及账本链）。
+  // 打开失败不阻止运行时启动：记忆不可用是功能降级，不是安全问题；
+  // 但必须留下明确痕迹，否则会变成「记不住也查不出原因」的静默失效。
+  let memory: MemoryStore | undefined
+  try {
+    mkdirSync(o.dataRoot, { recursive: true })
+    memory = MemoryStore.open(process.env.PRTS_MEMORY_DB ?? join(o.dataRoot, 'memory.sqlite'))
+  } catch (error) {
+    console.error(`[prts] memory store unavailable: ${error instanceof Error ? error.message : String(error)}`)
+  }
   // 工具结果卸载的存储根：默认与 dataRoot 平级，**不嵌在受保护根里**——
   // 嵌进去会被 `fs.read` 的 protectedRoots 判定拒掉，卸载的内容模型就永远读不回来
   // （见 docs/design-tool-output-spill.md §5.1 与议事会指出的 v1 硬伤）。
@@ -347,6 +361,50 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     }
   }) as never)
 
+  // V1-06 的前置接线：把用户消息落成情景记忆。
+  //
+  // 挂 `agent/inbox/claimed`（emit 型）而不是 `agent/turn-stopping`——后者载荷只有
+  // {agent, turn, signal}，拿不到文本；前者载荷带 `message: UserMessage`。
+  // （类型见 node_modules/@deepseek-ai/dsh-agent/lib/types/runtime-types.d.ts 中
+  //  'agent/inbox/claimed' 与 'agent/turn-stopping' 两处声明，不凭记忆猜。）
+  //
+  // 纪律：写记忆失败绝不能影响对话。整段包在 try/catch 里，只打日志。
+  const extractText = (content: unknown): string => {
+    if (typeof content === 'string') return content.trim()
+    if (!Array.isArray(content)) return ''
+    return content
+      .map((block) => (
+        block !== null && typeof block === 'object' && (block as { type?: unknown }).type === 'text'
+          ? String((block as { text?: unknown }).text ?? '')
+          : ''
+      ))
+      .join('')
+      .trim()
+  }
+
+  const offMemoryTurn = memory === undefined ? undefined : events?.on('agent/inbox/claimed', ((payload: unknown) => {
+    try {
+      const p = payload as {
+        agent?: { session?: { id?: string } }
+        message?: { content?: unknown }
+        turn?: number
+      }
+      const sessionId = p.agent?.session?.id
+      if (typeof sessionId !== 'string' || sessionId === '') return
+      const text = extractText(p.message?.content)
+      if (text === '') return
+      memory?.recordTurn({
+        actor: 'system',
+        sessionId,
+        turnIndex: typeof p.turn === 'number' ? p.turn : 0,
+        speaker: 'user',
+        text,
+      })
+    } catch (error) {
+      console.error(`[prts] memory recordTurn failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }) as never)
+
   // W4b/D2：模型侧账本工具集。清单严格来自 MODEL_OPS（ledger.ts:122-125），
   // 固定 actor 通道（activate/cancel/setBudget/resumeFromStop/verify/ownerAccept/
   // ownerReject）不注册为工具。实现与路径域收敛见 src/runtime/task-tools.ts 头部。
@@ -394,6 +452,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       offPreExecute()
       offToolExecute()
       offToolResult?.()
+      offMemoryTurn?.()
+      memory?.close()
       spillWiring.dispose()
       taskTools.dispose()
       // Ledger 与 Authority 各自持有 sqlite 连接，都不由 ctx 生命周期管理；
