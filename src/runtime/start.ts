@@ -7,6 +7,7 @@ import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import type { Context } from '@deepseek-ai/cordis'
 import { attachErrorReporter } from './error-report.ts'
 import { AppContainerSandboxProvider } from '../sandbox/provider.ts'
+import { localBackendWarning } from '../sandbox/confine.ts'
 import { createStepAllocator, createTaskTools, isLedgerTool } from './task-tools.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { Ledger } from '../ledger/index.ts'
@@ -85,6 +86,11 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 时必须先禁用配置里的 `sandbox` 条目——两者都注册成 ctx.sandbox，会同名冲突。
   // 用开关而不是直接替换，是为了出问题能一行改回去。
   const backend = process.env.PRTS_SANDBOX_BACKEND === 'appcontainer' ? 'appcontainer' : 'local'
+  // local 是默认后端，但它在 C:\ 下的 workspace 上 shell 起不来（grantWrite 的
+  // SetNamedSecurityInfoW 返回 Win32 5）。把它在启动时说出来，否则撞上的人要
+  // 追到 dsh-sandbox-windows-acl 内部才能发现。
+  const backendWarning = localBackendWarning(backend, o.workspace)
+  if (backendWarning !== undefined) console.warn(backendWarning)
   const bootPatches = [...(o.patches ?? [])]
   if (backend === 'appcontainer') bootPatches.push({ id: 'sandbox', disabled: true })
   process.env.DSH_HOME = join(o.dataRoot, 'dsh-home')
