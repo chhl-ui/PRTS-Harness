@@ -24,6 +24,50 @@ const WIN = process.platform === 'win32'
 const prtsYml = fileURLToPath(new URL('../../config/prts.yml', import.meta.url))
 const disableLlm = [{ id: 'llm-deepseek', disabled: true }]
 
+test('L2 调高 maxOutputChars 后 spill 存下完整输出（上限与卸载是一套组合）', { skip: !WIN, timeout: 180000 }, async () => {
+  const t = makeTmp('prts-spill-live2-')
+  const spillRoot = join(t.dir, 'spill-root')
+  process.env.PRTS_SPILL_MAX_INLINE_TOKENS = '100'
+  process.env.PRTS_SPILL_ROOT = spillRoot
+  let app: Awaited<ReturnType<typeof startRuntime>> | undefined
+  try {
+    const dataRoot = join(t.dir, 'data')
+    const workspace = join(t.dir, 'ws')
+    mkdirSync(dataRoot, { recursive: true })
+    mkdirSync(workspace, { recursive: true })
+
+    // 把 pwsh 的输出上限从默认 16000 提到 100 万：验证「上游不截断 + spill 接管卸载」
+    // 这套组合成立。单独调高上限是危险的——不配 spill 时 100 万字符会直接进上下文。
+    app = await startRuntime({
+      configPath: prtsYml, dataRoot, workspace, mode: 'normal',
+      patches: [...disableLlm, { id: 'persistent-pwsh', config: { maxOutputChars: 1_000_000 } }],
+    })
+
+    const script: ScriptedStep[] = [
+      { toolCalls: [{ name: 'pwsh', arguments: { command: "[Console]::Out.Write('x' * 40000)" } }] },
+      { text: 'done' },
+    ]
+    scriptedLlmPlugin(script).apply(app.ctx as Context)
+
+    await runTurn(app.ctx as Context, 'run the command', { cwd: workspace })
+
+    const entries = readdirSync(spillRoot, { recursive: true, encoding: 'utf8' }) as string[]
+    const spilled = entries.filter((f) => f.endsWith('.txt'))
+    assert.ok(spilled.length >= 1, `spill 目录下没有结果文件，实际内容：${JSON.stringify(entries)}`)
+
+    const content = readFileSync(join(spillRoot, spilled[0]), 'utf8')
+    assert.ok(
+      content.length >= 40000,
+      `落盘 ${content.length} 字符；调高 maxOutputChars 到 100 万后应当拿到完整的 40000`,
+    )
+  } finally {
+    delete process.env.PRTS_SPILL_MAX_INLINE_TOKENS
+    delete process.env.PRTS_SPILL_ROOT
+    if (app) await app.dispose()
+    t.cleanup()
+  }
+})
+
 test('L1 真实 runtime：超阈值工具结果落盘（钩子确实被调用）', { skip: !WIN, timeout: 180000 }, async () => {
   const t = makeTmp('prts-spill-live-')
   const spillRoot = join(t.dir, 'spill-root')
