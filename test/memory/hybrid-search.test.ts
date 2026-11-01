@@ -13,6 +13,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MemoryStore } from '../../src/memory/index.ts'
 import { makeTmp } from '../support/tmp.ts'
+import { DatabaseSync } from 'node:sqlite'
 
 function seed(m: MemoryStore): void {
   m.recordTurn({
@@ -120,6 +121,35 @@ test('H6 重建投影后 FTS 索引仍可用（rebuild 不得让全文索引变�
     const hits = m.search({ text: 'prefer' })
     assert.equal(hits.length, 1, '重建后全文索引必须仍然有内容')
     assert.equal(hits[0]?.recallPath, 'fts-trigram')
+  } finally {
+    t.cleanup(m)
+  }
+})
+
+test('H7 旧库升级自愈：FTS 为空但投影有数据时，打开即重建索引', () => {
+  const t = makeTmp('prts-mem-hybrid-migrate-')
+  const path = t.db('memory.sqlite')
+
+  // 1) 正常写入，让投影与索引都有数据
+  let m = MemoryStore.open(path)
+  m.recordTurn({
+    actor: 'system', sessionId: 's1', turnIndex: 0, speaker: 'user',
+    text: 'I preferred the 50mm prime lens',
+  })
+  m.close()
+
+  // 2) 模拟 v2.6 之前的旧库：FTS 表存在但为空（历史行不会重走 fold）
+  const raw = new DatabaseSync(path)
+  raw.exec('DELETE FROM mem_fts_turns')
+  raw.close()
+
+  // 3) 重新打开必须自愈——否则检索会静默退化成全表 LIKE（实测 10,960 turn 的
+  //    旧库打开后 recallPath 全是 'like'，无任何报错）
+  m = MemoryStore.open(path)
+  try {
+    const hits = m.search({ text: 'preferred' })
+    assert.equal(hits.length, 1)
+    assert.equal(hits[0]?.recallPath, 'fts-trigram', '打开时应重建索引，而不是静默退回 LIKE')
   } finally {
     t.cleanup(m)
   }

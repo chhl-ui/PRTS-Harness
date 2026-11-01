@@ -122,5 +122,45 @@ export function openMemoryDb(path: string): DatabaseSync {
   db.exec('PRAGMA journal_mode = WAL')
   db.exec('PRAGMA secure_delete = ON')
   db.exec(SCHEMA)
+  ensureFtsIndexed(db)
   return db
+}
+
+/**
+ * 索引自愈（v2.6）。
+ *
+ * 旧库在升级前没有 FTS 表，`CREATE VIRTUAL TABLE IF NOT EXISTS` 会建出**空表**，
+ * 而历史行早已走过 fold、不会重放——检索于是静默退化成全表 LIKE。
+ * 实测：10,960 turn 的旧库打开后 recallPath 全是 'like'，无任何报错。
+ * 计数不一致就按投影重建：这是唯一不需要重放事件链就能修复索引的时点。
+ */
+function ensureFtsIndexed(db: DatabaseSync): void {
+  const count = (sql: string): number => (db.prepare(sql).get() as { c: number }).c
+  const turnsExpect = count(
+    `SELECT count(*) c FROM mem_turns t JOIN mem_bodies b ON b.body_ref = t.body_ref
+      WHERE b.body IS NOT NULL AND t.deleted_at_ms IS NULL`,
+  )
+  const turnsActual = count('SELECT count(*) c FROM mem_fts_turns')
+  const factsExpect = count('SELECT count(*) c FROM mem_facts WHERE deleted_at_ms IS NULL')
+  const factsActual = count('SELECT count(*) c FROM mem_fts_facts')
+  if (turnsExpect === turnsActual && factsExpect === factsActual) return
+
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    db.exec('DELETE FROM mem_fts_turns; DELETE FROM mem_fts_facts')
+    db.exec(`
+      INSERT INTO mem_fts_turns(rowid, body)
+        SELECT t.rowid, b.body FROM mem_turns t
+          JOIN mem_bodies b ON b.body_ref = t.body_ref
+         WHERE b.body IS NOT NULL AND t.deleted_at_ms IS NULL;
+      INSERT INTO mem_fts_facts(rowid, body)
+        SELECT f.rowid, f.subject || ' ' || f.predicate || ' ' || COALESCE(b.body, '')
+          FROM mem_facts f LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
+         WHERE f.deleted_at_ms IS NULL;
+    `)
+    db.exec('COMMIT')
+  } catch (e) {
+    db.exec('ROLLBACK')
+    throw e
+  }
 }
