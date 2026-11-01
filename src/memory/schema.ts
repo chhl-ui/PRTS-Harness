@@ -162,6 +162,48 @@ CREATE TABLE IF NOT EXISTS mem_vectors (
   updated_at_ms  INTEGER NOT NULL,
   PRIMARY KEY (owner_kind, owner_id)
 );
+
+-- ---- 巩固管线（Wave 2，规则部分）----
+-- 这三张表与 mem_profiles 同类：**链外派生项**，不是事件序列的纯函数。
+-- 理由：巩固依赖 turn 正文，而正文外置在 mem_bodies（不在事件链上，设计稿 §6.2 路线 D）。
+-- 把正文烤进事件会破坏链上只留 body_ref + sha256 的形状，那是唯一不可逆点（§八 不变量 9）。
+-- 因此它们不参与 rebuildProjections，重建后如实保留；清空它们等于重置巩固进度。
+
+-- 水位线：处理到哪一行。游标只前进，重复跑同一游标必然幂等。
+CREATE TABLE IF NOT EXISTS mem_consolidation (
+  scope              TEXT PRIMARY KEY,
+  cursor_turn_rowid  INTEGER NOT NULL DEFAULT 0,
+  cursor_event_seq   INTEGER NOT NULL DEFAULT 0,
+  updated_at_ms      INTEGER NOT NULL,
+  budget_spent       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS mem_entities (
+  entity_key     TEXT PRIMARY KEY,
+  scope          TEXT NOT NULL DEFAULT 'prts',
+  name           TEXT NOT NULL,
+  kind           TEXT NOT NULL,
+  mention_count  INTEGER NOT NULL DEFAULT 0,
+  first_seen_ms  INTEGER NOT NULL,
+  last_seen_ms   INTEGER NOT NULL,
+  CHECK (kind IN ('proper','quoted','quantity','acronym'))
+);
+CREATE INDEX IF NOT EXISTS idx_entities_scope ON mem_entities(scope, kind, mention_count);
+
+-- 无向边只存一条：规范化 from_key < to_key。存双向会让「A–B 共现 3 次」在两行上
+-- 各记 3 次，扩散激活按 weight 取邻居时得到双份权重——比例是对的，绝对值会翻倍，
+-- 之后任何阈值（SPREAD_MIN_WEIGHT）都要跟着猜。
+-- 本表不设 scope 列：边的两端是 entity_key，scope 已隐含在实体键里；
+-- 强行加入会破坏 (from_key,to_key,kind) 这个唯一性语义。
+CREATE TABLE IF NOT EXISTS mem_links (
+  from_key      TEXT NOT NULL,
+  to_key        TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  weight        REAL NOT NULL DEFAULT 1,
+  last_seen_ms  INTEGER NOT NULL,
+  PRIMARY KEY (from_key, to_key, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_links_to ON mem_links(to_key, weight);
 `
 
 /** 打开（或创建）记忆库。`secure_delete` 是设计稿 §八 第 15 条的硬要求。 */

@@ -7,6 +7,11 @@ export { tokenize } from './tokenize.ts'
 export {
   OllamaEmbedder, cosineSimilarity, decodeVector, encodeVector, type Embedder,
 } from './embedding.ts'
+export { extractEntities, normalizeKey, type EntityKind, type ExtractedEntity } from './extract.ts'
+export {
+  consolidationStats, readConsolidationCursor, runConsolidation,
+  type ConsolidateOptions, type ConsolidateResult,
+} from './consolidate.ts'
 export type {
   ActorKind,
   AssertFactInput,

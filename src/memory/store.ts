@@ -13,6 +13,10 @@ import type { DatabaseSync } from 'node:sqlite'
 import { appendChained, sha256hex, verifyChainRows, type ChainVerifyResult } from '../chain/index.ts'
 import { applyMemoryEvent } from './fold.ts'
 import { cosineSimilarity, decodeVector, encodeVector, type Embedder } from './embedding.ts'
+import {
+  readConsolidationCursor, runConsolidation, consolidationStats as readConsolidationStats,
+  type ConsolidateOptions, type ConsolidateResult,
+} from './consolidate.ts'
 import { ensureSessionsBuilt, openMemoryDb } from './schema.ts'
 import { parseTime } from './time.ts'
 import { tokenize } from './tokenize.ts'
@@ -769,6 +773,26 @@ export class MemoryStore {
   }
 
   /**
+   * 跑一批巩固（Wave 2，规则部分）：实体抽取 + 共现边 + 主题计数 + 水位线。
+   *
+   * 不调模型，零 API 成本。达到 `maxTurns` 而仍有剩余时 `stopped === 'budget'`，
+   * 调用方循环调用即可接着跑；取消（`signal`）只在批边界生效，不会留下半成品。
+   */
+  consolidateRules(opts: ConsolidateOptions = {}): ConsolidateResult {
+    return runConsolidation(this.db, opts)
+  }
+
+  /** 巩固水位线与产出规模。 */
+  consolidationStats(scope?: string): ReturnType<typeof readConsolidationStats> {
+    return readConsolidationStats(this.db, scope)
+  }
+
+  /** 当前巩固游标（最后一条已处理 turn 的 rowid）。 */
+  consolidationCursor(scope?: string): number {
+    return readConsolidationCursor(this.db, scope)
+  }
+
+  /**
    * 按 seq 重放事件，重建全部投影。
    *
    * 与增量路径调用**同一个** `applyMemoryEvent`（`src/ledger/fold.ts:50-53` 的形态），
@@ -885,7 +909,11 @@ export class MemoryStore {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       // 全文索引也是投影：重建时先清空，再由 applyMemoryEvent 逐条重建。
-      this.db.exec('DELETE FROM mem_fts_sessions; DELETE FROM mem_sessions; DELETE FROM mem_fts_turns; DELETE FROM mem_fts_facts; DELETE FROM mem_turns; DELETE FROM mem_facts; DELETE FROM mem_summaries; DELETE FROM mem_topics; DELETE FROM mem_deletions')
+      this.db.exec('DELETE FROM mem_fts_sessions; DELETE FROM mem_sessions; DELETE FROM mem_fts_turns; DELETE FROM mem_fts_facts; DELETE FROM mem_turns; DELETE FROM mem_facts; DELETE FROM mem_summaries; DELETE FROM mem_deletions')
+      // mem_topics 不在清理范围内：它由巩固管线写入（Wave 2），与 mem_profiles 同类，
+      // 是链外派生项而不是事件序列的纯函数。这里删掉它会造成难查的丢失：
+      // 游标（mem_consolidation）不跟着重置，巩固不会重算已跳过的 turn，
+      // 主题于是永久消失且无任何报错。
       const rows = this.db.prepare('SELECT * FROM memory_events ORDER BY seq')
         .all() as unknown as MemoryEventRow[]
       for (const r of rows) applyMemoryEvent(this.db, r)
