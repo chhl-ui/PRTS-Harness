@@ -44,6 +44,18 @@ export interface RecordTurnInput {
   origin?: Origin
   /** LongMemEval 的 `has_answer`。 */
   isEvidence?: boolean
+  /**
+   * 幂等键。给了就用 `sha256(dedupeKey)` 作为 turn_id，重复导入同一
+   * sample/session/turnIndex 不会写出第二条（设计稿 §6.7）。
+   */
+  dedupeKey?: string
+}
+
+export interface ImportStats {
+  sessions: number
+  turns: number
+  /** 时间串解析失败的会话数——**不阻断导入**，但要如实报出来。 */
+  unparsedTime: number
 }
 
 export interface MemoryQuery {

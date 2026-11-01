@@ -15,7 +15,7 @@ import { applyMemoryEvent } from './fold.ts'
 import { openMemoryDb } from './schema.ts'
 import { parseTime } from './time.ts'
 import type {
-  ActorKind, AssertFactInput, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput,
+  ActorKind, AssertFactInput, ImportStats, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput,
 } from './types.ts'
 
 const SCOPE = 'prts'
@@ -198,7 +198,14 @@ export class MemoryStore {
    */
   recordTurn(input: RecordTurnInput): string {
     const now = Date.now()
-    const turnId = `turn-${randomUUID()}`
+    const turnId = input.dedupeKey === undefined
+      ? `turn-${randomUUID()}`
+      : `turn-${sha256hex(input.dedupeKey).slice(0, 32)}`
+
+    // 幂等：同一 dedupeKey 已存在就直接返回，不重写 body、不追加事件。
+    if (this.db.prepare('SELECT 1 AS x FROM mem_turns WHERE turn_id = ?').get(turnId) !== undefined) {
+      return turnId
+    }
     const bodyRef = `body-${randomUUID()}`
     const bodySha = sha256hex(input.text)
     const occurredRaw = input.occurredRaw ?? null
@@ -322,6 +329,57 @@ export class MemoryStore {
    * 因此投影是事件序列的纯函数。`mem_bodies` 不在重建范内——它是链外正文，
    * 不是投影（设计稿 §6.2）。
    */
+  /**
+   * 导入 LoCoMo 结构（`locomo10.json`）。
+   *
+   * 结构实测（2026-11-01）：每个 sample 有 `sample_id` 与 `conversation`；
+   * `conversation` 里 `session_<N>` 是 turn 数组，`session_<N>_date_time` 是
+   * **自由文本时间**（`"1:56 pm on 8 May, 2023"`），turn 有 `speaker` / `dia_id` / `text`。
+   *
+   * 导入的 turn 一律 `origin='benchmark'`——默认不进验收路径（设计稿 §6.4）。
+   * `dedupeKey` 让重复导入幂等。
+   */
+  importLoCoMo(data: unknown): ImportStats {
+    if (!Array.isArray(data)) throw new Error('memory: importLoCoMo 需要数组')
+    let sessions = 0
+    let turns = 0
+    let unparsedTime = 0
+
+    for (const raw of data) {
+      const sample = raw as { sample_id?: string; conversation?: Record<string, unknown> }
+      const sampleId = sample.sample_id ?? 'unknown'
+      const conv = sample.conversation ?? {}
+
+      for (const key of Object.keys(conv)) {
+        if (!/^session_\d+$/.test(key)) continue
+        const list = conv[key]
+        if (!Array.isArray(list)) continue
+
+        const dateRaw = conv[`${key}_date_time`]
+        const occurredRaw = typeof dateRaw === 'string' ? dateRaw : undefined
+        if (occurredRaw !== undefined && parseTime(occurredRaw) === null) unparsedTime++
+        sessions++
+
+        list.forEach((t, i) => {
+          const turn = t as { speaker?: string; dia_id?: string; text?: string }
+          this.recordTurn({
+            actor: 'system',
+            sessionId: `${sampleId}/${key}`,
+            turnIndex: i,
+            ...(turn.dia_id === undefined ? {} : { externalId: turn.dia_id }),
+            speaker: turn.speaker ?? 'unknown',
+            text: turn.text ?? '',
+            ...(occurredRaw === undefined ? {} : { occurredRaw }),
+            origin: 'benchmark',
+            dedupeKey: `${sampleId}|${key}|${i}`,
+          })
+          turns++
+        })
+      }
+    }
+    return { sessions, turns, unparsedTime }
+  }
+
   rebuildProjections(): void {
     this.db.exec('BEGIN IMMEDIATE')
     try {

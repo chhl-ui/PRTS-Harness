@@ -1,0 +1,26 @@
+[
+  {
+    "sample_id": "conv-mini-1",
+    "conversation": {
+      "speaker_a": "Caroline",
+      "speaker_b": "Mel",
+      "session_1_date_time": "1:56 pm on 8 May, 2023",
+      "session_1": [
+        { "speaker": "Caroline", "dia_id": "D1:1", "text": "Hey Mel! Good to see you!" },
+        { "speaker": "Mel", "dia_id": "D1:2", "text": "Likewise. How was the optics workshop?" }
+      ],
+      "session_2_date_time": "10:00 am on 9 May, 2023",
+      "session_2": [
+        { "speaker": "Caroline", "dia_id": "D2:1", "text": "The lens calibration went well." }
+      ]
+    },
+    "qa": [
+      {
+        "question": "How was the optics workshop?",
+        "answer": "It went well",
+        "evidence": ["D1:2"],
+        "category": 1
+      }
+    ]
+  }
+]
