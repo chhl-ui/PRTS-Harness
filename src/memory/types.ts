@@ -72,6 +72,15 @@ export interface MemoryQuery {
   includeOrigin?: Origin[]
   /** 第一版恒为 `'prts'`；暴露出来是为了让多 scope 守卫测试能查到它。 */
   scope?: string
+  /**
+   * fact 的名额上限（v2.9）。**上限不是固定值**：fact 不够时缺口由 turn 补足，
+   * fact 为空时全部名额给 turn。默认 `ceil(limit/2)`。
+   *
+   * 存在的理由：fact 独享 `(0.5+importance)` 乘子而 turn 没有，同一个 RRF 池里
+   * fact 会系统性挤掉 turn。抽取上线后若不分名额，分数变化就分不清是「抽取质量」
+   * 还是「挤出效应」——归因彻底失效。
+   */
+  factQuota?: number
 }
 
 export interface MemoryHit {

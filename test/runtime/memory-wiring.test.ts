@@ -26,12 +26,12 @@ const WIN = process.platform === 'win32'
 const prtsYml = fileURLToPath(new URL('../../config/prts.yml', import.meta.url))
 const disableLlm = [{ id: 'llm-deepseek', disabled: true }]
 
-async function boot(t: ReturnType<typeof makeTmp>, script: ScriptedStep[]) {
+async function boot(t: ReturnType<typeof makeTmp>, script: ScriptedStep[], memoryDbPath?: string) {
   const dataRoot = join(t.dir, 'data')
   const workspace = join(t.dir, 'ws')
   mkdirSync(dataRoot, { recursive: true })
   mkdirSync(workspace, { recursive: true })
-  const app = await startRuntime({ configPath: prtsYml, dataRoot, workspace, mode: 'normal', patches: disableLlm })
+  const app = await startRuntime({ configPath: prtsYml, dataRoot, workspace, mode: 'normal', patches: disableLlm, ...(memoryDbPath === undefined ? {} : { memoryDbPath }) })
   scriptedLlmPlugin(script).apply(app.ctx as Context)
   return { ...app, dataRoot, workspace }
 }
@@ -67,20 +67,17 @@ test('MW1: 一个真实 turn 之后，记忆库里有对应的 user turn', { ski
 test('MW2: 记忆库不可用时不影响对话', { skip: !WIN, timeout: 120000 }, async () => {
   const t = makeTmp('prts-rt-memory-degraded-')
   let app: Awaited<ReturnType<typeof boot>> | undefined
-  const prev = process.env.PRTS_MEMORY_DB
   try {
-    // 指向一个不可能创建的路径（父路径是文件而非目录）
+    // 指向一个不可能创建的路径（父路径是文件而非目录）。
+    // 用参数注入而不是 process.env——同进程并行跑用例时改环境变量会污染别人。
     const blocker = join(t.dir, 'blocker')
     mkdirSync(blocker, { recursive: true })
-    process.env.PRTS_MEMORY_DB = join(blocker, 'not-a-dir', 'memory.sqlite')
 
-    app = await boot(t, [{ type: 'text', text: '收到。' } as ScriptedStep])
+    app = await boot(t, [{ type: 'text', text: '收到。' } as ScriptedStep], join(blocker, 'not-a-dir', 'memory.sqlite'))
     // 记忆坏掉不影响回合：这里能跑完就说明没把异常抛穿
     await runTurn(app.ctx as Context, 'hello', { cwd: app.workspace })
     assert.ok(app.ctx, '运行时仍然可用')
   } finally {
-    if (prev === undefined) delete process.env.PRTS_MEMORY_DB
-    else process.env.PRTS_MEMORY_DB = prev
     await app?.dispose()
     t.cleanup()
   }

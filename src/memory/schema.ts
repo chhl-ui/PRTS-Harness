@@ -76,7 +76,9 @@ CREATE TABLE IF NOT EXISTS mem_facts (
   CHECK (retention_class IN ('permanent','retirable','clearable'))
 );
 CREATE INDEX IF NOT EXISTS idx_facts_scope ON mem_facts(scope, deleted_at_ms, retired_at_ms);
-CREATE INDEX IF NOT EXISTS idx_facts_identity ON mem_facts(identity_key, retired_at_ms, deleted_at_ms);
+-- idx_facts_identity 由 ensureFactIdentityColumn 创建，不放在 SCHEMA 里：
+-- 旧库执行 SCHEMA 时 identity_key 列还不存在（ALTER 在 SCHEMA 之后），
+-- 索引若写在这里，SQLite 会在建索引阶段抛 no such column，迁移函数根本没机会跑。
 
 CREATE TABLE IF NOT EXISTS mem_summaries (
   summary_id     TEXT PRIMARY KEY,

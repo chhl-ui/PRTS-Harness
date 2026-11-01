@@ -455,10 +455,15 @@ export class MemoryStore {
       rank(likeTurns, 'like')
     }
 
-    return [...fused.values()]
+    // 分组名额：fact 与 turn 分开取，避免一方挤满（见 MemoryQuery.factQuota 的注释）。
+    // 名额是上限不是固定值——fact 不足时缺口给 turn，fact 为空时行为与不带配额完全一致。
+    const scored = [...fused.values()]
       .map(({ hit, rrf }) => ({ ...hit, score: rrf * hit.score }))
       .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
+    const factQuota = q.factQuota ?? Math.ceil(limit / 2)
+    const facts = scored.filter((h) => h.kind === 'fact').slice(0, factQuota)
+    const others = scored.filter((h) => h.kind !== 'fact').slice(0, Math.max(0, limit - facts.length))
+    return [...facts, ...others].sort((a, b) => b.score - a.score).slice(0, limit)
   }
 
   /**

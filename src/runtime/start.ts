@@ -27,6 +27,12 @@ export interface StartRuntimeOptions {
   credentials?: { DEEPSEEK_API_KEY?: string }
   /** 账本/审计/授权共用的 SQLite 路径；缺省取 PRTS_DB 或 <dataRoot>/core.sqlite。 */
   dbPath?: string
+  /**
+   * 记忆库路径。显式参数优先于 `PRTS_MEMORY_DB` 环境变量——测试里改环境变量
+   * 会污染同进程并行跑的其它用例（`node --test` 共享 process.env），
+   * 曾导致一次不可重现的失败。
+   */
+  memoryDbPath?: string
 }
 
 /**
@@ -161,7 +167,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   let memory: MemoryStore | undefined
   try {
     mkdirSync(o.dataRoot, { recursive: true })
-    memory = MemoryStore.open(process.env.PRTS_MEMORY_DB ?? join(o.dataRoot, 'memory.sqlite'))
+    memory = MemoryStore.open(o.memoryDbPath ?? process.env.PRTS_MEMORY_DB ?? join(o.dataRoot, 'memory.sqlite'))
   } catch (error) {
     console.error(`[prts] memory store unavailable: ${error instanceof Error ? error.message : String(error)}`)
   }
