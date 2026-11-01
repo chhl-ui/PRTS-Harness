@@ -13,8 +13,9 @@ import type { DatabaseSync } from 'node:sqlite'
 import { appendChained, sha256hex, verifyChainRows, type ChainVerifyResult } from '../chain/index.ts'
 import { applyMemoryEvent } from './fold.ts'
 import { openMemoryDb } from './schema.ts'
+import { parseTime } from './time.ts'
 import type {
-  ActorKind, AssertFactInput, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath,
+  ActorKind, AssertFactInput, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput,
 } from './types.ts'
 
 const SCOPE = 'prts'
@@ -189,6 +190,53 @@ export class MemoryStore {
     }
   }
 
+  /**
+   * 记录一条对话回合。
+   *
+   * 正文外置到 `mem_bodies`；事件的 `occurred_raw` 保留原始时间串，
+   * `occurred_at_ms` 由 `parseTime` 解析——**解析失败也不丢原始串**（设计稿 §6.3）。
+   */
+  recordTurn(input: RecordTurnInput): string {
+    const now = Date.now()
+    const turnId = `turn-${randomUUID()}`
+    const bodyRef = `body-${randomUUID()}`
+    const bodySha = sha256hex(input.text)
+    const occurredRaw = input.occurredRaw ?? null
+    const occurredAtMs = occurredRaw === null ? null : parseTime(occurredRaw)
+
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(
+        `INSERT INTO mem_bodies (body_ref, sha256, body, byte_length, written_at_ms)
+         VALUES (?,?,?,?,?)`,
+      ).run(bodyRef, bodySha, input.text, Buffer.byteLength(input.text, 'utf8'), now)
+
+      this.appendEvent({
+        kind: 'turn.recorded',
+        actor: input.actor,
+        recordedAtMs: now,
+        occurredAtMs,
+        occurredRaw,
+        payload: {
+          turn_id: turnId,
+          session_id: input.sessionId,
+          turn_index: input.turnIndex,
+          external_id: input.externalId ?? null,
+          speaker: input.speaker,
+          body_ref: bodyRef,
+          body_sha256: bodySha,
+          origin: input.origin ?? 'live',
+          is_evidence: input.isEvidence ?? false,
+        },
+      })
+      this.db.exec('COMMIT')
+      return turnId
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
   search(q: MemoryQuery): MemoryHit[] {
     const nowMs = q.nowMs ?? Date.now()
     const origins = q.includeOrigin ?? ['live']
@@ -220,18 +268,51 @@ export class MemoryStore {
     }>
 
     const recallPath: RecallPath = 'like'
-    return rows
-      .map((r) => ({
-        kind: 'fact' as const,
-        id: r.fact_id,
-        score: recency(r.recorded_at_ms, nowMs) * (0.5 + r.importance),
-        provenance: r.provenance,
-        origin: r.origin,
-        text: r.body ?? '',
-        recallPath,
-      }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
+    const factHits: MemoryHit[] = rows.map((r) => ({
+      kind: 'fact' as const,
+      id: r.fact_id,
+      score: recency(r.recorded_at_ms, nowMs) * (0.5 + r.importance),
+      provenance: r.provenance,
+      origin: r.origin,
+      text: r.body ?? '',
+      recallPath,
+    }))
+
+    // turn 与 fact 走同一套 LIKE 召回；turn 没有 importance 列，
+    // 排序只用时间（有 occurred_at_ms 就用它，没有就退化为固定值）。
+    const turnRows = this.db.prepare(
+      `SELECT t.turn_id, t.session_id, t.turn_index, t.external_id, t.origin,
+              t.occurred_at_ms, b.body
+         FROM mem_turns t
+         LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref
+        WHERE t.scope = ?
+          AND t.deleted_at_ms IS NULL
+          AND t.origin IN (${originSlots})
+          AND b.body LIKE ? ESCAPE '\\'
+        LIMIT ?`,
+    ).all(scope, ...origins, pattern, limit * 4) as unknown as Array<{
+      turn_id: string
+      session_id: string
+      turn_index: number
+      external_id: string | null
+      origin: Origin
+      occurred_at_ms: number | null
+      body: string | null
+    }>
+
+    const turnHits: MemoryHit[] = turnRows.map((r) => ({
+      kind: 'turn' as const,
+      id: r.turn_id,
+      score: r.occurred_at_ms === null ? 0.5 : recency(r.occurred_at_ms, nowMs),
+      origin: r.origin,
+      sessionId: r.session_id,
+      turnIndex: r.turn_index,
+      ...(r.external_id === null ? {} : { externalId: r.external_id }),
+      text: r.body ?? '',
+      recallPath,
+    }))
+
+    return [...factHits, ...turnHits].sort((a, b) => b.score - a.score).slice(0, limit)
   }
 
   /**

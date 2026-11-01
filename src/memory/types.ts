@@ -31,6 +31,21 @@ export interface AssertFactInput {
   retentionClass?: RetentionClass
 }
 
+export interface RecordTurnInput {
+  actor: ActorKind
+  sessionId: string
+  turnIndex: number
+  /** 外部 id，如 LoCoMo 的 `dia_id`（`D1:1`）。 */
+  externalId?: string
+  speaker: string
+  text: string
+  /** 原始时间串，如 `"1:56 pm on 8 May, 2023"`。解析失败也保留。 */
+  occurredRaw?: string
+  origin?: Origin
+  /** LongMemEval 的 `has_answer`。 */
+  isEvidence?: boolean
+}
+
 export interface MemoryQuery {
   text: string
   limit?: number

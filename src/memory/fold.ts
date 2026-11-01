@@ -46,6 +46,30 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       )
       break
     }
+    case 'turn.recorded': {
+      const p = JSON.parse(e.payload_json) as {
+        turn_id: string
+        session_id: string
+        turn_index: number
+        external_id: string | null
+        speaker: string
+        body_ref: string
+        origin: 'live' | 'benchmark'
+        is_evidence: boolean
+      }
+      // 正文由 store 在事件前写入 mem_bodies；投影这里只写 mem_turns。
+      db.prepare(
+        `INSERT INTO mem_turns (
+           turn_id, scope, session_id, turn_index, external_id, speaker, body_ref,
+           occurred_at_ms, occurred_raw, origin, is_evidence
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(turn_id) DO NOTHING`,
+      ).run(
+        p.turn_id, e.scope, p.session_id, p.turn_index, p.external_id, p.speaker, p.body_ref,
+        e.occurred_at_ms, e.occurred_raw, p.origin, p.is_evidence ? 1 : 0,
+      )
+      break
+    }
     case 'memory.deleted': {
       const p = JSON.parse(e.payload_json) as {
         deletion_id: string
