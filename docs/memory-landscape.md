@@ -66,6 +66,28 @@
 
 **可以借的四条**：写时结构化 + 后台巩固的两段式；observation 的 `proof_count`/`source_memory_ids` 溯源；图作为行上的边而非独立库；检索的四路召回融合。
 
+**补记（2026-11-01）：本文当初漏记了它的基准成绩，这是对账的方法论缺口。**
+
+八格存储、五项过程、状态机、删除纪律都核对了，却**没有记它跑出多少分**——而分数才是判断「这个架构值不值得借鉴」最直接的证据。补上（来源为本机参考库存档 `hindsight/hindsight-docs/blog/`，可直接核对）：
+
+| 基准 | hindsight 成绩 | 出处 |
+|---|---|---|
+| LongMemEval | **94.6%**（早期发布 91.4%） | `2026-04-21-hindsight-10k-stars.md:50,134,152`；`2026-03-23-agent-memory-benchmark.mdx:98` |
+| LoComo | 92.0% | 同 `:97` |
+| LifeBench | 71.5% | 同 `:99` |
+| PersonaMem | 86.6% | 同 `:100` |
+
+同页对照：SuperMemory 81.6%、Zep 63.8%、Mem0 49.0%（`2026-04-21:136`）。
+**均为厂商自报；评测已迁至独立仓库 AMB 统一计分，PRTS 未复现，引用须标"自报"。**
+
+**它还顺带否定了我们选基准的方式**（`2026-03-23-agent-memory-benchmark.mdx:40-42`）：
+
+> 现代模型有百万 token 上下文窗口。在多数 LoComo 与 LongMemEval 实例上，naive 的「全都塞进上下文」打得有来有回——不是因为它是好的记忆架构，而是因为检索已经变成简单的那部分。**这些原本用来压检索的基准，现在主要在测你的 LLM 会不会读。**
+
+PRTS 自己的数据正面印证：同一批 500 题，整段 haystack 全给 reader = **0.5640**，top-8 检索 = **0.3760**（`design-memory-v1.md` §9.3）。全给比检索高 18.8pp。
+
+**后果**：拿 LongMemEval / LoCoMo 当 V1-17 的唯一基线，可能只能测出 reader 能力，测不出记忆架构差异。这是开放问题，不能当噪音忽略。后续若要跨系统对标，应先看 AMB 的评测协议（记录见参考库 `AMB-agent-memory-benchmark/`），它是目前唯一统一持有数据集 / prompts / answer model / judge 的框架。
+
 ### mempalace（MIT）——借鉴设计
 
 **它的价值在分层索引与删除纪律，不在语义提炼。** wings（人/项目）→ rooms（每 wing 最多 12 个主题）→ drawers（原文块）→ closets（`topic|entities|→drawer_ids` 指针行）这套分层是 §5.3「主题目录 + 情景记忆」的一种落地形态；删除时连带清索引层与版本记录，正对 §5.3「删除要覆盖检索索引与派生摘要」。

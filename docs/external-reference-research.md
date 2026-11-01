@@ -47,12 +47,12 @@ GitHub 三条路分工不同：
 - 归档目录只读，不在里面改代码、不把归档目录当依赖 import
 - 新增前先看已有条目，避免重复下载
 
-已有条目（截至 2026-11-01，11 个）：
+已有条目（截至 2026-11-01，13 个；`MRAgent` 与 `AMB-agent-memory-benchmark` 为当日新增）：
 
 | 类别 | 目录 |
 |---|---|
 | agent 运行时与框架 | `Tianshu-harness` `agent-code` `deer-flow` `ruflo` `dsh-superagent-prototype` |
-| 记忆与检索 | `hindsight` `mempalace` `codebase-memory-mcp` |
+| 记忆与检索 | `hindsight` `mempalace` `codebase-memory-mcp` **`MRAgent`**（论文，arXiv:2606.06036v1，ICML 2026）**`AMB-agent-memory-benchmark`**（评测框架；**license=None**，仅记录来源、未克隆代码） |
 | 其他 | `ECC` `hallmark` `Understand-Anything` |
 
 记忆与检索那一组已做过代码级对账（2026-11-01，对照架构需求 §5.3 的十三项），
