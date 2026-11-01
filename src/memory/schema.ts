@@ -187,6 +187,10 @@ CREATE TABLE IF NOT EXISTS mem_consolidation (
   scope              TEXT PRIMARY KEY,
   cursor_turn_rowid  INTEGER NOT NULL DEFAULT 0,
   cursor_event_seq   INTEGER NOT NULL DEFAULT 0,
+  -- 事实抽取（模型层）的水位线，与规则巩固的水位线分开：
+  -- 两者消费同一批 turn 但产出不同东西，共用游标会让「跑过规则巩固」变成
+  -- 「事实抽取也跳过了」——静默漏抽。
+  fact_cursor_turn_rowid INTEGER NOT NULL DEFAULT 0,
   updated_at_ms      INTEGER NOT NULL,
   budget_spent       INTEGER NOT NULL DEFAULT 0
 );
@@ -243,6 +247,7 @@ export function openMemoryDb(path: string): DatabaseSync {
   db.exec(SCHEMA)
   ensureFactIdentityColumn(db)
   ensureFactAccessColumns(db)
+  ensureConsolidationFactCursor(db)
   ensureDerivedOriginColumns(db)
   ensureFtsIndexed(db)
   ensureSessionsBuilt(db)
@@ -292,6 +297,20 @@ function ensureFactAccessColumns(db: DatabaseSync): void {
     db.exec('ALTER TABLE mem_facts ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0')
   }
   if (!cols.includes('last_access_ms')) db.exec('ALTER TABLE mem_facts ADD COLUMN last_access_ms INTEGER')
+}
+
+/**
+ * 事实抽取水位线的自愈迁移。
+ *
+ * 旧库的 `mem_consolidation` 是规则巩固建的，没有这一列。默认 0 表示「一条都没抽过」，
+ * 迁移本身不会让既有 turn 被跳过——这是刻意的：漏抽只能由人显式决定。
+ */
+function ensureConsolidationFactCursor(db: DatabaseSync): void {
+  const cols = (db.prepare('PRAGMA table_info(mem_consolidation)').all() as Array<{ name: string }>)
+    .map((c) => c.name)
+  if (!cols.includes('fact_cursor_turn_rowid')) {
+    db.exec('ALTER TABLE mem_consolidation ADD COLUMN fact_cursor_turn_rowid INTEGER NOT NULL DEFAULT 0')
+  }
 }
 
 /**

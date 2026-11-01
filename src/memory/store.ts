@@ -15,6 +15,8 @@ import { applyMemoryEvent } from './fold.ts'
 import { cosineSimilarity, decodeVector, encodeVector, type Embedder } from './embedding.ts'
 import { extractEntities } from './extract.ts'
 import { writeProfile, writeSummary } from './write.ts'
+import { extractFacts, type FactPromptTurn } from './consolidate-facts.ts'
+import type { TextGenerator } from './generate.ts'
 import {
   readConsolidationCursor, runConsolidation, consolidationStats as readConsolidationStats,
   type ConsolidateOptions, type ConsolidateResult,
@@ -472,6 +474,117 @@ export class MemoryStore {
       }
     }
     return { live, retired, deleted, permanentLive, liveByClass, nearestCandidate }
+  }
+
+  /**
+   * 模型层事实抽取（Wave 3 的 fact 部分）。
+   *
+   * 存在的理由：`assertFact` 此前零生产调用方，`mem_facts` 长期为 0，导致生命周期、
+   * 用进废退、检索的 fact 通道全部空转。这里把它接上真实 turn。
+   *
+   * 三条纪律：
+   * - **只抽 `live`**：benchmark 对话不进生产事实库。
+   * - **幂等靠去重不靠水位线**：同一句重复抽取写入同一 identity_key，不会产生第二条；
+   *   水位线只为省成本，中途失败重跑是安全的。
+   * - **水位线按批推进**：一批写完才前进，模型报错时该批不会被跳过。
+   *
+   * `stop === 'budget'` 表示还有未处理的 turn，再调一次即可。
+   */
+  async consolidateFacts(opts: {
+    generator: TextGenerator
+    /** 本次最多处理多少条 turn，默认 200。 */
+    limit?: number
+    /** 每批多少条 turn 一次 prompt，默认 20。 */
+    batchSize?: number
+    actor?: ActorKind
+    signal?: AbortSignal
+  }): Promise<{
+    turns: number
+    extracted: number
+    added: number
+    skipped: number
+    cursor: number
+    stop: 'done' | 'budget' | 'cancelled'
+  }> {
+    const limit = Math.max(1, opts.limit ?? 200)
+    const batchSize = Math.max(1, opts.batchSize ?? 20)
+    const actor = opts.actor ?? 'system'
+    let cursor = this.factCursor()
+    const before = this.countFacts()
+    const rows = this.db.prepare(
+      `SELECT t.rowid AS rid, t.turn_id AS tid, t.speaker AS speaker, b.body AS body
+         FROM mem_turns t JOIN mem_bodies b ON b.body_ref = t.body_ref
+        WHERE t.rowid > ? AND t.deleted_at_ms IS NULL AND t.origin = 'live'
+          AND b.body IS NOT NULL AND b.body <> ''
+        ORDER BY t.rowid ASC LIMIT ?`,
+    ).all(cursor, limit) as Array<{ rid: number; tid: string; speaker: string; body: string }>
+
+    let turns = 0
+    let extracted = 0
+    let skipped = 0
+    // 取满 limit 说明后面大概率还有，不要谎报 done
+    let stop: 'done' | 'budget' | 'cancelled' = rows.length < limit ? 'done' : 'budget'
+
+    for (let i = 0; i < rows.length; i += batchSize) {
+      if (opts.signal?.aborted === true) {
+        stop = 'cancelled'
+        break
+      }
+      const batch = rows.slice(i, i + batchSize)
+      const promptTurns: FactPromptTurn[] = batch.map((r, k) => ({
+        index: k,
+        speaker: r.speaker,
+        text: r.body,
+      }))
+      const parsed = await extractFacts(opts.generator, promptTurns)
+      skipped += parsed.skipped
+      extracted += parsed.facts.length
+      for (const f of parsed.facts) {
+        const srcTurn = f.sourceIndex === null ? undefined : batch[f.sourceIndex]
+        this.assertFact({
+          actor,
+          subject: f.subject,
+          predicate: f.predicate,
+          object: f.object,
+          // 模型抽的不是主人明说的：库里的 CHECK 白名单禁止 stated + model-inferred
+          provenance: 'inferred',
+          confirmationBasis: 'model-inferred',
+          origin: 'live',
+          ...(srcTurn === undefined ? {} : { sourceTurnIds: [srcTurn.tid] }),
+        })
+      }
+      turns += batch.length
+      const last = batch[batch.length - 1]
+      if (last !== undefined) {
+        cursor = last.rid
+        this.setFactCursor(cursor)
+      }
+    }
+
+    return { turns, extracted, added: this.countFacts() - before, skipped, cursor, stop }
+  }
+
+  /** 当前库里的 fact 条数（含已删除）。 */
+  countFacts(): number {
+    return (this.db.prepare('SELECT count(*) c FROM mem_facts WHERE scope = ?').get(SCOPE) as { c: number }).c
+  }
+
+  private factCursor(): number {
+    const row = this.db.prepare(
+      'SELECT fact_cursor_turn_rowid AS c FROM mem_consolidation WHERE scope = ?',
+    ).get(SCOPE) as { c: number } | undefined
+    return row?.c ?? 0
+  }
+
+  private setFactCursor(rowid: number): void {
+    this.db.prepare(
+      `INSERT INTO mem_consolidation
+         (scope, cursor_turn_rowid, cursor_event_seq, updated_at_ms, budget_spent, fact_cursor_turn_rowid)
+       VALUES (?,?,?,?,?,?)
+       ON CONFLICT(scope) DO UPDATE SET
+         fact_cursor_turn_rowid = excluded.fact_cursor_turn_rowid,
+         updated_at_ms = excluded.updated_at_ms`,
+    ).run(SCOPE, 0, 0, Date.now(), 0, rowid)
   }
 
   /**

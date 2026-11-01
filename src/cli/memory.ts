@@ -16,12 +16,14 @@
  */
 import { join } from 'node:path'
 import { MemoryStore } from '../memory/index.ts'
+import { OllamaGenerator } from '../memory/generate.ts'
 
 const USAGE = `usage:
   prts memory stats      [--db <path>]
   prts memory consolidate [--db <path>]
   prts memory retire     [--db <path>] [--limit N] [--floor F] [--min-age-days D] [--apply]
-  prts memory restore <factId...> [--db <path>]`
+  prts memory restore <factId...> [--db <path>]
+  prts memory extract-facts [--db <path>] [--limit N] [--batch N] [--model M] [--ollama URL] --apply`
 
 /** 与 `prts.ts` 同构的最小参数解析：带值 flag 取下一个元素，不做 `--k=v` 形式。 */
 function arg(args: string[], name: string): string | undefined {
@@ -130,8 +132,56 @@ function restore(store: MemoryStore, args: string[]): number {
 }
 
 /**
+ * 模型层事实抽取：把 live turn 抽成 mem_facts。
+ *
+ * 单独导出而不是塞进 `memoryCommand`：它要调模型（异步），而其余子命令是同步的。
+ * 为了让同步入口保持同步（既有的 6 个 CLI 测试因此不用改成 async），在 `prts.ts`
+ * 的顶层按子命令名分流到本函数。
+ *
+ * 默认**不调用模型**：只报「将要处理多少条」。抽一条 turn 就要一次推理，
+ * 让人在知道规模之后再显式加 `--apply`，比默认开跑更省事。
+ */
+export async function memoryExtractFacts(args: string[]): Promise<number> {
+  const dbPath = resolveDbPath(args)
+  if (dbPath === undefined) {
+    console.error('prts memory: 无法确定记忆库路径——传 --db，或设置 PRTS_MEMORY_DB / PRTS_DATA_ROOT')
+    return 2
+  }
+  const apply = args.includes('--apply')
+  const limit = numArg(args, '--limit') ?? 200
+  const batchSize = numArg(args, '--batch') ?? 20
+  const model = arg(args, '--model')
+  const baseUrl = arg(args, '--ollama')
+
+  let store: MemoryStore | undefined
+  try {
+    store = MemoryStore.open(dbPath)
+    if (!apply) {
+      console.log(`将处理最多 ${limit} 条 live turn（每批 ${batchSize} 条一次推理），模型 ${model ?? 'q38-gsq-iq3s'}`)
+      console.log('加 --apply 才会真正调用模型并写库。本地 Ollama 零 API 成本，但每条 turn 都要推理时间。')
+      return 0
+    }
+    const generator = new OllamaGenerator({
+      ...(model === undefined ? {} : { model }),
+      ...(baseUrl === undefined ? {} : { baseUrl }),
+    })
+    const result = await store.consolidateFacts({ generator, limit, batchSize })
+    console.log(JSON.stringify(result))
+    return 0
+  } catch (e) {
+    console.error(`prts memory extract-facts 失败: ${e instanceof Error ? e.message : String(e)}`)
+    return 1
+  } finally {
+    store?.close()
+  }
+}
+
+/**
  * 子命令入口。返回退出码而不调用 `process.exit`——测试要能直接调它，
  * 退出码由 `prts.ts` 的顶层统一处理（与 `upgrade` 同构）。
+ *
+ * `extract-facts` 不在这个 switch 里：它要调模型（异步），由 `memoryExtractFacts`
+ * 承担，`prts.ts` 按子命令名分流。
  */
 export function memoryCommand(args: string[]): number {
   const sub = args[0]

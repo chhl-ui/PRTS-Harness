@@ -10,7 +10,7 @@ import { IntegrityError } from '../integrity/errors.ts'
 import { initCoreDb } from '../core/init.ts'
 import { startupCheck } from '../core/startup-check.ts'
 import { AuditLog } from '../audit/index.ts'
-import { memoryCommand } from './memory.ts'
+import { memoryCommand, memoryExtractFacts } from './memory.ts'
 
 function arg(args: string[], name: string): string | undefined {
   const i = args.indexOf(name)
@@ -112,7 +112,13 @@ try {
   // 不用嵌套三元——两个以上分支时链式 if 更不容易读错。
   let code: number
   if (args[0] === 'upgrade') code = upgrade(args.slice(1))
-  else if (args[0] === 'memory') code = memoryCommand(args.slice(1))
+  else if (args[0] === 'memory') {
+    // `extract-facts` 要调模型（异步），与其余同步子命令分开走；
+    // 两条路径都返回退出码，process.exit 仍只在本函数末尾调用一次。
+    code = args[1] === 'extract-facts'
+      ? await memoryExtractFacts(args.slice(1))
+      : memoryCommand(args.slice(1))
+  }
   else {
     console.error('usage: prts upgrade ... | prts memory <stats|consolidate|retire|restore> ...')
     code = 2
