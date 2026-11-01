@@ -36,6 +36,21 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 - **第二道闸在库层**：`MODEL_OPS`（`ledger.ts:121`）是 model actor 的白名单，`perm()`（`ledger.ts:304`）对 model 只放名单内的 op、其余抛 `FORBIDDEN`，对 `system` 一律 `FORBIDDEN`（system 只能走固定 actor 路径），owner 全放。名单外的方法即使日后被工具包起来，model 调用也会被库拒。
 - **已知缺口：「模型永不绑定」只在工具面成立**：`MODEL_OPS` 里仍有 `bindSession`（`ledger.ts:123`）——工具面没暴露它，但库层允许 model actor 绑定，任何新工具或内部调用走到那里就会静默失去这条不变量。收紧方案是从白名单删掉并补库层负向断言（工具面已有负向①断言工具名不含 bind 语义，那验的是工具面，不是库层）。**本轮未做，记为遗留。**
 
+### AppContainer 沙箱（U3 读隔离层，`src/sandbox/`）
+
+- **它解决什么**：模型 shell 能读 `<数据根>/secrets/deepseek.key`。四条传统路径与「专用账号 + CreateProcessAsUser」都已实测证伪（`docs/u3-key-read-isolation.md`），AppContainer 是唯一在**未提权**上下文中可用的读隔离机制。
+- **与 K2b 的分工**：`dsh-sandbox-windows-acl` 管**写**（WRITE_RESTRICTED token，restricting SID 只参与写检查）；`src/sandbox/appcontainer.ts` 是**读**侧的另一条通道。两者不是替代关系，不要拿一个去解释另一个的行为。
+- **依赖 koffi**（`^3.3.6`）。它是原生模块，install 时有预编译下载脚本——**新机器上 `npm ci` 若被 `allow-scripts` 拦下，koffi 的二进制不会就位，`require('koffi')` 会失败**。这是部署约束，不是代码缺陷。
+- **实现要点（踩过的坑，别重踩）**：
+  - `DWORD_PTR`（UpdateProcThreadAttribute 的 attr 参数）是 64 位，传 Number 会被 koffi 拒，必须 `BigInt`；`lpReturnSize` 可传 `NULL`。
+  - `CreateProcessW` 的 `lpCommandLine` 必须可写缓冲区（UTF-16LE `Buffer`），传 `string` 会落到只读内存。
+  - 模块加载时自检 `STARTUPINFOEX=112 / STARTUPINFO=104 / SECURITY_CAPABILITIES=24`，对不上直接抛。`cb` 错了会得到 `87 (ERROR_INVALID_PARAMETER)`，**87 是参数错误不是权限错误**——权限类是 `5` / `740`。
+  - 任何 Win32 失败都抛，不降级成不受限运行。
+- **第一版边界（写死的，不要当成 bug 去"修"）**：
+  - **不捕获 stdio**：子进程输出继承调用方终端，程序拿不到。要拿得用 `CreatePipe` + 异步读。
+  - 授权走 `icacls` 子进程而非手写 `SetNamedSecurityInfo`（后者有「pSacl 要 ACL 指针而不是整个 SD」的坑）。
+  - **尚未接线到运行时**：`createAppContainer` 目前是独立可用的库，PRTS 的 shell 工具还没有走它。接线需要决定「哪些命令进容器、stdio 怎么回传」，是下一步。
+
 ### 所有者通道（P2）：管道、双通道输出、断开语义、E10
 
 - **端点**：随机管道名 `\\.\pipe\prts-term-<32 hex>`，服务端**先 listen 成功**再把名字**原子**发布到 `<数据根>/terminal.endpoint`（写 `.tmp` → rename）；退出顺序相反。反过来会有「文件已存在但还没人听」的窗口，固定名实现里更会变成抢注窗口。随机名只消除发布瞬间的抢注，**不是安全边界**——endpoint 在数据根下，而沙箱可读数据根（H3 实测），读到名字就能连。
