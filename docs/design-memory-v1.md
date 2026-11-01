@@ -234,6 +234,7 @@ CREATE TABLE mem_bodies (
 -- 投影：turn 级原文（基准的输入形状）
 CREATE TABLE mem_turns (
   turn_id        TEXT PRIMARY KEY,
+  scope          TEXT NOT NULL DEFAULT 'prts',    -- 作用域；第一版恒为 'prts'（见 §八 第 13 条守卫）
   session_id     TEXT NOT NULL,
   turn_index     INTEGER NOT NULL,
   external_id    TEXT,            -- LoCoMo 的 dia_id
@@ -251,6 +252,7 @@ CREATE INDEX idx_turns_origin  ON mem_turns(origin, deleted_at_ms);
 -- 投影：语义事实
 CREATE TABLE mem_facts (
   fact_id        TEXT PRIMARY KEY,
+  scope          TEXT NOT NULL DEFAULT 'prts',
   subject        TEXT NOT NULL,
   predicate      TEXT NOT NULL,
   body_ref       TEXT,            -- object 也外置
@@ -273,6 +275,7 @@ CREATE TABLE mem_facts (
 -- 投影：最小摘要层（V1-06「摘要中也不再出现」的验收载体）
 CREATE TABLE mem_summaries (
   summary_id     TEXT PRIMARY KEY,
+  scope          TEXT NOT NULL DEFAULT 'prts',
   subject_kind   TEXT NOT NULL,   -- 'session' | 'topic'
   subject_id     TEXT NOT NULL,
   body_ref       TEXT,            -- 大意也外置
@@ -292,8 +295,11 @@ CREATE TABLE mem_topics (
 -- 投影：删除记录（照抄 audit_deletions 的形态，不用 v1 的 cascade_json 数组）
 CREATE TABLE mem_deletions (
   deletion_id    TEXT PRIMARY KEY,
+  scope          TEXT NOT NULL DEFAULT 'prts',
   target_json    TEXT NOT NULL,   -- {kind, id}
   derivatives_json TEXT NOT NULL, -- 待清派生项清单
+  state          TEXT NOT NULL,          -- requested | purged-in-tx | external-pending | completed
+  completed_scope TEXT,                  -- 'local-only'；有 external-pending 时必填
   completed      INTEGER NOT NULL DEFAULT 0,
   requested_at   INTEGER NOT NULL,
   completed_at   INTEGER
@@ -301,6 +307,16 @@ CREATE TABLE mem_deletions (
 ```
 
 **为什么 `mem_deletions` 照抄 `audit_deletions`**：仓内已有这条路径（`src/audit/audit.ts` 建表 + `src/audit/fold.ts` 的 `deletion.derivative-done` 分支）。v1 写成 `cascade_json` 数组是自己的退化发明，四席一致指出，改。
+
+**`provenance` 与 `confirmation_basis` 必须有组合约束**（2026-11-01 议事会指出）：两列不是重复，是两条不同关系——前者是**谁说的**，后者是**谁确认的**。但允许任意组合属 fail-open，SQL 层要加 CHECK：
+
+```sql
+CHECK (provenance IN ('stated','inferred')),
+CHECK (confirmation_basis IN ('owner-stated','model-inferred','verifier')),
+CHECK (NOT (provenance = 'stated' AND confirmation_basis = 'model-inferred'))
+```
+
+第三条是关键：**不能声称「博士明说」却由模型推断确认**。而 `(inferred, verifier)` 合法且必要——「我推断的，但校验器验过」正是元记忆最该有的一格，合并两列会把它丢掉（§八 第 14 条）。
 
 ### 6.3 时间：双时间 + 自由文本
 
@@ -332,6 +348,7 @@ export interface MemoryQuery {
   limit?: number
   nowMs?: number
   includeOrigin?: ('live' | 'benchmark')[]   // 默认 ['live']
+  scope?: string                             // 第一版恒为 'prts'；缺省即 'prts'（见 §八 第 13 条守卫）
 }
 export interface MemoryHit {
   kind: 'turn' | 'fact' | 'summary'
@@ -360,7 +377,13 @@ export interface MemoryHit {
 
 **因此 `MemoryStore` 是接口而非具体实现**——后端可替换是设计的一部分，不是将来再说的优化。FTS5 作为可选后端保留，但**启用后基线必须重测、不能与 LIKE 基线混比**。
 
-排序：`score = 时近衰减 × (0.5 + importance)`。权重是**可配置常数，初始不预设为"正确"**（§11 第 10 条：权重待基准与真实使用数据标定）。
+**排序（v2.3 更正）**：§6.1 的图画的是「相关 × 时近 × 重要性」，而本节此前的公式只有 `score = 时近衰减 × (0.5 + importance)`——**两处不一致，且公式里没有相关性项**。原因是真的：`LIKE` 是布尔匹配，不产生相关度分。
+
+三处统一为：**`LIKE` 路径下相关度退化为「是否命中」，排序只用 `时近衰减 × (0.5 + importance)`**；§6.1 的图相应改为「命中过滤 × 时近 × 重要性」。这是已知退化，不是疏忽——换 FTS 后端后相关度分才存在，届时排序公式要重定、基线要重测。
+
+**LIKE 必须转义通配符**：查询含 `%` 或 `_` 时语义会被改写（一条含 `%` 的提问会命中全表）。实现固定用 `LIKE '%' || ? || '%' ESCAPE '\'`，入参侧对 `\`、`%`、`_` 三个字符转义。**M8/M9 当前测不到这一点，要补一条含 `%` 的查询用例。**
+
+权重是**可配置常数，初始不预设为「正确」**（§11 第 10 条：待基准与真实使用数据标定）。
 
 **检索接口必须能返回 turn 级定位与 `recallPath`**——前者是 §4.3 的硬要求，后者是 V1-15 能判定的前提。
 
@@ -374,16 +397,24 @@ V1-06 要求「删除 3 条，经核实全部生效，索引与摘要中也不�
 
 所以删除不是「置一个时间戳」，而是一条带状态与核验范围的流程。§9 给出六态：`REQUESTED` → `NEW_USE_BLOCKED` → `LOCAL_PURGING` → `LOCAL_PURGED` → `EXTERNAL_PENDING` → `COMPLETED_WITHIN_DECLARED_SCOPE`。
 
-第一版按范围裁剪（无外部副本，故 `EXTERNAL_PENDING` 不进入第一版）：
+**前提更正（2026-11-01 议事会复评）**：v2.2 此前写「第一版无外部副本」，**这是错的**。实测 `src\cli\chat.ts:394` 为 `model: 'deepseek-chat'`，运行时经 `@deepseek-ai/dsh-llm` + `dsh-llm-deepseek-api-key` 调 DeepSeek API——**每次对话的 live 记忆正文都已经出境**。模型 API 就是外部副本，审计上不能假装它不存在。
 
-| 态 | 第一版的动作 |
-|---|---|
-| `REQUESTED` | 追加 `memory.deleted` 事件，写 `mem_deletions`（`completed=0`） |
-| `NEW_USE_BLOCKED` | 撤销版本 +1；检索与导入立即排除该目标 |
-| `LOCAL_PURGING` | 清 `mem_bodies.body`；级联摘要与主题目录 |
-| `LOCAL_PURGED` | 追加 `deletion.derivative-done`（照 `src/audit/fold.ts` 的 `derivative-done` 分支形态） |
-| `COMPLETED_WITHIN_DECLARED_SCOPE` | `completed=1`、`completed_at` 落时间；**清除范围写进回执** |
-| `EXTERNAL_PENDING` | 第一版无外部副本，**不实现**，文档标注该态未覆盖 |
+能裁掉 `EXTERNAL_PENDING` 的合法前提**不是「无副本」，而是「删除流程对 live 数据的清除范围声明为 local-only」**。这条要升为不变量（§八 第 12 条），不能只留在表格的一行理由里。
+
+**六态在 D 方案下的落地**：D 是单库单事务，`LOCAL_PURGING` 与 `LOCAL_PURGED` 之间**没有可观测的中间状态**——这正是 D 相对 D' 的真实收益（原子性），v2.2 没收这笔账。所以六态裁成**三态承载 + 三态日志语义**：
+
+| `DESIGN.md` §9 六态 | 第一版承载 | 动作 |
+|---|---|---|
+| `REQUESTED` | `state='requested'` | 追加 `memory.deleted` 事件，写 `mem_deletions` |
+| `NEW_USE_BLOCKED` | 与 `REQUESTED` 同一事务 | 撤销版本 +1；检索与导入立即排除该目标 |
+| `LOCAL_PURGING` | 同一事务内，**不可观测** | 清 `mem_bodies.body`；级联摘要与主题目录 |
+| `LOCAL_PURGED` | `state='purged-in-tx'` | 追加 `deletion.derivative-done` |
+| `EXTERNAL_PENDING` | `state='external-pending'` | **保留**。live 正文经模型 API 出境，外部删不掉——如实记入回执 |
+| `COMPLETED_WITHIN_DECLARED_SCOPE` | `state='completed'` | `completed=1`；**`completed_scope` 写 `local-only`** |
+
+**为什么不能只用二值 `completed`**：v2.2 的 `mem_deletions` 只有 `completed INTEGER`，中间态没有承载列，崩溃后判定不出停在 `LOCAL_PURGING` 还是 `LOCAL_PURGED`。补 `state TEXT`。
+
+**`completed` 由谁置**：照 `src\audit\audit.ts` 的 `afterWrite` 形态——derivatives 全部 done 且 `!completed` 时**自动收敛**，不是手工置位。§9 要求「失败可幂等接续」，手工置位做不到。
 
 三条直接抄 §9 的硬规定：
 
@@ -429,6 +460,11 @@ V1-06 要求「删除 3 条，经核实全部生效，索引与摘要中也不�
 ### 7.2 诚实边界
 
 - **`mem_bodies` 是 SQLite 表，不是文件系统**。置 NULL 后正文落在自由页，`VACUUM` 才回收，且 SSD 上有 wear leveling。**这比 C 好，但不等于「不可恢复」**。
+- **v2.2 漏了两条真正改变风险等级的开关**（2026-11-01 议事会指出，已核）：
+  - **WAL**：仓内三处 `PRAGMA journal_mode = WAL`（`src\core\init.ts:13`、`src\ledger\ledger.ts:168`、`src\audit\audit.ts:168`）。正文置 NULL 后，旧页镜像还留在 `<db>-wal` 里直到 checkpoint 截断。**而 §9.1 的 M2b/M14 看的都是主库，测不到 WAL**——要补一条「删除后 checkpoint，再检查 WAL 文件」的用例。
+  - **`secure_delete`**：全仓 `grep secure_delete` 零命中。打开它（`PRAGMA secure_delete = ON`）会让 DELETE 后的页被零填充，零成本的低档缓解。**第一版应打开，并写进 §八 不变量。**
+  - **`auto_vacuum`**：同样零命中。它与 `secure_delete` 是两件事——前者回收空间、后者擦除内容。**第一版只需 `secure_delete`；`auto_vacuum` 要重建库才能改，不做。**
+- 加上这两条后，D 的残留面从「主库自由页 + WAL」缩到「主库 + 已 checkpoint 的 WAL」。**「10 条规模用 D 足够」这句话此时才有依据**——v2.2 只写「自由页需 VACUUM」时，它其实是句没有支撑的话。
 - 若要真正不可恢复，需要把正文外置成独立文件（像 spill 那样落 `<dataRoot>` 之外），删除即删文件。**这是 D 的文件系统变体 D'，建议作为第二版**，因为第一版的数据量还没到需要它的程度。
 - **这条边界必须写给博士看**，不能写成「已实现物理删除」。
 
@@ -445,6 +481,9 @@ V1-06 要求「删除 3 条，经核实全部生效，索引与摘要中也不�
 9. **正文不得经任何绕过 `mem_bodies` 的路径返回**（事件导出、调试接口、日志）。
 10. **时间解析失败不得导致导入失败**。
 11. **readOnly 模式下所有写方法抛 `READ_ONLY`**。
+12. **live 数据的删除范围必须声明为 `local-only`**：模型 API 是外部副本（`src\cli\chat.ts:394`），`EXTERNAL_PENDING` 不可省略，`completed_scope` 必须写明。
+13. **`scope` 守卫**：实现时加测试扫描 `SELECT DISTINCT scope`，断言全库恒为 1 个值（`'prts'`）。断言失败即说明多 scope 已入表——**那时 T04/T05 必须同时补上**。「第一版无越权面」靠这条测试守住，不靠文档里的前提。
+14. **`provenance` 与 `confirmation_basis` 的组合必须在 CHECK 白名单内**：`(inferred, verifier)` 合法，`(stated, model-inferred)` 非法。**两列不合并**——合并会丢掉「推断但经校验器确认」这一格，而它正是元记忆最需要的。
 
 ## 九、验证
 
@@ -505,12 +544,28 @@ V1-06 要求「删除 3 条，经核实全部生效，索引与摘要中也不�
 
 | 用例 | 预期 | 实际 |
 |---|---|---|
-| 正确答案 | yes | YES ✓ |
-| 故意答「I do not know」 | no | no ✓ |
-| abstention 题正确识别为不可答 | yes | YES ✓ |
-| 另一道正确答案 | yes | YES ✓ |
+| 正确答案 | yes | YES |
+| 故意答「I do not know」 | no | no |
+| abstention 题正确识别为不可答 | yes | YES |
+| 另一道正确答案 | yes | YES |
 
-Accuracy 0.75（4 题 3 对），与构造时的预期一致。**这是判分器行为验证，不是基线成绩。**
+Accuracy 0.75（4 题 3 对），与构造时的预期一致。
+
+**但这组对照的区分力是零**（2026-11-01 议事会指出，核实成立）：一个**恒答 YES 的退化判分器**在这个测试上同样得 0.75。它证明的只是「判分器能对明显正确的答案说 yes、对明显错误的答案说 no」，**不证明判分器与人工判断一致**。
+
+模型评测领域的标准做法是三步（MT-Bench / Chatbot-Arena 一脉、JudgeBench 这类元评测）：先测与人工标注的**一致率**，再分别度量 position / verbosity / self-enhancement 三类**偏差**，最后对 judge 本身跑**变异反证**。PRTS 现在只做了第一步的最弱形式。
+
+**顺序也要改**：v2.2 把「人工抽样复核」放在基线之后，等于先测量后校准——届时唯一结果是基线必须重测。**校准必须前置于基线。**
+
+脚本已加 `--always-yes` 对照：对同一批题同时输出判分器分数与恒 YES 基线，**两者差值才是判分器的区分度**。基线数字必须与这个差值一起报。
+
+**再补一条更根本的局限（本轮实测发现）**：脚本打印的 `Accuracy` 实为 **YES 率**，不是准确率——公式是 `判 yes 的条数 / 总条数`，原脚本也如此。在真实模型输出上两者近似（答案对错未知，yes 率就是估计）；**但在人工构造的校准集上，YES 率 ≠ 准确率**。
+
+实测证据：4 题测试集（3 个正确答案 + 1 个故意错误）+ `--always-yes` → 报 **1.0000**，而它的真实准确率应为 **0.75**。所以「恒 YES 基线 1.0 vs 判分器 0.75」这个差值**不是区分度**，是同一个指标在两批 hyp 上的值。
+
+要做真正的区分度度量，必须**手工计算准确率**（与人工标注的真值对比），或改用「判分器判定 vs 人工标注」的一致率。**这条在基线阶段必须补，否则 V1-17 的数字报出去就是错的。**
+
+**这是判分器管道验证，不是基线成绩。**
 
 **数据落位（已定）**：`C:\prts-benchmark\<dataset>\`——**独立的根，不在 `protectedRoots` 也不在 `workspaceRoots` 内**，理由与 spill 根相同：基准数据含标准答案，模型 shell 不能读到。
 
@@ -542,7 +597,7 @@ Accuracy 0.75（4 题 3 对），与构造时的预期一致。**这是判分器
 | 7 | 关系记忆 / 技能经验 / 意图库 / 关联图 | 各自立项 |
 | 8 | Letta / Generative Agents / Graphiti 三个补拉 | `memory-landscape.md` §五 已排，本文不阻塞 |
 | 9 | `DESIGN.md` §5 的 4 列未落表 | **解法已定（2026-11-01），落码时补**：`revision`（与 K1 同构，每次事实变更递增）、`确认依据`（`owner-stated` / `model-inferred` / `verifier`）、`适用条件`（可空文本，事实成立的前提）、`保留类别`（`permanent` / `retirable` / `clearable`，对应 §9 三档） |
-| 10 | ~~`DESIGN.md` T04/T05 在 V1 表里无对应~~ **已定为「第一版不适用」** | 理由不是跳过安全：**第一版 `scope` 固定 `'prts'` 单值，不存在跨项目对象**，T04/T05 没有测试对象。到两人格隔离（§5.1）引入多 scope 时启用。**在那之前，「第一版无越权面」这句话必须与「scope 单值」这个前提一起说，不能单独说** |
+| 10 | **T04/T05 重新判定**（2026-11-01 议事会复评推翻 v2.2 结论） | v2.2 说「第一版不适用」**不成立**：§6.2 的四张投影表**都没有 `scope` 列**（实测 grep 计数全为 0），`MemoryQuery` 也没有——scope 从投影层就丢了，这是**未实现**不是不适用。已补：投影表与 `MemoryQuery` 加 `scope`，§八 第 13 条加守卫测试。**T04**（跨项目对象 ID 读取）确实无对象，等引入多 scope 时启用；**T05 的「大小写别名碰撞」与 scope 无关，必须补测**，且 `fact_id` 的构造规则本文未定义——这是缺口 |
 
 ## 十二、议事会意见与处置
 
@@ -588,4 +643,27 @@ v2 提交后，博士要求「找回 DESIGN.md」。过程与结果：
 2. **§6.6 删除流程重写**：v2 早先的 `deleted_at_ms` 单一标记被 §9 直接否定（「不能用单个 `deleted=true` 代表所有副本已删除」），改为 §9 的六态流程，第一版裁掉 `EXTERNAL_PENDING`。
 3. **§七 定位改变**：A/B/C/D 四条候选降级为复盘材料；选型依据是 §9，而 §9 与其中 D 同构。
 
-**一处仍未解决的取舍**：§9 说「删除标记仅含执行防重灌所需的最小标识和版本，不保存已删正文」，但**未规定正文外置到 SQLite 表还是文件系统**。这正是 §十一 第 2 项（D vs D'）仍未定的原因。
+**一处仍未解决的取舍**：§9 说「删除标记仅含执行防重灌所需的最小标识和版本，不保存已删正文」，但**未规定正文外置到 SQLite 表还是文件系统**。这条已在 2026-11-01 定为 D（SQLite 表），见 §十一 第 2 项。
+
+### 12.2 第二轮复评（2026-11-01，v2.2 → v2.3）
+
+四席复评 v2.2，六条待审项全部有回应。**其中两条推翻了我上一轮下的判断。**
+
+| 意见 | 来源 | 核实 | 处置 |
+|---|---|---|---|
+| 「第一版无外部副本」前提错误：模型 API 就是外部副本 | 天权 / 天府 / 瑶光 / 天璇（四席一致） | 成立：`src\cli\chat.ts:394` = `model: 'deepseek-chat'`，运行时经 `dsh-llm` + `dsh-llm-deepseek-api-key` 调 DeepSeek | **已改**：§6.6 前提更正，`EXTERNAL_PENDING` 保留，`completed_scope` 写 `local-only`；§八 第 12 条 |
+| 四张投影表全无 `scope` 列，T04/T05 不是「不适用」而是「未实现」 | 天府 | 成立：四表 grep `scope` 计数全为 0；`MemoryQuery` 也无 | **已改**：四表 + `MemoryQuery` 补 `scope`；§八 第 13 条守卫；§十一 #10 推翻重写 |
+| 排序公式无相关度项，与 §6.1 的图矛盾 | 天权 | 成立：§6.1 写「相关×时近×重要性」，§6.5 只有 `时近 × (0.5+importance)` | **已改**：三处统一为「命中过滤 × 时近 × 重要性」 |
+| LIKE 未转义 `%` / `_` | 天府 / 天璇 | 成立：文档无转义规定 | **已改**：§6.5 加 `ESCAPE` 规定，§九补用例 |
+| D 的残留面漏了 WAL 与 `secure_delete` | 天璇 | 成立：三处 `journal_mode = WAL` 实测；`secure_delete`/`auto_vacuum` 全仓零命中 | **已改**：§7.2 补两条，§八 第 15 条要求 `secure_delete = ON` |
+| `mem_deletions` 只有 `completed` 二值，中间态无承载 | 天权 | 成立 | **已改**：加 `state` 列，六态裁为三态承载；`completed` 由 `derivative-done` 自动收敛 |
+| `provenance` 与 `confirmation_basis` 无 CHECK 属 fail-open | 天府 / 天璇 | 成立 | **已改**：§6.2 加三条 CHECK；**不合并**（合并会丢 `(inferred, verifier)` 一格） |
+| 4 题对照零区分力，恒 YES 同样得 0.75 | 天璇 | 成立，**且比它说的更糟**：脚本的 `Accuracy` 是 YES 率不是准确率，`--always-yes` 实测报 1.0 | **已改**：§9.3 三段补充；脚本加 `--always-yes` 与带 tag 的输出名 |
+| 判分脚本输出名不含 sample/ref，`--sample 5` 会覆盖全量基线 | 天璇 | 成立 | **已改**：文件名改为 `<hyp>.eval-results-<model>-<sample>-<ref>` |
+| T05 的「大小写别名碰撞」与 scope 无关，`fact_id` 构造规则未定义 | 瑶光 | 成立 | **已改**：§十一 #10 单独点名 T05 必须补测 |
+
+**两处推翻**：C2（无外部副本）与 C4（T04/T05 不适用）——这两条都是我在 v2.2 里下的判断，本轮被证伪。
+
+**一处比议事会说得更严重**：判分器的 `Accuracy` 是 YES 率而非准确率，`--always-yes` 实测报 1.0 就是证据。
+
+**仍未做**：`--always-yes` 与真实判分的差值当前无意义（同一指标、两批 hyp），真正的区分度要人工标注真值后手工计算。

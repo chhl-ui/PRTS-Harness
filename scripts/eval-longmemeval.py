@@ -124,11 +124,13 @@ def main():
     ap.add_argument('--sample', type=int, default=0, help='只跑前 N 题（0 = 全部）')
     ap.add_argument('--seed', type=int, default=42, help='抽样随机种子')
     ap.add_argument('--dry-run', action='store_true', help='只打印 prompt，不调 API')
-    ap.add_argument('--out', default=None, help='结果文件，默认 <hyp>.eval-results-<model>')
+    ap.add_argument('--out', default=None, help='结果文件，默认带 sample 与 ref 标签，不会互相覆盖')
+    ap.add_argument('--always-yes', action='store_true',
+                    help='恒答 YES 的退化基线（不调 API）。与正常分数相减才是判分器的区分度')
     args = ap.parse_args()
 
     api_key = os.environ.get('DEEPSEEK_API_KEY')
-    if not api_key and not args.dry_run:
+    if not api_key and not args.dry_run and not args.always_yes:
         print('错误：需要环境变量 DEEPSEEK_API_KEY（--dry-run 不需要）', file=sys.stderr)
         return 2
 
@@ -140,7 +142,12 @@ def main():
         rng = random.Random(args.seed)
         hypotheses = rng.sample(hypotheses, min(args.sample, len(hypotheses)))
 
-    out_path = args.out or f'{args.hyp}.eval-results-{args.model}'
+    # 文件名含 sample 与 ref 标签：否则一次 --sample 5 会覆盖全量基线文件，
+    # 而基线数字必须与数据集版本绑定（见设计稿 §9.3）。
+    ref_tag = os.path.basename(args.ref).rsplit('.', 1)[0]
+    sample_tag = f'-s{args.sample}' if args.sample > 0 else '-full'
+    model_tag = 'always-yes' if args.always_yes else args.model
+    out_path = args.out or f'{args.hyp}.eval-results-{model_tag}{sample_tag}-{ref_tag}'
     logs = []
     qtype2acc = {}
 
@@ -164,8 +171,8 @@ def main():
             print()
             continue
 
-        text = call_judge(prompt, args.model, api_key)
-        label = 'yes' in text.strip().lower()
+        text = '' if args.always_yes else call_judge(prompt, args.model, api_key)
+        label = True if args.always_yes else ('yes' in text.strip().lower())
 
         entry['autoeval_label'] = {'model': args.model, 'label': label}
         logs.append(entry)
