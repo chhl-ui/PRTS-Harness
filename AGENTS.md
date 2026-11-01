@@ -1,7 +1,22 @@
 # prts-system
 
-PRTS（Primitive Rhodes Island Terminal Service）受保护核心的首个组件：K1「任务账本」。
-纯 TypeScript 库，`node:sqlite` 持久化，只追加哈希链事件 + 可重建投影。暂不接 DSH/Cordis。
+## 项目定位（先读这节，再读代码）
+
+**本仓是 PRTS 的受保护核心，不是 PRTS 的全体。**
+
+PRTS 是博士的个人综合智能工作系统：独立进程、自有数据根与界面、模型提供方可替换、核心数据可导出迁移。产品目标是两个人格（PRTS / 普瑞赛斯）加「更像人」的四个方向——**人格与情感、记忆、上下文装配、进化**——以及科研与个人日常工作两类实际工作。定义原文在仓内：
+
+- `docs/reference/PRTS-PROJECT-CHARTER-2026-10-09.md`：产品目标、C01—C12 能力、A01—A12 首版验收、七条产品行为原则。
+- `docs/reference/PRTS-ARCHITECTURE-REQUIREMENTS-2026-10-29.md`：§4 受保护核心与插件信任分级、§5 四方向、§7 V1-01—V1-18 第一版范围。
+
+本仓实现的是 §4 那一层：任务账本（K1）、审计（K4）、权限入口（K2a）、启动完整性（K5）、运行沙箱（U3）、运行时与终端通道（P1/P2）。**人格、记忆、上下文装配、进化在 `src/` 里没有对应模块**——`src/` 只有 `audit/ authority/ chain/ cli/ core/ integrity/ ledger/ runtime/ sandbox/ stop/ supervisor/` 这几层，`grep -rn "consolidat" src/` 零命中，`grep -rn "persona" src/` 唯一命中是 `appcontainer.ts:10` 的 `SeImpersonate`（Win32 令牌特权名，与人格无关）。这是护栏层，不是产品目的——护栏服务的是架构需求 §5.4 那句「用得越久越懂博士，做事越熟练，同时不会变坏、不会悄悄改掉自己的底线」。
+
+两条约束直接抄自原文，动手前先认：
+
+- 实现现状不缩减产品目标。目标书 §一：「既有架构的限制不得自动缩减产品目标」；§十：「现状只用于估算复用与迁移成本，不定义产品上限」。
+- 阶段顺序：架构需求 → 内核与插件机制审查与决定 → **记忆/人格/情感/上下文审查与决定** → 其余模块 → 第一版实现（架构需求 §10）。内核层已按 §4.4 四项决定落地，继续加固不等于推进主线。
+
+纯 TypeScript，`node:sqlite` 持久化，只追加哈希链事件 + 可重建投影。运行时以 DSH 为底座（`src/runtime/`），Cordis 插件框架由 DSH 维护，不自研。
 
 ## 命令
 
