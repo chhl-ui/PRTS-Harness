@@ -186,6 +186,38 @@ arm3 排除了「什么都没跑起来」的假阳性；arm4 排除了「AppCont
 
 **复现**：`.scratch/acspawn.cs`，`Add-Type -Path acspawn.cs -OutputAssembly acspawn.exe -OutputType ConsoleApplication` 后直接运行。探针会自建并删除 AppContainer profile；若中途失败，用 `DeleteAppContainerProfile('PRTS.U3.Probe2')` 清理。
 
+#### Wave 0d 实测（2026-11-01）：真实运行时接线后，安全属性成立、可用性有边界
+
+探针 `.scratch/probe-ac-live.mjs`：起真实 runtime（`PRTS_SANDBOX_BACKEND=appcontainer`），从 `ctx.sandbox` 拿 provider 真实产出的 argv 再 spawn——验的是接线本身，不是手拼 argv。
+
+**安全属性全部成立**：
+
+| 项 | 结果 |
+|---|---|
+| `ctx.sandbox.confine` 产出 runner argv | ✅ `wrappedOk=true` |
+| 读 `C:\prts-data\secrets\deepseek.key` | ✅ 被拦（`keyBlocked=true`，无内容泄漏） |
+| 写工作区外 `C:\Users\Administrator\` | ✅ 被拦（`outsideBlocked=true`） |
+| 写工作区内 | ✅ 成功（`insideOk=true`） |
+
+**但可用性有边界——不是容器里什么都能跑**：
+
+| 命令 | 结果 |
+|---|---|
+| `ver`（cmd 内建） | ✅ 正常输出 |
+| `powershell -NoProfile -Command "echo PS_OK"` | ✅ `PS_OK` |
+| `whoami` | ❌ `0xC0000142` (STATUS_DLL_INIT_FAILED) |
+| `hostname` | ❌ `0xC0000142` |
+| `dir /b` | ❌ 「拒绝访问。」 |
+| `node --version` | ❌ 找不到（PATH 里的 `C:\Program Files\nodejs` 未授权给容器） |
+
+两个要点：
+
+1. **PowerShell 可用是决定性的**——PRTS 的 shell 载体就是 `pwsh -Command`，这条通，主路径就不受 `whoami` 那类工具缺失的影响。但模型如果要求跑 `whoami`、`hostname`、`ipconfig` 这类"读本机身份/网络"的工具，会拿到 `0xC0000142` 而不是有意义的输出。
+2. **PATH 里的工具要逐个授权**。`node` 不在 System32，容器读不到，报的是「不是内部或外部命令」——这是 PATH 未授权，不是命令不存在。接产品时要决定：把常用运行时目录加进 `extraReadPaths`，还是让模型只用 pwsh 内建 + 已授权目录里的工具。
+
+这两条是**产品取舍**，不是缺陷：读隔离的代价就是容器看不到未授权的东西。
+
+
 
 
 ### Wave 1：账号与 ACL（一次性，需提权，不可逆）
