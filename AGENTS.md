@@ -55,6 +55,9 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 
 - **它解决什么**：模型 shell 能读 `<数据根>/secrets/deepseek.key`。四条传统路径与「专用账号 + CreateProcessAsUser」都已实测证伪（`docs/u3-key-read-isolation.md`），AppContainer 是唯一在**未提权**上下文中可用的读隔离机制。
 - **与 K2b 的分工**：`dsh-sandbox-windows-acl` 管**写**（WRITE_RESTRICTED token，restricting SID 只参与写检查）；`src/sandbox/appcontainer.ts` 是**读**侧的另一条通道。两者不是替代关系，不要拿一个去解释另一个的行为。
+- **local 后端在 `C:\` 下的 workspace 上跑不了 pwsh**（实测 2026-11-01）：`dsh-sandbox-windows-acl` 的 `grantWrite` 会对 workspace 做 `SetNamedSecurityInfoW`（DACL + 强制完整性标签，`types-Cl_DXjhk.js:485` 传的 securityInfo 是 20 = DACL|LABEL）。在 `C:\prts-workspace`、`C:\prts-ws-clean` 上它返回 Win32 5 (ACCESS_DENIED)，命令一行都没执行；连 `1+1` 也失败。同一个命令换成 `%TEMP%` 下的 workspace 就正常，且三处 owner 完全相同（都是 `Administrator`），所以不是权限归属问题，是上游对 `C:\` 下目录的标签编辑失败。**这是上游限制，PRTS 无法在源码层修**。
+  **后果**：`PRTS_SANDBOX_BACKEND` 不设（默认 local）时，真机 `npm run chat` 配 `C:\prts-workspace` 的 shell 能力是**断的**。测试能过是因为测试的 workspace 建在 `%TEMP%` 下——别拿测试绿去推断真机可用。
+  **两个后端的 workspace 位置要求互斥**：appcontainer 要浅层（`C:\prts-workspace`，否则祖先链 traverse 失败，见 `confine.ts` 的 `workspaceTraversalRisk`），local 要 `%TEMP%` 下。不能共用一个位置。**当前可用的真机组合只有 appcontainer**。
 - **依赖 koffi**（`^3.3.6`）。它是原生模块，install 时有预编译下载脚本——**新机器上 `npm ci` 若被 `allow-scripts` 拦下，koffi 的二进制不会就位，`require('koffi')` 会失败**。这是部署约束，不是代码缺陷。
 - **实现要点（踩过的坑，别重踩）**：
   - `DWORD_PTR`（UpdateProcThreadAttribute 的 attr 参数）是 64 位，传 Number 会被 koffi 拒，必须 `BigInt`；`lpReturnSize` 可传 `NULL`。
