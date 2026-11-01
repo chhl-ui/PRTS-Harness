@@ -9,6 +9,7 @@ import { attachErrorReporter } from './error-report.ts'
 import { AppContainerSandboxProvider } from '../sandbox/provider.ts'
 import { localBackendWarning } from '../sandbox/confine.ts'
 import { createStepAllocator, createTaskTools, isLedgerTool } from './task-tools.ts'
+import { createMemoryTools } from './memory-tools.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
@@ -474,6 +475,11 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     authority,
   })
 
+  // 记忆消费出口（2026-11-02）：此前 `search()` 在 src 内零调用方，记忆只写不读。
+  // 库打不开时 `memory` 为 undefined，工具面一起缺席——不注册一个永远报错的工具，
+  // 那只会让模型学会绕开它。
+  const memoryTools = memory === undefined ? undefined : createMemoryTools(tools, { store: memory })
+
   // turn 内失败只经 agent/error 上报：dsh-agent-loop 的 throwError() emit 后 throw，
   // kick() 的 catch 吞掉异常传播。不订阅则失败完全静默。
   // 工具结果卸载（spill）接线。它是优化、不是启动前置：根与受保护根/工作区根
@@ -498,8 +504,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     ledger,
     authority,
     approvalBridge,
-    /** 本次实际注册的 prts_task_* 工具名（来自注册回执，不是手写常量）。 */
-    toolNames: taskTools.names,
+    /** 本次实际注册的 prts_task_* / prts_memory_* 工具名（来自注册回执，不是手写常量）。 */
+    toolNames: [...taskTools.names, ...(memoryTools?.names ?? [])],
     /** 本会话最近一次模型创建的 draft；进程内易失提示，不是账本事实。 */
     draftTaskForSession: (sessionId: string) => taskTools.draftTaskForSession(sessionId),
     sandboxBackend: backend,
@@ -511,6 +517,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       offMemoryTurn?.()
       offMemoryAssistantStream?.()
       offMemoryTurnStop?.()
+      memoryTools?.dispose()
       memory?.close()
       spillWiring.dispose()
       taskTools.dispose()
