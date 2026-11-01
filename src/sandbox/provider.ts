@@ -33,11 +33,17 @@ export interface AppContainerProviderOptions {
 }
 
 export class AppContainerSandboxProvider extends SandboxProvider {
-  readonly #opts: AppContainerProviderOptions
+  /**
+   * 用 TS 的 `private` 而不是 `#` 真私有字段：cordis 的 `Service` 会把实例包在
+   * Proxy 里，`#` 字段在 Proxy 上读不到（实测报 "Cannot read private member
+   * #opts from an object whose class did not declare it"）。`private` 是编译期
+   * 修饰符，运行时就是普通属性，跨 Proxy 安全。
+   */
+  private readonly opts: AppContainerProviderOptions
 
   constructor(ctx: Context, opts: AppContainerProviderOptions) {
     super(ctx)
-    this.#opts = opts
+    this.opts = opts
   }
 
   async confine(
@@ -60,8 +66,8 @@ export class AppContainerSandboxProvider extends SandboxProvider {
       return confineArgv(argv, {
         mode: policy.mode,
         workspaceRoot: policy.workspaceRoot,
-        profile: this.#opts.profile,
-        runnerPath: this.#opts.runnerPath,
+        profile: this.opts.profile,
+        runnerPath: this.opts.runnerPath,
       })
     } catch (error) {
       // 把内部错误统一成 SANDBOX_UNAVAILABLE：调用方能据此区分

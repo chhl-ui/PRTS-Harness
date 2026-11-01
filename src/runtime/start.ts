@@ -1,9 +1,11 @@
 /** 运行时组装：boot('prts', configPath, patches, prepare) + 最小 credentials 服务 + K2a 守卫接线。 */
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import type { Context } from '@deepseek-ai/cordis'
 import { attachErrorReporter } from './error-report.ts'
+import { AppContainerSandboxProvider } from '../sandbox/provider.ts'
 import { createStepAllocator, createTaskTools, isLedgerTool } from './task-tools.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { Ledger } from '../ledger/index.ts'
@@ -73,12 +75,20 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   toolNames: readonly string[]
   /** 本会话最近一次模型创建的 draft；进程内易失提示，不是账本事实。 */
   draftTaskForSession(sessionId: string): TaskId | undefined
+  /** 本次实际生效的 shell 沙箱后端（`PRTS_SANDBOX_BACKEND` 的解析结果）。 */
+  sandboxBackend: 'local' | 'appcontainer'
   dispose(): Promise<void>
 }> {
+  // 沙箱后端开关：默认仍是 dsh-sandbox-local（既有行为不变）。切到 appcontainer
+  // 时必须先禁用配置里的 `sandbox` 条目——两者都注册成 ctx.sandbox，会同名冲突。
+  // 用开关而不是直接替换，是为了出问题能一行改回去。
+  const backend = process.env.PRTS_SANDBOX_BACKEND === 'appcontainer' ? 'appcontainer' : 'local'
+  const bootPatches = [...(o.patches ?? [])]
+  if (backend === 'appcontainer') bootPatches.push({ id: 'sandbox', disabled: true })
   process.env.DSH_HOME = join(o.dataRoot, 'dsh-home')
   process.env.PRTS_WORKSPACE = o.workspace
   const appReady = createAppReady()
-  const ctx = await boot('prts', o.configPath, (o.patches ?? []) as never, async (hostCtx: Context) => {
+  const ctx = await boot('prts', o.configPath, bootPatches as never, async (hostCtx: Context) => {
     provideCmdline(hostCtx as never, {
       args: [],
       exit: (code: number) => {
@@ -88,6 +98,15 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       },
       ready: appReady.service,
     })
+    // AppContainer 后端：在这里注册，因为 prepare 早于 config-tree 挂载，此时
+    // `sandbox` 条目已被上面的 patch 禁用，不会与 dsh-sandbox-local 抢同一个
+    // 服务名。Service 构造会自动注册为 ctx.sandbox。
+    if (backend === 'appcontainer') {
+      void new AppContainerSandboxProvider(hostCtx, {
+        profile: 'PRTS.Sandbox',
+        runnerPath: fileURLToPath(new URL('../sandbox/runner.ts', import.meta.url)),
+      })
+    }
     // 最小 credentials：只实现 resolve(ref)。credentialRef() 返回品牌字符串
     // （dsh-credentials lib:21），ref 即 'DEEPSEEK_API_KEY' 本身。
     hostCtx.provide('credentials', {
@@ -330,6 +349,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     toolNames: taskTools.names,
     /** 本会话最近一次模型创建的 draft；进程内易失提示，不是账本事实。 */
     draftTaskForSession: (sessionId: string) => taskTools.draftTaskForSession(sessionId),
+    sandboxBackend: backend,
     dispose: async () => {
       detachGuard()
       offPreExecute()
