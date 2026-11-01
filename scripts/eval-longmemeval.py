@@ -195,8 +195,14 @@ def main():
         with open(out_path, 'w', encoding='utf-8') as _f:   # 逐题落盘：中部崩溃不丢已判结果
             for _e in logs:
                 print(json.dumps(_e, ensure_ascii=False), file=_f)
-        qtype2acc.setdefault(qtype, []).append(1 if label else 0)
-        print(f'[{i}/{len(hypotheses)}] {qid} type={qtype} -> {"YES" if label else "no"}', flush=True)
+        # 三态：True=yes / False=no / None=invalid。parse_verdict 的 docstring
+        # 早已承诺「invalid 不进分母」，但这里曾用 `1 if label else 0` 把 None
+        # 计成 0 分并塞进分母——等于把「判分器没按格式回答」判成「模型答错」，
+        # 判分层噪声无法与生成层分离。None 现在直接跳过。
+        if label is not None:
+            qtype2acc.setdefault(qtype, []).append(1 if label else 0)
+        verdict = 'invalid' if label is None else ('YES' if label else 'no')
+        print(f'[{i}/{len(hypotheses)}] {qid} type={qtype} -> {verdict}', flush=True)
 
     if args.dry_run:
         print(f'dry-run 完成：{len(hypotheses)} 题，未调用 API。')
@@ -207,10 +213,17 @@ def main():
             print(json.dumps(e, ensure_ascii=False), file=f)
 
     if logs:
-        total = sum(1 for e in logs if e['autoeval_label']['label']) / len(logs)
-        print(f'\nAccuracy: {total:.4f}  (judged_by={args.model}, n={len(logs)})')
-        for k, v in sorted(qtype2acc.items()):
-            print(f'\t{k}: {sum(v)/len(v):.4f} ({len(v)})')
+        # 分母只算有效判定。invalid 数如实报出——它高说明判分器不听话，
+        # 不是模型答错；把它并进准确率会让两个问题混成一个数字。
+        valid = [e for e in logs if e['autoeval_label']['label'] is not None]
+        invalid = len(logs) - len(valid)
+        if valid:
+            total = sum(1 for e in valid if e['autoeval_label']['label']) / len(valid)
+            print(f'\nAccuracy: {total:.4f}  (judged_by={args.model}, n={len(valid)} valid, {invalid} invalid 未计入分母)')
+            for k, v in sorted(qtype2acc.items()):
+                print(f'\t{k}: {sum(v)/len(v):.4f} ({len(v)})')
+        else:
+            print(f'\nAccuracy: n/a  (判分全部无效：{invalid} 条 invalid，无有效判定)')
     print(f'Saved to {out_path}')
     return 0
 
