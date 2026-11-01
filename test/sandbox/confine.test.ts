@@ -35,6 +35,8 @@ test('confine: 产出 runner 形态的 argv，顺序为 exec → runner → 选�
     RUNNER,
     '--profile', 'PRTS.Sandbox',
     '--workspace', WS,
+    // DSH 的 shell 全走 PTY，confine 必须默认 inherit，否则 PTY 看不到 shell 输出
+    '--inherit',
     '--',
     'cmd.exe', '/c', 'echo hi',
   ])

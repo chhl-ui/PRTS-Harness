@@ -217,6 +217,23 @@ arm3 排除了「什么都没跑起来」的假阳性；arm4 排除了「AppCont
 
 这两条是**产品取舍**，不是缺陷：读隔离的代价就是容器看不到未授权的东西。
 
+#### Wave 0e 实测（2026-11-01）：真机对话跑通
+
+第一次真机起对话时**失败**，模型三次调用全部报 `Error: PTY shell exited during startup`——命令根本没执行。根因：`confine` 产出的 argv 没带 `--inherit`，runner 用 capture 模式把子进程 stdio 接管到自己的管道，PTY 那头看不到 shell 输出，判定启动阶段就退出。DSH 的 shell 全部经 `dsh-terminal-bash` 的 PTY 启动，所以 `confine` 必须默认 inherit。
+
+补上 `--inherit` 后重跑，同一句话（"用 pwsh 执行 dir 列出当前工作目录下的文件"）**7.3 秒成功**，模型拿到真实目录内容：
+
+```
+| -a---- | 2026/10/31 19:08 | 16 | h3-plain.txt |
+```
+
+与宿主 `ls` 结果一致（工作区里确实只有这一个 16 字节文件）。
+
+**这条链路自此闭环**：模型 → pwsh 工具 → context.sandbox.confine → runner → AppContainer → pwsh → 输出回传。安全属性和可用性都有了实测支撑。
+
+遗留的可用性边界仍如 Wave 0d 所记（`whoami`/`hostname` 起不来、PATH 里的运行时未授权），不影响主路径。
+
+
 
 
 

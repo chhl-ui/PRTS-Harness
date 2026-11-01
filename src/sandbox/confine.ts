@@ -115,6 +115,12 @@ export function confineArgv(argv: readonly string[], opts: ConfineOptions): Conf
       opts.runnerPath,
       '--profile', opts.profile,
       '--workspace', opts.workspaceRoot,
+      // 必须走 inherit：DSH 的 shell 全部经 dsh-terminal-bash 的 PTY 启动，
+      // 它在**启动 shell 进程时**调一次 confine，之后所有命令都在同一进程里跑。
+      // 不带 --inherit 时 runner 用 capture 模式把子进程 stdio 接管到自己的管道，
+      // PTY 那头看不到 shell 输出，直接判「PTY shell exited during startup」——
+      // 真机实测过一次，模型三次调用全部撞在这上面。
+      '--inherit',
       '--',
       ...argv,
     ],
