@@ -107,6 +107,13 @@ CREATE TABLE IF NOT EXISTS mem_deletions (
   completed_at    INTEGER,
   CHECK (state IN ('requested','purged-in-tx','external-pending','completed'))
 );
+
+-- 全文索引（v2.6）：trigram 是唯一能匹配中文 3 字以上的 tokenizer
+-- （unicode61 / porter 对"光学镜"恒为 0，实测见 docs/design-memory-v1.md §5.3），
+-- 同时对英文子串有效。中文 2 字它匹配不了，由 search() 的 LIKE 回退承担。
+-- rowid 与 mem_turns / mem_facts 的隐式 rowid 对齐，由 fold.ts 在投影更新时同步维护。
+CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_turns USING fts5(body, tokenize='trigram');
+CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_facts USING fts5(body, tokenize='trigram');
 `
 
 /** 打开（或创建）记忆库。`secure_delete` 是设计稿 §八 第 15 条的硬要求。 */

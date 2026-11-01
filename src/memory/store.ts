@@ -260,110 +260,193 @@ export class MemoryStore {
     const limit = q.limit ?? DEFAULT_LIMIT
     const tokens = tokenize(q.text)
     if (tokens.length === 0) return []
-    const pats = tokens.map((t) => `%${escapeLike(t)}%`)
-    // 任一词命中即召回；命中数与 score 相乘充当相关度代理。
-    const factConds = tokens
-      .map(() => "(b.body LIKE ? ESCAPE '\\' OR f.subject LIKE ? ESCAPE '\\' OR f.predicate LIKE ? ESCAPE '\\')")
-      .join(' OR ')
-    const turnConds = tokens.map(() => "b.body LIKE ? ESCAPE '\\'").join(' OR ')
+
+    const cap = limit * 4
     const originSlots = origins.map(() => '?').join(',')
+    // 分路的依据是 tokenizer 能力，不是查询语言（2026-11-01 实测）：
+    // `trigram` 对 >=3 字符有效（英文子串、中文 3 字以上），对中文 2 字"镜头"恒为 0；
+    // `unicode61` / `porter` 连中文 3 字都是 0，所以不用它们。
+    const longTokens = tokens.filter((t) => [...t].length >= 3)
+    const shortTokens = tokens.filter((t) => [...t].length < 3)
 
-    // 相关度必须在 SQL 层表达。`LIMIT` 在 `ORDER BY` 之前生效，不排序的
-    // `LIMIT limit*4` 等于「按扫描顺序随便取 limit*4 行」——LongMemEval 全库口径下
-    // 平均每题有 4113 行满足 `LIKE` 条件，任取 80 行让证据 turn 的召回率掉到 2.1%；
-    // 去掉截断是 43.4%。截断没错，错在没有排序（见 .scratch/probe-recall-decompose.mjs
-    // 与 test/memory/recall.test.ts 的两个用例）。
-    const factHitExpr = tokens
-      .map(() => `(CASE WHEN b.body LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END
-                     + CASE WHEN f.subject LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END
-                     + CASE WHEN f.predicate LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)`)
-      .join(' + ')
-    const rows = this.db.prepare(
-      `SELECT f.fact_id, f.provenance, f.origin, f.importance, f.recorded_at_ms, b.body,
-              (${factHitExpr}) AS hit_count
-         FROM mem_facts f
-         LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
-        WHERE f.scope = ?
-          AND f.deleted_at_ms IS NULL
-          AND f.retired_at_ms IS NULL
-          AND f.origin IN (${originSlots})
-          AND (${factConds})
-        ORDER BY hit_count DESC, f.recorded_at_ms DESC
-        LIMIT ?`,
-    ).all(
-      ...pats.flatMap((p) => [p, p, p]), // SELECT 里的相关度表达式
-      scope, ...origins,
-      ...pats.flatMap((p) => [p, p, p]), // WHERE 里的命中条件
-      limit * 4,
-    ) as Array<{
-      fact_id: string
-      provenance: 'stated' | 'inferred'
-      origin: Origin
-      importance: number
-      recorded_at_ms: number
-      body: string | null
-    }>
+    // 两路的分数尺度不可比（bm25 越小越好 vs 命中词数越大越好），所以只比名次：
+    // RRF（Reciprocal Rank Fusion）。§6.5 否决「三路分流」的理由是计分口径不可比，
+    // 排名融合是这个顾虑的正面解法，而不是绕开它。
+    const RRF_K = 60
+    const fused = new Map<string, { hit: MemoryHit; rrf: number }>()
+    const rank = (hits: MemoryHit[], path: RecallPath): void => {
+      hits.forEach((h, i) => {
+        const add = 1 / (RRF_K + i + 1)
+        const prev = fused.get(h.id)
+        if (prev === undefined) fused.set(h.id, { hit: { ...h, recallPath: path }, rrf: add })
+        else prev.rrf += add
+      })
+    }
 
-    const recallPath: RecallPath = 'like'
-    const factHits: MemoryHit[] = rows.map((r) => ({
+    const ftsMatch = longTokens.length === 0
+      ? null
+      : longTokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ')
+
+    // ---- 路 1：FTS5 trigram（按 bm25 升序，越小越相关）----
+    const ftsFacts: MemoryHit[] = ftsMatch === null ? [] : (
+      this.db.prepare(
+        `SELECT f.fact_id, f.provenance, f.origin, f.importance, f.recorded_at_ms, b.body
+           FROM mem_fts_facts
+           JOIN mem_facts f ON f.rowid = mem_fts_facts.rowid
+           LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
+          WHERE mem_fts_facts MATCH ?
+            AND f.scope = ? AND f.deleted_at_ms IS NULL AND f.retired_at_ms IS NULL
+            AND f.origin IN (${originSlots})
+          ORDER BY bm25(mem_fts_facts)
+          LIMIT ?`,
+      ).all(ftsMatch, scope, ...origins, cap) as Array<{
+        fact_id: string
+        provenance: 'stated' | 'inferred'
+        origin: Origin
+        importance: number
+        recorded_at_ms: number
+        body: string | null
+      }>
+    ).map((r) => ({
       kind: 'fact' as const,
       id: r.fact_id,
-      score: recency(r.recorded_at_ms, nowMs) * (0.5 + r.importance) * (1 + countHits(r.body, tokens)),
+      score: recency(r.recorded_at_ms, nowMs) * (0.5 + r.importance),
       provenance: r.provenance,
       origin: r.origin,
       text: r.body ?? '',
-      recallPath,
+      recallPath: 'fts-trigram' as RecallPath,
     }))
 
-    // turn 与 fact 走同一套 LIKE 召回；turn 没有 importance 列，
-    // 排序只用时间（有 occurred_at_ms 就用它，没有就退化为固定值）。
-    const turnHitExpr = tokens
-      .map(() => `(CASE WHEN b.body LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)`)
-      .join(' + ')
-    const turnRows = this.db.prepare(
-      `SELECT t.turn_id, t.session_id, t.turn_index, t.external_id, t.origin,
-              t.occurred_at_ms, t.occurred_raw, b.body,
-              (${turnHitExpr}) AS hit_count
-         FROM mem_turns t
-         LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref
-        WHERE t.scope = ?
-          AND t.deleted_at_ms IS NULL
-          AND t.origin IN (${originSlots})
-          AND (${turnConds})
-        ORDER BY hit_count DESC, t.occurred_at_ms IS NULL, t.occurred_at_ms DESC
-        LIMIT ?`,
-    ).all(
-      ...pats, // SELECT 里的相关度表达式
-      scope, ...origins,
-      ...pats, // WHERE 里的命中条件
-      limit * 4,
-    ) as unknown as Array<{
-      turn_id: string
-      session_id: string
-      turn_index: number
-      external_id: string | null
-      origin: Origin
-      occurred_at_ms: number | null
-      occurred_raw: string | null
-      body: string | null
-    }>
-
-    const turnHits: MemoryHit[] = turnRows.map((r) => ({
+    const ftsTurns: MemoryHit[] = ftsMatch === null ? [] : (
+      this.db.prepare(
+        `SELECT t.turn_id, t.session_id, t.turn_index, t.external_id, t.origin,
+                t.occurred_at_ms, t.occurred_raw, b.body
+           FROM mem_fts_turns
+           JOIN mem_turns t ON t.rowid = mem_fts_turns.rowid
+           LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref
+          WHERE mem_fts_turns MATCH ?
+            AND t.scope = ? AND t.deleted_at_ms IS NULL
+            AND t.origin IN (${originSlots})
+          ORDER BY bm25(mem_fts_turns)
+          LIMIT ?`,
+      ).all(ftsMatch, scope, ...origins, cap) as unknown as Array<{
+        turn_id: string
+        session_id: string
+        turn_index: number
+        external_id: string | null
+        origin: Origin
+        occurred_at_ms: number | null
+        occurred_raw: string | null
+        body: string | null
+      }>
+    ).map((r) => ({
       kind: 'turn' as const,
       id: r.turn_id,
-      score: (r.occurred_at_ms === null ? 0.5 : recency(r.occurred_at_ms, nowMs)) * (1 + countHits(r.body, tokens)),
+      score: r.occurred_at_ms === null ? 0.5 : recency(r.occurred_at_ms, nowMs),
       origin: r.origin,
       sessionId: r.session_id,
       turnIndex: r.turn_index,
       ...(r.external_id === null ? {} : { externalId: r.external_id }),
-      // 时间必须跟着命中一起出去：只给正文，时间推理类问题无从作答。
       occurredAtMs: r.occurred_at_ms,
       ...(r.occurred_raw === null ? {} : { occurredRaw: r.occurred_raw }),
       text: r.body ?? '',
-      recallPath,
+      recallPath: 'fts-trigram' as RecallPath,
     }))
 
-    return [...factHits, ...turnHits].sort((a, b) => b.score - a.score).slice(0, limit)
+    rank(ftsFacts, 'fts-trigram')
+    rank(ftsTurns, 'fts-trigram')
+
+    // ---- 路 2：LIKE 兜底（中文 2 字等短 token；FTS 颗粒无收时用全部 token 再兜一次）----
+    const likeTokens = shortTokens.length > 0
+      ? shortTokens
+      : (fused.size === 0 && longTokens.length > 0 ? tokens : [])
+    if (likeTokens.length > 0) {
+      const pats = likeTokens.map((t) => `%${escapeLike(t)}%`)
+      const factConds = likeTokens
+        .map(() => "(b.body LIKE ? ESCAPE '\\' OR f.subject LIKE ? ESCAPE '\\' OR f.predicate LIKE ? ESCAPE '\\')")
+        .join(' OR ')
+      const turnConds = likeTokens.map(() => "b.body LIKE ? ESCAPE '\\'").join(' OR ')
+      const factHitExpr = likeTokens
+        .map(() => `(CASE WHEN b.body LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END
+                       + CASE WHEN f.subject LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END
+                       + CASE WHEN f.predicate LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)`)
+        .join(' + ')
+      const turnHitExpr = likeTokens
+        .map(() => `(CASE WHEN b.body LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)`)
+        .join(' + ')
+
+      const likeFacts = (this.db.prepare(
+        `SELECT f.fact_id, f.provenance, f.origin, f.importance, f.recorded_at_ms, b.body,
+                (${factHitExpr}) AS hit_count
+           FROM mem_facts f
+           LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
+          WHERE f.scope = ? AND f.deleted_at_ms IS NULL AND f.retired_at_ms IS NULL
+            AND f.origin IN (${originSlots}) AND (${factConds})
+          ORDER BY hit_count DESC, f.recorded_at_ms DESC
+          LIMIT ?`,
+      ).all(
+        ...pats.flatMap((p) => [p, p, p]), scope, ...origins,
+        ...pats.flatMap((p) => [p, p, p]), cap,
+      ) as Array<{
+        fact_id: string
+        provenance: 'stated' | 'inferred'
+        origin: Origin
+        importance: number
+        recorded_at_ms: number
+        body: string | null
+      }>).map((r) => ({
+        kind: 'fact' as const,
+        id: r.fact_id,
+        score: recency(r.recorded_at_ms, nowMs) * (0.5 + r.importance) * (1 + countHits(r.body, likeTokens)),
+        provenance: r.provenance,
+        origin: r.origin,
+        text: r.body ?? '',
+        recallPath: 'like' as RecallPath,
+      }))
+
+      const likeTurns = (this.db.prepare(
+        `SELECT t.turn_id, t.session_id, t.turn_index, t.external_id, t.origin,
+                t.occurred_at_ms, t.occurred_raw, b.body,
+                (${turnHitExpr}) AS hit_count
+           FROM mem_turns t
+           LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref
+          WHERE t.scope = ? AND t.deleted_at_ms IS NULL
+            AND t.origin IN (${originSlots}) AND (${turnConds})
+          ORDER BY hit_count DESC, t.occurred_at_ms IS NULL, t.occurred_at_ms DESC
+          LIMIT ?`,
+      ).all(
+        ...pats, scope, ...origins, ...pats, cap,
+      ) as unknown as Array<{
+        turn_id: string
+        session_id: string
+        turn_index: number
+        external_id: string | null
+        origin: Origin
+        occurred_at_ms: number | null
+        occurred_raw: string | null
+        body: string | null
+      }>).map((r) => ({
+        kind: 'turn' as const,
+        id: r.turn_id,
+        score: (r.occurred_at_ms === null ? 0.5 : recency(r.occurred_at_ms, nowMs)) * (1 + countHits(r.body, likeTokens)),
+        origin: r.origin,
+        sessionId: r.session_id,
+        turnIndex: r.turn_index,
+        ...(r.external_id === null ? {} : { externalId: r.external_id }),
+        occurredAtMs: r.occurred_at_ms,
+        ...(r.occurred_raw === null ? {} : { occurredRaw: r.occurred_raw }),
+        text: r.body ?? '',
+        recallPath: 'like' as RecallPath,
+      }))
+
+      rank(likeFacts, 'like')
+      rank(likeTurns, 'like')
+    }
+
+    return [...fused.values()]
+      .map(({ hit, rrf }) => ({ ...hit, score: rrf * hit.score }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
   }
 
   /**
@@ -482,7 +565,8 @@ export class MemoryStore {
   rebuildProjections(): void {
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.exec('DELETE FROM mem_turns; DELETE FROM mem_facts; DELETE FROM mem_summaries; DELETE FROM mem_topics; DELETE FROM mem_deletions')
+      // 全文索引也是投影：重建时先清空，再由 applyMemoryEvent 逐条重建。
+      this.db.exec('DELETE FROM mem_fts_turns; DELETE FROM mem_fts_facts; DELETE FROM mem_turns; DELETE FROM mem_facts; DELETE FROM mem_summaries; DELETE FROM mem_topics; DELETE FROM mem_deletions')
       const rows = this.db.prepare('SELECT * FROM memory_events ORDER BY seq')
         .all() as unknown as MemoryEventRow[]
       for (const r of rows) applyMemoryEvent(this.db, r)

@@ -13,7 +13,11 @@ export type RetentionClass = 'permanent' | 'retirable' | 'clearable'
 
 export type ActorKind = 'owner' | 'model' | 'system'
 
-export type RecallPath = 'like'
+/**
+ * 走了哪条召回路径。设计稿 §6.5 早已列出这三个值，实现时只写了 `'like'`——
+ * 2026-11-01 换成混合检索后补齐。`'fts-unicode61'` 暂未启用（它对中文恒为 0）。
+ */
+export type RecallPath = 'like' | 'fts-trigram' | 'fts-unicode61'
 
 export interface AssertFactInput {
   actor: ActorKind

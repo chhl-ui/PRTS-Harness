@@ -27,7 +27,8 @@ test('M5 写入 turn 后可按 session + turnIndex + externalId 定位', () => {
     assert.equal(h.turnIndex, 0)
     assert.equal(h.externalId, 'D1:1')
     assert.equal(h.origin, 'benchmark')
-    assert.equal(h.recallPath, 'like')
+    // 2026-11-01 起检索走 FTS5 trigram（'good' / 'see' 均 >=3 字符，trigram 可用）。
+    assert.equal(h.recallPath, 'fts-trigram')
   } finally {
     t.cleanup(m)
   }

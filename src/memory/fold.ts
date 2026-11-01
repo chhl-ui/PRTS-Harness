@@ -44,6 +44,18 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
         1, p.applicable_when, p.retention_class,
         JSON.stringify(p.source_turn_ids ?? []), p.importance,
       )
+      // FTS 是投影的一部分，与 mem_facts 同一事务同步。索引文本含 subject / predicate
+      // ——此前 LIKE 路径也搜这两列，换成 FTS 后不能把这份能力丢掉。
+      const rid = (db.prepare('SELECT rowid AS r FROM mem_facts WHERE fact_id = ?')
+        .get(p.fact_id) as { r: number } | undefined)?.r
+      const obj = p.body_ref === null ? '' : (
+        db.prepare('SELECT body FROM mem_bodies WHERE body_ref = ?')
+          .get(p.body_ref) as { body: string | null } | undefined
+      )?.body ?? ''
+      if (rid !== undefined) {
+        db.prepare('INSERT INTO mem_fts_facts(rowid, body) VALUES (?,?)')
+          .run(rid, `${p.subject} ${p.predicate} ${obj}`)
+      }
       break
     }
     case 'turn.recorded': {
@@ -68,6 +80,16 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
         p.turn_id, e.scope, p.session_id, p.turn_index, p.external_id, p.speaker, p.body_ref,
         e.occurred_at_ms, e.occurred_raw, p.origin, p.is_evidence ? 1 : 0,
       )
+      // 与 mem_turns 同一事务同步全文索引；rowid 对齐，检索时据此 JOIN 回投影。
+      const rid = (db.prepare('SELECT rowid AS r FROM mem_turns WHERE turn_id = ?')
+        .get(p.turn_id) as { r: number } | undefined)?.r
+      const body = p.body_ref === null ? '' : (
+        db.prepare('SELECT body FROM mem_bodies WHERE body_ref = ?')
+          .get(p.body_ref) as { body: string | null } | undefined
+      )?.body ?? ''
+      if (rid !== undefined && body !== '') {
+        db.prepare('INSERT INTO mem_fts_turns(rowid, body) VALUES (?,?)').run(rid, body)
+      }
       break
     }
     case 'memory.deleted': {
@@ -93,12 +115,24 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       // LOCAL_PURGING（同事务，不可观测）：清正文 + 投影置 deleted_at_ms。
       // 正文清空是删除生效的实体证据，只改投影不算删掉（设计稿 §9.2 R3）。
       if (p.target_kind === 'fact') {
-        const row = db.prepare('SELECT body_ref FROM mem_facts WHERE fact_id = ?')
-          .get(p.target_id) as { body_ref: string | null } | undefined
+        const row = db.prepare('SELECT rowid AS r, body_ref FROM mem_facts WHERE fact_id = ?')
+          .get(p.target_id) as { r: number; body_ref: string | null } | undefined
         if (row?.body_ref) {
           db.prepare('UPDATE mem_bodies SET body = NULL WHERE body_ref = ?').run(row.body_ref)
         }
+        // 索引也是派生项。正文清了但索引留着，检索仍能命中已删条目——
+        // §5.3 L237「删除覆盖检索索引与派生摘要」要的正是这一条。
+        if (row !== undefined) db.prepare('DELETE FROM mem_fts_facts WHERE rowid = ?').run(row.r)
         db.prepare('UPDATE mem_facts SET body_ref = NULL, deleted_at_ms = ? WHERE fact_id = ?')
+          .run(e.recorded_at_ms, p.target_id)
+      } else if (p.target_kind === 'turn') {
+        const row = db.prepare('SELECT rowid AS r, body_ref FROM mem_turns WHERE turn_id = ?')
+          .get(p.target_id) as { r: number; body_ref: string | null } | undefined
+        if (row?.body_ref) {
+          db.prepare('UPDATE mem_bodies SET body = NULL WHERE body_ref = ?').run(row.body_ref)
+        }
+        if (row !== undefined) db.prepare('DELETE FROM mem_fts_turns WHERE rowid = ?').run(row.r)
+        db.prepare('UPDATE mem_turns SET body_ref = NULL, deleted_at_ms = ? WHERE turn_id = ?')
           .run(e.recorded_at_ms, p.target_id)
       }
       break
