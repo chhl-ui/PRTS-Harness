@@ -72,6 +72,9 @@ CREATE TABLE IF NOT EXISTS mem_facts (
   -- 并且必须走 fact.reinforced 事件，否则 rebuildProjections 后会丢失。
   access_count       INTEGER NOT NULL DEFAULT 0,
   last_access_ms     INTEGER,
+  -- 事实主题的稳定规范名（模型抽取产出）。同槽取代的匹配键——
+  -- 谓词当槽位会双向失败（泛谓词误杀、措辞漂移漏杀），见 correction.ts。
+  slot               TEXT,
   retired_at_ms      INTEGER,
   deleted_at_ms      INTEGER,
   CHECK (provenance IN ('stated','inferred')),
@@ -299,6 +302,9 @@ function ensureFactAccessColumns(db: DatabaseSync): void {
   if (!cols.includes('last_access_ms')) db.exec('ALTER TABLE mem_facts ADD COLUMN last_access_ms INTEGER')
   // fact.corrected 的旧行指针（P0-2a）。纠正可逆靠它找回旧值；不写进 SCHEMA 索引。
   if (!cols.includes('superseded_by')) db.exec('ALTER TABLE mem_facts ADD COLUMN superseded_by TEXT')
+  // 主题槽位列（取代匹配键）。旧行不回填——没 slot 的旧事实不参与取代，
+  // 这是刻意的保守选择：回填只能靠谓词猜主题，而那正是被废弃的匹配方式。
+  if (!cols.includes('slot')) db.exec('ALTER TABLE mem_facts ADD COLUMN slot TEXT')
 }
 
 /**

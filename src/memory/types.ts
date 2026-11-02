@@ -34,8 +34,17 @@ export interface AssertFactInput {
   sourceTurnIds?: string[]
   retentionClass?: RetentionClass
   /**
-   * 同槽取代开关（默认 false）。为 true 时，写入本事实后把同 `subject|predicate`
-   * 的在役旧事实退役并记 `superseded_by` 指向本行。
+   * 事实主题的稳定规范名（如「咖啡」「实验室」），同槽取代的匹配键。
+   *
+   * 不用 `subject|predicate` 当槽位：真机抽取证实谓词匹配双向失败——
+   * 泛谓词（偏好/使用/拥有）把不同主题事实连在一起，新值一到全部误退役；
+   * 措辞漂移（拥有→住在）又使同主题旧值漏退役。slot 由抽取模型产出语义主题名。
+   * 空串/缺省视为「无槽」，永不参与取代匹配。
+   */
+  slot?: string
+  /**
+   * 同槽取代开关（默认 false）。为 true 且本事实带非空 `slot` 时，写入后把
+   * 同 `subject|slot` 的在役旧事实退役并记 `superseded_by` 指向本行。
    *
    * 为什么默认关：同槽不同取值可能是**并存**而非取代（两台相机、两个项目），
    * 字符串层分不出来——fold.ts `fact.asserted` 的注释早已写明「不能自动推断」。
@@ -44,6 +53,7 @@ export interface AssertFactInput {
    *
    * 保留的安全闸：model-inferred 的新事实**不许**取代 owner-stated / verifier
    * 的旧事实——模型抽错一句话就把主人明说的事实顶掉，是不可接受的失败形态。
+   * 无 slot 时**不退回谓词匹配**：那正是拿铁误杀 polars 的事故形态。
    */
   supersedeSameSlot?: boolean
 }

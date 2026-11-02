@@ -50,3 +50,20 @@ export function looksLikeCorrection(text: string): boolean {
   }
   return false
 }
+
+/**
+ * 事实主题槽位 key 的规范化。
+ *
+ * 为什么不再用 `subject|predicate` 当槽位：真机抽取（2026-11-02，q38-gsq-iq3s）
+ * 暴露了谓词匹配的双向失败——「偏好」这类泛谓词让拿铁把 polars 误退役
+ * （不同主题同谓词），「拥有→住在」的措辞漂移又让实验室更正漏退役
+ * （同主题不同谓词）。槽位改由抽取模型直接产出语义主题名（美式/拿铁→「咖啡」），
+ * 匹配只在规范化后的 slot 上做，谓词退化为展示字段。
+ *
+ * 规范化很轻：trim + 折叠空白 + 小写。CJK 字符不受小写影响；`|` 剥掉防止
+ * 与 identity_key 的分隔符歧义。空输入返回空串——调用方据此放弃取代
+ * （宁漏勿滥：模型没给 slot 时绝不退回谓词匹配，否则 polars 事故重演）。
+ */
+export function normalizeSlotKey(slot: string): string {
+  return slot.trim().toLowerCase().replace(/\s+/g, ' ').replace(/\|/g, '')
+}

@@ -29,7 +29,7 @@ import {
 } from './lifecycle.ts'
 import { parseTime } from './time.ts'
 import { tokenize } from './tokenize.ts'
-import { looksLikeCorrection } from './correction.ts'
+import { looksLikeCorrection, normalizeSlotKey } from './correction.ts'
 import type {
   ActorKind, AssertFactInput, ImportStats, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput, ForgetPlan, ForgetResult,
   VectorOwnerKind,
@@ -150,6 +150,8 @@ export class MemoryStore {
       importance: input.importance ?? 0.5,
       valid_from_ms: input.validFromMs ?? null,
       valid_to_ms: input.validToMs ?? null,
+      // 规范化后空串统一落 NULL——「无槽」与「空槽」在库层不区分。
+      slot: input.slot === undefined ? null : normalizeSlotKey(input.slot) || null,
     }
 
     this.db.exec('BEGIN IMMEDIATE')
@@ -174,15 +176,16 @@ export class MemoryStore {
       //  - model-inferred 不取代非 model-inferred：模型抽错一句话就把主人明说
       //    （owner-stated）或验证器确认的事实顶掉，是不可接受的失败形态。
       //  - 全部在同一事务内：投影与事件同生共死，重放 rebuild 得到同一结果。
-      if (input.supersedeSameSlot === true) {
+      const slotKey = payload.slot
+      if (input.supersedeSameSlot === true && typeof slotKey === 'string' && slotKey !== '') {
         const slot = this.db.prepare(
           `SELECT fact_id, confirmation_basis FROM mem_facts
              WHERE scope = ? AND deleted_at_ms IS NULL AND retired_at_ms IS NULL
                AND fact_id <> ? AND identity_key <> ?
-               AND lower(trim(subject)) = ? AND lower(trim(predicate)) = ?`,
+               AND lower(trim(subject)) = ? AND lower(trim(slot)) = ?`,
         ).all(
           SCOPE, factId, payload.identity_key,
-          input.subject.trim().toLowerCase(), input.predicate.trim().toLowerCase(),
+          input.subject.trim().toLowerCase(), slotKey,
         ) as Array<{ fact_id: string; confirmation_basis: string }>
         for (const row of slot) {
           if (input.confirmationBasis === 'model-inferred' && row.confirmation_basis !== 'model-inferred') continue
@@ -577,7 +580,14 @@ export class MemoryStore {
         speaker: r.speaker,
         text: r.body,
       }))
-      const parsed = await extractFacts(opts.generator, promptTurns)
+      // 已登记 slot 喂给模型：跨批次的更正必须复用同一主题名，
+      // 否则它自己造近义词（相机→主力相机），旧值漏退役。
+      const existingSlots = (this.db.prepare(
+        `SELECT DISTINCT slot FROM mem_facts
+           WHERE scope = ? AND deleted_at_ms IS NULL AND retired_at_ms IS NULL
+             AND slot IS NOT NULL AND slot <> '' LIMIT 200`,
+      ).all(SCOPE) as Array<{ slot: string }>).map(r => r.slot)
+      const parsed = await extractFacts(opts.generator, promptTurns, existingSlots)
       skipped += parsed.skipped
       extracted += parsed.facts.length
       for (const f of parsed.facts) {
@@ -587,6 +597,7 @@ export class MemoryStore {
           subject: f.subject,
           predicate: f.predicate,
           object: f.object,
+          slot: f.slot,
           // 模型抽的不是主人明说的：库里的 CHECK 白名单禁止 stated + model-inferred
           provenance: 'inferred',
           confirmationBasis: 'model-inferred',
@@ -1883,11 +1894,12 @@ export class MemoryStore {
       throw new Error('对话原文（turn）只能删除，不能纠正——内容已发生，修改等于改写历史')
     }
     const old = this.db.prepare(
-      'SELECT fact_id, subject, predicate, identity_key, origin, retention_class, importance, deleted_at_ms, retired_at_ms, superseded_by, valid_from_ms, applicable_when, confidence FROM mem_facts WHERE fact_id = ?',
+      'SELECT fact_id, subject, predicate, identity_key, origin, retention_class, importance, deleted_at_ms, retired_at_ms, superseded_by, valid_from_ms, applicable_when, confidence, slot FROM mem_facts WHERE fact_id = ?',
     ).get(input.factId) as {
       fact_id: string; subject: string; predicate: string; identity_key: string; origin: string
       retention_class: string; importance: number; deleted_at_ms: number | null; retired_at_ms: number | null
       superseded_by: string | null; valid_from_ms: number | null; applicable_when: string | null; confidence: number | null
+      slot: string | null
     } | undefined
     if (old === undefined || old.deleted_at_ms !== null) throw new Error(`correctFact：${input.factId} 不存在或已删除`)
     if (old.superseded_by !== null) throw new Error(`correctFact：${input.factId} 已被 ${old.superseded_by} 取代，改它没意义——纠正新行`)
@@ -1911,6 +1923,9 @@ export class MemoryStore {
           origin: old.origin, retention_class: old.retention_class,
           importance: Math.max(old.importance, 0.8), source_turn_ids: [],
           valid_from_ms: old.valid_from_ms, applicable_when: old.applicable_when, confidence: old.confidence,
+          // 继承旧行的 slot：纠正后的新值留在同一主题槽里，
+          // 之后的模型更正才能继续在同一槽位上取代。
+          slot: old.slot,
         },
       })
       this.db.exec('COMMIT')

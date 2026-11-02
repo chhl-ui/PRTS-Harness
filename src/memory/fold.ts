@@ -50,8 +50,8 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
           `INSERT INTO mem_facts (
              fact_id, scope, subject, predicate, identity_key, body_ref, valid_from_ms, valid_to_ms,
              recorded_at_ms, provenance, confirmation_basis, origin, confidence,
-             revision, applicable_when, retention_class, source_turn_ids, importance
-           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             revision, applicable_when, retention_class, source_turn_ids, importance, slot
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(fact_id) DO NOTHING`,
         ).run(
           p.fact_id, e.scope, p.subject, p.predicate, identityKey, p.body_ref,
@@ -59,10 +59,12 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
           p.provenance, p.confirmation_basis, p.origin, p.confidence,
           1, p.applicable_when, p.retention_class,
           JSON.stringify(p.source_turn_ids ?? []), p.importance,
+          (p as { slot?: string | null }).slot ?? null,
         )
       }
-      // FTS 是投影的一部分，与 mem_facts 同一事务同步。索引文本含 subject / predicate
-      // ——此前 LIKE 路径也搜这两列，换成 FTS 后不能把这份能力丢掉。
+      // FTS 是投影的一部分，与 mem_facts 同一事务同步。索引文本含 subject / predicate /
+      // slot——此前 LIKE 路径也搜这两列，换成 FTS 后不能把这份能力丢掉；
+      // slot 进索引让「咖啡」这类查询能命中 object 为「拿铁」的事实。
       const rid = (db.prepare('SELECT rowid AS r FROM mem_facts WHERE fact_id = ?')
         .get(p.fact_id) as { r: number } | undefined)?.r
       const obj = p.body_ref === null ? '' : (
@@ -71,7 +73,7 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       )?.body ?? ''
       if (rid !== undefined) {
         db.prepare('INSERT INTO mem_fts_facts(rowid, body) VALUES (?,?)')
-          .run(rid, `${p.subject} ${p.predicate} ${obj}`)
+          .run(rid, `${p.subject} ${p.predicate} ${(p as { slot?: string | null }).slot ?? ''} ${obj}`)
       }
       break
     }
@@ -85,8 +87,8 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
         `INSERT INTO mem_facts (
            fact_id, scope, subject, predicate, identity_key, body_ref, valid_from_ms, valid_to_ms,
            recorded_at_ms, provenance, confirmation_basis, origin, confidence,
-           revision, applicable_when, retention_class, source_turn_ids, importance
-         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           revision, applicable_when, retention_class, source_turn_ids, importance, slot
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(fact_id) DO NOTHING`,
       ).run(
         p.new_fact_id, e.scope, p.subject, p.predicate,
@@ -97,6 +99,7 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
         p.provenance, p.confirmation_basis, p.origin, p.confidence ?? null,
         1, p.applicable_when ?? null, p.retention_class,
         JSON.stringify(p.source_turn_ids ?? []), p.importance,
+        (p as { slot?: string | null }).slot ?? null,
       )
       const rid = (db.prepare('SELECT rowid AS r FROM mem_facts WHERE fact_id = ?')
         .get(p.new_fact_id) as { r: number } | undefined)?.r
@@ -106,7 +109,7 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       )?.body ?? ''
       if (rid !== undefined) {
         db.prepare('INSERT INTO mem_fts_facts(rowid, body) VALUES (?,?)')
-          .run(rid, `${p.subject} ${p.predicate} ${obj}`)
+          .run(rid, `${p.subject} ${p.predicate} ${(p as { slot?: string | null }).slot ?? ''} ${obj}`)
       }
       // 旧行退役 + 指向新行——纠正可逆靠 superseded_by 找回旧值。
       db.prepare(
