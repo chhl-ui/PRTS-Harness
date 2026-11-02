@@ -549,6 +549,29 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       ? new OllamaEmbedder({ baseUrl: ollamaUrl, model: process.env.PRTS_EMBED_MODEL ?? 'bge-m3' })
       : undefined
 
+  // 语义路启用时预热内存向量索引。
+  //
+  // 为什么必须做：`search` 的语义路在未预热时走 SQL 降级路径，
+  // `ORDER BY owner_kind, owner_id LIMIT 50000` 里 `turn` 排在最后，本库 24.6 万条 turn
+  // 只有 19.9% 进入扫描窗口。实测该上限下九组融合权重无一超过纯 bm25（30.9% vs 31.8%，
+  // p=0.83），全量扫描下才是 36.9%（p=0.0357）。见
+  // `docs/memory-recall-criteria-retest-2026-11-03.md`。
+  //
+  // 失败不阻断启动：没有索引只是回到降级路径（行为与 v2.17 一致），不是安全问题。
+  // 但必须留下痕迹，否则又会变成「语义检索生效了却查不出它只扫了 20%」的静默失效。
+  // 一次性成本：本库约 1.0 GB / 5 秒，只在这一处付。
+  if (memory !== undefined && embedderResolver !== undefined) {
+    try {
+      const startedAt = Date.now()
+      const warmed = memory.warmVectorIndex()
+      const status = memory.vectorIndexStatus()
+      const skipped = status.skipped > 0 ? `，跳过 ${status.skipped} 条（损坏或维度不符）` : ''
+      console.error(`[prts] memory vector index warmed: ${warmed} rows / dim ${status.dimension} / ${Date.now() - startedAt} ms${skipped}`)
+    } catch (error) {
+      console.error(`[prts] memory vector index warm failed — 语义检索降级为 cap 50k 路径: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   const memoryTools = memory === undefined ? undefined : createMemoryTools(tools, {
     store: memory,
     ...(embedderResolver === undefined ? {} : { embedder: embedderResolver }),

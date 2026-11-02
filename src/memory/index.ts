@@ -1,5 +1,6 @@
 /** 记忆模块入口。设计见 `docs/design-memory-v1.md`。 */
 export { MemoryStore, escapeLike } from './store.ts'
+export { MemVectorIndex, type VectorEntry, type VectorHit } from './vector-index.ts'
 export { SCHEMA, openMemoryDb } from './schema.ts'
 export { applyMemoryEvent } from './fold.ts'
 export { parseTime } from './time.ts'

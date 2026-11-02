@@ -13,6 +13,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import { appendChained, sha256hex, verifyChainRows, type ChainVerifyResult } from '../chain/index.ts'
 import { applyMemoryEvent } from './fold.ts'
 import { cosineSimilarity, decodeVector, encodeVector, type Embedder } from './embedding.ts'
+import { MemVectorIndex } from './vector-index.ts'
 import { extractEntities } from './extract.ts'
 import { writeProfile, writeSummary } from './write.ts'
 import { extractFacts, type FactPromptTurn } from './consolidate-facts.ts'
@@ -103,6 +104,12 @@ function rowImportance(
 export class MemoryStore {
   private readonly db: DatabaseSync
 
+  /**
+   * 语义检索的内存向量索引。未预热时为空壳——`search` 自动降级回原 SQL 路径
+   * （cap 50k，行为与 v2.17 逐字一致）。预热是显式动作，见 `warmVectorIndex()`。
+   */
+  private readonly vecIndex = new MemVectorIndex()
+
   // 不用参数属性：项目只允许可擦除语法（AGENTS.md「语法约束」）。
   private constructor(db: DatabaseSync) {
     this.db = db
@@ -112,8 +119,71 @@ export class MemoryStore {
     return new MemoryStore(openMemoryDb(path))
   }
 
+  /**
+   * 预热向量索引：把 `mem_vectors` 全量解码进 `Float32Array`（本库 1.0 GB / 约 5 秒）。
+   *
+   * 为什么必须显式：5 秒同步阻塞若发生在首轮注入之前，用户会把它记成「聊天卡了一下」。
+   * 调用方应在首轮之后（或进程空闲时）调用；未预热时检索走原 SQL 路径，结果正确但
+   * 只覆盖 `SEMANTIC_SCAN_CAP` 之内的向量（本库 19.9% 的 turn）——
+   * 实测该上限下混合检索不如纯 bm25，依据见 `docs/memory-recall-criteria-retest-2026-11-03.md`。
+   *
+   * @returns 实际入索引的条数；0 表示库中没有可用向量。
+   */
+  warmVectorIndex(): number {
+    return this.vecIndex.load(this.db)
+  }
+
+  /** 索引状态。诊断用：`ready=false` 时所有语义查询都在走降级路径。 */
+  vectorIndexStatus(): { ready: boolean; size: number; dimension: number; skipped: number } {
+    return {
+      ready: this.vecIndex.isReady,
+      size: this.vecIndex.size,
+      dimension: this.vecIndex.dimension,
+      skipped: this.vecIndex.skippedCount,
+    }
+  }
+
   close(): void {
+    // 索引常驻 1 GB 级内存，关闭时必须释放，否则同进程内重开多个 store 会累积。
+    this.vecIndex.reset()
     this.db.close()
+  }
+
+  /**
+   * 降级路径：直接从 SQL 扫向量并算余弦（`warmVectorIndex()` 未调用时使用）。
+   *
+   * 保留 `SEMANTIC_SCAN_CAP` 的截断语义：`ORDER BY owner_kind, owner_id` 是字符串序，
+   * `turn` 排在 `fact` / `profile` 之后，本库 24.6 万条 turn 只有 49,167 条能进扫描窗口。
+   * 这不是 bug 而是**已知的降级边界**——要走全量必须预热内存索引。
+   */
+  private scanVectorsSql(
+    qv: ArrayLike<number>,
+    minSim: number,
+  ): Array<{ ownerKind: string; ownerId: string; sim: number }> {
+    const vecRows = this.db.prepare(
+      `SELECT owner_kind, owner_id, vector FROM mem_vectors
+        ORDER BY owner_kind, owner_id LIMIT ?`,
+    ).all(SEMANTIC_SCAN_CAP) as unknown as Array<{
+      owner_kind: string
+      owner_id: string
+      vector: Uint8Array
+    }>
+
+    const sims: Array<{ ownerKind: string; ownerId: string; sim: number }> = []
+    for (const r of vecRows) {
+      let v: Float32Array
+      try {
+        v = decodeVector(r.vector)
+      } catch {
+        continue // BLOB 损坏：跳过这一条，不让整条检索路失败
+      }
+      // 维度不符 = 换过模型但没重算：同样跳过。静默跳过是可接受的降级，
+      // 但 vectorStats() 必须能把这种情况暴露出来，不能只有「检索变差」这一个症状。
+      if (v.length !== qv.length) continue
+      const sim = cosineSimilarity(qv, v)
+      if (sim >= minSim) sims.push({ ownerKind: r.owner_kind, ownerId: r.owner_id, sim })
+    }
+    return sims
   }
 
   /**
@@ -1017,31 +1087,16 @@ export class MemoryStore {
     const qv = q.queryVector
     if (semanticTopK > 0 && qv !== undefined && qv.length > 0) {
       const minSim = q.semanticMinSim ?? 0
-      const vecRows = this.db.prepare(
-        `SELECT owner_kind, owner_id, vector FROM mem_vectors
-          ORDER BY owner_kind, owner_id LIMIT ?`,
-      ).all(SEMANTIC_SCAN_CAP) as unknown as Array<{
-        owner_kind: string
-        owner_id: string
-        vector: Uint8Array
-      }>
-
-      const sims: Array<{ ownerKind: string; ownerId: string; sim: number }> = []
-      for (const r of vecRows) {
-        let v: Float32Array
-        try {
-          v = decodeVector(r.vector)
-        } catch {
-          continue // BLOB 损坏：跳过这一条，不让整条检索路失败
-        }
-        // 维度不符 = 换过模型但没重算：同样跳过。静默跳过是可接受的降级，
-        // 但 vectorStats() 必须能把这种情况暴露出来，不能只有「检索变差」这一个症状。
-        if (v.length !== qv.length) continue
-        const sim = cosineSimilarity(qv, v)
-        if (sim >= minSim) sims.push({ ownerKind: r.owner_kind, ownerId: r.owner_id, sim })
+      // 索引就绪 → 内存全量余弦（覆盖全部 24.6 万条 turn 向量）；未就绪 → 降级 SQL 路径。
+      const indexed = this.vecIndex.query(qv, semanticTopK, minSim)
+      let top: Array<{ ownerKind: string; ownerId: string; sim: number }>
+      if (indexed !== null) {
+        top = indexed
+      } else {
+        const sims = this.scanVectorsSql(qv, minSim)
+        sims.sort((a, b) => b.sim - a.sim)
+        top = sims.slice(0, semanticTopK)
       }
-      sims.sort((a, b) => b.sim - a.sim)
-      const top = sims.slice(0, semanticTopK)
 
       // 回表取正文：按 top 的顺序重建，rank() 用数组下标当名次，顺序即名次。
       const factIds = top.filter((t) => t.ownerKind === 'fact').map((t) => t.ownerId)
@@ -1412,6 +1467,9 @@ export class MemoryStore {
         stmt.run(e.ownerKind, e.ownerId, model, e.vector.length, encodeVector(e.vector), now)
       }
       this.db.exec('COMMIT')
+      // 索引已就绪时增量并入：调度器会持续补向量，每批都重载 5 秒不划算。
+      // 未就绪或维度不符时 upsert 自行降级（语义检索退回 SQL 路径），不抛错。
+      this.vecIndex.upsert(entries)
       return entries.length
     } catch (e) {
       this.db.exec('ROLLBACK')
@@ -1912,6 +1970,9 @@ export class MemoryStore {
         ...plan.facts.map((x): [string, string] => ['fact', x]),
         ...plan.profiles.map((x): [string, string] => ['profile', x]),
       ]) this.db.prepare('DELETE FROM mem_vectors WHERE owner_kind = ? AND owner_id = ?').run(k, i)
+      // 删除是所有者低频操作（forget 流程），重建索引比维护删除墓碑简单且不会漏。
+      // 重建后 `search` 会先走 SQL 降级路径，直到下一次 `warmVectorIndex()`。
+      this.vecIndex.reset()
       for (const t of plan.turns) this.db.prepare('DELETE FROM mem_mentions WHERE turn_id = ?').run(t)
       const orphans = this.db.prepare(
         `SELECT entity_key FROM mem_entities e
