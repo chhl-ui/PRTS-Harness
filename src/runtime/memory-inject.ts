@@ -93,9 +93,14 @@ export function renderInjection(hits: MemoryHit[]): string {
 export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectionDeps): MemoryInjection {
   const limit = deps.limit ?? 5
   const minQueryChars = deps.minQueryChars ?? 4
-  // 同一 step 只注入一次：waterfall 在重试/重放场景可能对同一步触发多次，
-  // 叠加注入会让上下文里出现多份同样的记忆。
-  const lastStep = new Map<string, number>()
+  // 防同一 step 重放重复注入（waterfall 重试可对同一步触发多次）。
+  // 键必须是 sessionId+turn+step——DSH 每轮 step 归 0（dsh-agent-loop/lib/index.js:955），
+  // 只记 step 会把每轮首步都当成「已注入」而跳过，生产上实测变成只有首轮注入。
+  const injectedSteps = new Set<string>()
+  // 每 session 已注入过的命中 id：注入会以 user/message 持久化进会话日志，
+  // 重复注入只是占上下文，没有新信息。进程内状态，重启丢——重启后可能重复注入一次，
+  // 可接受。
+  const injectedHitIds = new Map<string, Set<string>>()
 
   const off = hookCtx.on('agent/pre-step', async (payload, next) => {
     // next() 在 try 外：它自己的失败是真故障，不能被这里的兜底吞掉。
@@ -105,8 +110,10 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
 
       const p = payload as PreStepPayload
       const sessionId = p.agent?.session?.id ?? ''
+      const turn = typeof p.turn === 'number' ? p.turn : -1
       const step = typeof p.step === 'number' ? p.step : -1
-      if (step >= 0 && lastStep.get(sessionId) === step) return decision
+      const stepKey = `${sessionId}:${turn}:${step}`
+      if (injectedSteps.has(stepKey)) return decision
 
       const messages = p.messages ?? []
       if (messages.length === 0) return decision
@@ -115,14 +122,24 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
 
       // 本轮问题自己也在库里：`agent/inbox/claimed` 在 pre-step 之前就把这条 user
       // 消息落成了 turn，检索会把它当「历史记录」带回来——既占名额又对模型零信息。
-      // 真机实测见过注入里第 2 条就是本轮原话。
+      // 真机实测见过注入里第 2 条就是本轮原话。（保留作兜底：本会话 turn 过滤已覆盖它。）
       const queryKey = normalizeText(query)
+      const seen = injectedHitIds.get(sessionId) ?? new Set<string>()
+      // 三层过滤：1) 本会话自己的 turn（已在上下文里；代价：会话被 DSH 压缩后，
+      //   早期同会话内容只能靠 prts_memory_recall 工具找回，注入不再带回——工具侧
+      //   不做此过滤）2) 本会话已注入过的命中 id 3) 本轮原话（兜底）。
+      // search 多取 limit*3 补齐过滤损耗，再截回 limit。
       const hits = deps.store
-        .search({ text: query, limit, includeOrigin: ['live'] })
+        .search({ text: query, limit: limit * 3, includeOrigin: ['live'] })
+        .filter((h) => h.kind !== 'turn' || h.sessionId !== sessionId)
+        .filter((h) => !seen.has(h.id))
         .filter((h) => h.kind !== 'turn' || normalizeText(h.text) !== queryKey)
+        .slice(0, limit)
       if (hits.length === 0) return decision
 
-      if (step >= 0) lastStep.set(sessionId, step)
+      injectedSteps.add(stepKey)
+      for (const h of hits) seen.add(h.id)
+      injectedHitIds.set(sessionId, seen)
       const injected = {
         id: `mem-${randomUUID()}`,
         role: 'user',
@@ -138,7 +155,8 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
 
   return {
     dispose: () => {
-      lastStep.clear()
+      injectedSteps.clear()
+      injectedHitIds.clear()
       off()
     },
   }

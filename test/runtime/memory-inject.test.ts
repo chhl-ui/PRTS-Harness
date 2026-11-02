@@ -228,3 +228,80 @@ test('I7 不把本轮问题自己当历史注入（inbox/claimed 先于 pre-step
     t.cleanup(store)
   }
 })
+
+function payloadOfTurn(text: string, sessionId: string, turn: number, step = 1) {
+  return {
+    agent: { session: { id: sessionId } },
+    messages: [{ id: 'm', role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } }],
+    turn, step,
+  }
+}
+const msgText = (out: unknown, i: number) => (((out as { messages: { content: { text?: string }[] }[] }).messages[i]?.content?.[0]?.text) ?? '')
+const injCount = (out: unknown) => ((out as { messages: { content: { text?: string }[] }[] }).messages.filter(m => (m.content?.[0]?.text ?? '').includes('记忆检索')).length)
+
+test('U1 turn2/step1 再次注入（修复前被 step 去重跳过）；同 turn 同 step 只一次', async () => {
+  const t = makeTmp('prts-inj-u1-'); const store = MemoryStore.open(t.db())
+  try {
+    store.recordTurn({ actor: 'system', sessionId: 'other', turnIndex: 0, speaker: 'user', text: '光学镜头设计偏好 85mm' })
+    store.recordTurn({ actor: 'system', sessionId: 'other', turnIndex: 1, speaker: 'user', text: '闪光灯高速同步 HSS 笔记' })
+    const fake = fakeHookCtx(); const att = attachMemoryInjection(fake.ctx, { store })
+    const n1 = injCount(await fake.fire(payloadOfTurn('光学镜头是啥', 's1', 1, 1), async () => enter([payloadOfTurn('光学镜头是啥', 's1', 1, 1).messages[0]])))
+    assert.equal(n1, 1, 'turn1 应注入')
+    const n2 = injCount(await fake.fire(payloadOfTurn('闪光灯是什么', 's1', 2, 1), async () => enter([payloadOfTurn('闪光灯是什么', 's1', 2, 1).messages[0]])))
+    assert.equal(n2, 1, 'turn2/step1 应再次注入（去重键含 turn）')
+    const n3 = injCount(await fake.fire(payloadOfTurn('闪光灯是什么', 's1', 2, 1), async () => enter([payloadOfTurn('闪光灯是什么', 's1', 2, 1).messages[0]])))
+    assert.equal(n3, 0, '同 turn 同 step 重放只注入一次')
+    att.dispose()
+  } finally { t.cleanup(store) }
+})
+
+test('U2 已注入命中不再注入；全部已注入过则不追加消息', async () => {
+  const t = makeTmp('prts-inj-u2-'); const store = MemoryStore.open(t.db())
+  try {
+    store.recordTurn({ actor: 'system', sessionId: 'other', turnIndex: 0, speaker: 'user', text: '光学镜头 X 内容' })
+    const fake = fakeHookCtx(); const att = attachMemoryInjection(fake.ctx, { store })
+    const p1 = payloadOfTurn('光学镜头', 's1', 1)
+    const o1 = await fake.fire(p1, async () => enter([p1.messages[0]]))
+    assert.equal(injCount(o1), 1)
+    const p2 = payloadOfTurn('光学镜头', 's1', 2)
+    const o2 = await fake.fire(p2, async () => enter([p2.messages[0]]))
+    assert.equal(injCount(o2), 0, '全部命中已注入过 → 不再追加')
+    att.dispose()
+  } finally { t.cleanup(store) }
+})
+
+test('U3 本会话 turn 被过滤，其它会话 turn 与 fact 保留', async () => {
+  const t = makeTmp('prts-inj-u3-'); const store = MemoryStore.open(t.db())
+  try {
+    store.recordTurn({ actor: 'system', sessionId: 's1', turnIndex: 0, speaker: 'user', text: '本会话说过光学镜头自己的话' })
+    store.recordTurn({ actor: 'system', sessionId: 'other', turnIndex: 0, speaker: 'user', text: '他会话光学镜头历史记录' })
+    store.assertFact({ actor: 'owner', subject: '镜头', predicate: '偏好', object: '光学镜头设计', provenance: 'stated', confirmationBasis: 'owner-stated' })
+    const fake = fakeHookCtx(); const att = attachMemoryInjection(fake.ctx, { store })
+    const p = payloadOfTurn('光学镜头', 's1', 1)
+    const out = await fake.fire(p, async () => enter([p.messages[0]]))
+    const text = msgText(out, 1)
+    assert.equal(text.includes('自己的话'), false, `本会话 turn 应被滤掉：${text}`)
+    assert.ok(text.includes('他会话光学镜头历史记录'), '他会话 turn 保留')
+    assert.ok(text.includes('光学镜头设计'), 'fact 保留')
+    att.dispose()
+  } finally { t.cleanup(store) }
+})
+
+test('U4 过滤后仍凑满 limit', async () => {
+  const t = makeTmp('prts-inj-u4-'); const store = MemoryStore.open(t.db())
+  try {
+    store.recordTurn({ actor: 'system', sessionId: 's1', turnIndex: 0, speaker: 'user', text: '本 session 光学镜头前排占位 A1' })
+    store.recordTurn({ actor: 'system', sessionId: 's1', turnIndex: 1, speaker: 'user', text: '本 session 光学镜头前排占位 A2' })
+    for (const kw of ['B1', 'B2', 'B3']) {
+      store.recordTurn({ actor: 'system', sessionId: 'other', turnIndex: 0, speaker: 'user', text: `光学镜头 ${kw} 记录` })
+    }
+    const fake = fakeHookCtx(); const att = attachMemoryInjection(fake.ctx, { store, limit: 2 })
+    const p = payloadOfTurn('光学镜头', 's1', 1)
+    const out = await fake.fire(p, async () => enter([p.messages[0]]))
+    const text = msgText(out, 1)
+    const hitLines = text.split('\n').filter(l => /^\d+\. \[/.test(l))
+    assert.equal(hitLines.length, 2, `应凑满 limit=2：${text}`)
+    assert.equal(text.includes('占位 A'), false, '本 session turn 应被滤掉')
+    att.dispose()
+  } finally { t.cleanup(store) }
+})
