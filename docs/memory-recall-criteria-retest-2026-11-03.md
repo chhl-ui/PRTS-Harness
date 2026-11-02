@@ -172,7 +172,64 @@ roadmap 写的判据是「multi-session 分型 recall@8 从 27.2% 提升」。�
 若要实测换模型，最小成本方案：抽 50k turn（含全部 gold）+ 两模型同样本对比，
 约 1 小时，足以判定偏好/多会话分型的排序增益。
 
-## 七、复现命令
+## 七、索引修复与其产品口径实测（`a8ac8fa`）
+
+按第五节 P0 方案 A 实现：`MemVectorIndex` 把 `mem_vectors` 全量解码进 `Float32Array`，
+`store.search` 的语义段在索引就绪时走内存全量余弦，否则降级原 SQL 路径（cap 语义保留）。
+
+端到端（`probe-index-e2e.mjs`，236 题，走真实 `store.search`）：
+
+| | @8 | |
+|---|---|---|
+| 未预热（cap 50k） | 72/236 = **30.5%** | |
+| 预热后（247,428 条全量） | 80/236 = **33.9%** | 配对 只冷 8 / 只热 16，**McNemar p = 0.1516** |
+
+预热成本 3.4 s / 247,428 行 / dim 1024。分型：user 42.2→46.9、multi 27.2→31.2、
+preference 3.3→3.3、temporal 58.8→58.8。
+
+### 参数不是瓶颈
+
+`probe-index-tune.mjs` 扫四组产品参数（236 题，产品口径）：
+
+| 配置 | @8 |
+|---|---|
+| minSim 0.25 / topK 15（当前生产） | 80/236 = 33.9% |
+| minSim 0 / topK 15 | 80/236 = 33.9% |
+| minSim 0 / topK 64 | 80/236 = 33.9% |
+| minSim 0.25 / topK 64 | 80/236 = 33.9% |
+
+四组两两 McNemar p = 1.0000。`minSim` 0.25→0 时**零题变化**（只前 0 / 只后 0）；
+`topK` 15→64 是 11/11 互换、净 0，只是换了命中的题（multi-session +3pp、temporal −6pp）。
+放宽这两个旋钮拿不到任何总量收益，**不要动它们**。
+
+### 与 36.9% 的差额是口径差异，不是产品缺陷
+
+33.9%（产品 `store.search`）与 36.9%（`probe-recall-weighted.mjs` 手工融合）**不可直接比**：
+
+- 36.9% 是在「只对 turn 排序、按 turn 相对名次判 @8、bm25 候选池 64 条」的口径下得到的；
+- 33.9% 是产品真实返回（多路 FTS + 语义融合、按绝对名次判 @8、候选池 `limit × 3`）。
+
+已排除「fact/profile 命中挤占前 8」这一嫌疑：抽 40 题实测，前 8 名里非 turn 命中 **0 题**，
+gold turn 被挤出绝对前 8 的也是 **0 题**。差额来源未完全定位（候选池深度与题集口径都可能是），
+但**不影响结论方向**：索引修复是真的（多救 16 题），幅度只有 +3.4pp。
+
+### 下一步该做什么
+
+1. 按 k 曲线（第六节），真正的天花板在**索引粒度**：40.7% 的题前 64 名无 gold，
+   这只能靠 session/滑窗 chunk 或摘要层解决，与向量模型、cap、融合参数都无关。
+   注意 v2.11 的「session 两阶段粗筛」已被实测否决（38.8% → 34.0%），不要重走。
+2. `PRTS_EMBED=1` 现在需要配合预热才有意义——`start.ts` 已在该开关下自动预热。
+
+## 八、复现命令
+
+```bash
+# 索引修复后的产品口径端到端（预热前 vs 预热后）
+node --max-old-space-size=8192 --disable-warning=ExperimentalWarning \
+  .rivet/scratch/probe-index-e2e.mjs 250
+
+# 产品参数扫描（semanticMinSim × semanticTopK）
+node --max-old-space-size=8192 --disable-warning=ExperimentalWarning \
+  .rivet/scratch/probe-index-tune.mjs 250
 
 ```bash
 # k 曲线分解（本节）：区分「池里没有」与「排不进前 8」
