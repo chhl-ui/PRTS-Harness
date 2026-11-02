@@ -30,7 +30,7 @@ import {
 import { parseTime } from './time.ts'
 import { tokenize } from './tokenize.ts'
 import type {
-  ActorKind, AssertFactInput, ImportStats, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput,
+  ActorKind, AssertFactInput, ImportStats, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput, ForgetPlan, ForgetResult,
   VectorOwnerKind,
 } from './types.ts'
 
@@ -365,7 +365,8 @@ export class MemoryStore {
     const rows = this.db.prepare(
       `SELECT fact_id FROM mem_facts
         WHERE fact_id IN (${input.factIds.map(() => '?').join(',')})
-          AND deleted_at_ms IS NULL AND retired_at_ms IS NOT NULL`,
+          AND deleted_at_ms IS NULL AND retired_at_ms IS NOT NULL
+          AND superseded_by IS NULL`,
     ).all(...input.factIds) as Array<{ fact_id: string }>
     if (rows.length === 0) return 0
 
@@ -732,7 +733,7 @@ export class MemoryStore {
            JOIN mem_facts f ON f.rowid = mem_fts_facts.rowid
            LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
           WHERE mem_fts_facts MATCH ?
-            AND f.scope = ? AND f.deleted_at_ms IS NULL AND f.retired_at_ms IS NULL
+            AND f.scope = ? AND f.deleted_at_ms IS NULL ${q.includeRetired ? '' : 'AND f.retired_at_ms IS NULL'}
             AND f.origin IN (${originSlots})
           ORDER BY bm25(mem_fts_facts)
           LIMIT ?`,
@@ -909,7 +910,7 @@ export class MemoryStore {
              FROM mem_facts f
              LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
             WHERE f.fact_id IN (${factIds.map(() => '?').join(',')})
-              AND f.scope = ? AND f.deleted_at_ms IS NULL AND f.retired_at_ms IS NULL
+              AND f.scope = ? AND f.deleted_at_ms IS NULL ${q.includeRetired ? '' : 'AND f.retired_at_ms IS NULL'}
               AND f.origin IN (${originSlots})`,
         ).all(...factIds, scope, ...origins) as unknown as Array<{
           fact_id: string
@@ -1045,7 +1046,7 @@ export class MemoryStore {
                 (${factHitExpr}) AS hit_count
            FROM mem_facts f
            LEFT JOIN mem_bodies b ON b.body_ref = f.body_ref
-          WHERE f.scope = ? AND f.deleted_at_ms IS NULL AND f.retired_at_ms IS NULL
+          WHERE f.scope = ? AND f.deleted_at_ms IS NULL ${q.includeRetired ? '' : 'AND f.retired_at_ms IS NULL'}
             AND f.origin IN (${originSlots}) AND (${factConds})
           ORDER BY hit_count DESC, f.recorded_at_ms DESC
           LIMIT ?`,
@@ -1566,6 +1567,282 @@ export class MemoryStore {
       })
     }
     return { sessions, turns, evidence, unparsedTime }
+  }
+
+  // ------------------------------------------------------------ P0-2a：所有者删除与纠正
+
+  /** id → 归属表。profile/summary 的 id 形如 profile-<uuid>/summary-<uuid>（与 search 命中同形）。 */
+  private resolveForgetTarget(id: string): { kind: 'turn' | 'fact' | 'profile' | 'summary'; row: { deleted: boolean } } | undefined {
+    const checks: Array<[string, string, 'turn' | 'fact' | 'profile' | 'summary']> = [
+      ['turn_id', 'mem_turns', 'turn'],
+      ['fact_id', 'mem_facts', 'fact'],
+      ['profile_id', 'mem_profiles', 'profile'],
+      ['summary_id', 'mem_summaries', 'summary'],
+    ]
+    for (const [col, table, kind] of checks) {
+      if (id.startsWith(kind + '-')) {
+        const row = this.db.prepare(`SELECT deleted_at_ms AS d FROM ${table} WHERE ${col} = ?`).get(id) as { d: number | null } | undefined
+        if (row === undefined) return undefined
+        return { kind, row: { deleted: row.d !== null } }
+      }
+    }
+    return undefined
+  }
+
+  /** planForget 与 forget 共用：只读，事务内重算以兜住 plan→forget 间的写入。 */
+  private buildForgetPlan(ids: string[]): ForgetPlan {
+    const plan: ForgetPlan = { turns: [], facts: [], profiles: [], summaries: [], vectors: 0, mentions: 0, orphanEntities: 0, sessionsToRebuild: [], notFound: [], causeOf: {} }
+    const turnSet = new Set<string>(); const factSet = new Set<string>()
+    const profSet = new Set<string>(); const sumSet = new Set<string>()
+    const tops = new Set<string>()
+    for (const id of ids) {
+      const t = this.resolveForgetTarget(id)
+      if (t === undefined || t.row.deleted) { plan.notFound.push(id); continue }
+      tops.add(id)
+      if (t.kind === 'turn') turnSet.add(id)
+      else if (t.kind === 'fact') factSet.add(id)
+      else if (t.kind === 'profile') profSet.add(id)
+      else sumSet.add(id)
+    }
+    // turn 级联：facts/summaries 的 source_turn_ids（JSON 数组文本）含该 turn_id。
+    // 每个级联项记 causeOf=触发它的顶层 turn；同时是顶层输入的项不记（仍按顶层处理）。
+    for (const turnId of turnSet) {
+      const like = `%"${turnId}"%`
+      for (const r of this.db.prepare(`SELECT fact_id FROM mem_facts WHERE source_turn_ids LIKE ? AND deleted_at_ms IS NULL`).all(like) as { fact_id: string }[]) {
+        if (!tops.has(r.fact_id) && !factSet.has(r.fact_id)) plan.causeOf[r.fact_id] = turnId
+        if (!tops.has(r.fact_id)) factSet.add(r.fact_id)
+      }
+      for (const r of this.db.prepare(`SELECT summary_id FROM mem_summaries WHERE source_turn_ids LIKE ? AND deleted_at_ms IS NULL`).all(like) as { summary_id: string }[]) {
+        if (!tops.has(r.summary_id) && !sumSet.has(r.summary_id)) plan.causeOf[r.summary_id] = turnId
+        if (!tops.has(r.summary_id)) sumSet.add(r.summary_id)
+      }
+    }
+    // fact 级联：profiles 的 evidence_fact_ids 含该 fact_id。
+    // 链式级联 turn→fact→profile：profile 的 cause 回溯到那个顶层 turn。
+    for (const factId of factSet) {
+      const cause = plan.causeOf[factId] ?? factId
+      const like = `%"${factId}"%`
+      for (const r of this.db.prepare(`SELECT profile_id FROM mem_profiles WHERE evidence_fact_ids LIKE ? AND deleted_at_ms IS NULL`).all(like) as { profile_id: string }[]) {
+        if (!tops.has(r.profile_id) && !profSet.has(r.profile_id)) plan.causeOf[r.profile_id] = cause
+        if (!tops.has(r.profile_id)) profSet.add(r.profile_id)
+      }
+    }
+    plan.turns = [...turnSet]; plan.facts = [...factSet]
+    plan.profiles = [...profSet]; plan.summaries = [...sumSet]
+    if (turnSet.size > 0) {
+      const slots = [...turnSet].map(() => '?').join(',')
+      plan.mentions = (this.db.prepare(`SELECT count(*) AS c FROM mem_mentions WHERE turn_id IN (${slots})`).get(...turnSet) as { c: number }).c
+      plan.orphanEntities = (this.db.prepare(
+        `SELECT count(*) AS c FROM mem_mentions m WHERE m.turn_id IN (${slots})
+           AND NOT EXISTS (SELECT 1 FROM mem_mentions m2 WHERE m2.entity_key = m.entity_key AND m2.turn_id NOT IN (${slots}))`,
+      ).get(...turnSet, ...turnSet) as { c: number }).c
+      plan.sessionsToRebuild = (this.db.prepare(`SELECT DISTINCT session_id AS s FROM mem_turns WHERE turn_id IN (${slots})`).all(...turnSet) as { s: string }[]).map(r => r.s)
+    }
+    // vectors：所有被删 owner（turn/fact/profile）各算一行
+    const owners: Array<[string, string]> = [
+      ...plan.turns.map((i): [string, string] => ['turn', i]),
+      ...plan.facts.map((i): [string, string] => ['fact', i]),
+      ...plan.profiles.map((i): [string, string] => ['profile', i]),
+    ]
+    for (const [k, i] of owners) {
+      plan.vectors += (this.db.prepare('SELECT count(*) AS c FROM mem_vectors WHERE owner_kind = ? AND owner_id = ?').get(k, i) as { c: number }).c
+    }
+    return plan
+  }
+
+  /** 只读删除计划：级联见 docs/design-memory-forget.md §1。不存在/已删 → notFound，不报错。 */
+  planForget(ids: string[]): ForgetPlan { return this.buildForgetPlan(ids) }
+
+  /** 供 forgetFlow 的会话日志扫描读正文——只在删除执行前有效。 */
+  readBodyForForget(kind: 'turn' | 'fact' | 'summary' | 'profile', id: string): string | null {
+    if (kind === 'profile') {
+      return (this.db.prepare('SELECT profile_body AS b FROM mem_profiles WHERE profile_id = ?').get(id) as { b: string | null } | undefined)?.b ?? null
+    }
+    const table = kind === 'turn' ? 'mem_turns' : kind === 'fact' ? 'mem_facts' : 'mem_summaries'
+    const col = kind === 'turn' ? 'turn_id' : kind === 'fact' ? 'fact_id' : 'summary_id'
+    return (this.db.prepare(
+      `SELECT b.body AS b FROM ${table} t LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref WHERE t.${col} = ?`,
+    ).get(id) as { b: string | null } | undefined)?.b ?? null
+  }
+
+  /**
+   * 所有者删除：事务内重算 plan 后执行——plan→forget 间的写入（巩固、新 turn）
+   * 会被重新级联进来，不会漏删。
+   * 存活实体的 mention_count / 边权不回调：那是统计量不是正文。
+   */
+  forget(ids: string[], actor: ActorKind = 'owner'): ForgetResult {
+    const now = Date.now()
+    this.db.exec('BEGIN IMMEDIATE')
+    let plan: ForgetPlan
+    try {
+      plan = this.buildForgetPlan(ids)
+      if (plan.turns.length === 0 && plan.facts.length === 0 && plan.profiles.length === 0 && plan.summaries.length === 0) {
+        this.db.exec('ROLLBACK')
+        return { ok: false, reason: 'plan 为空：全部 id 不存在或已删除' }
+      }
+      // memory.deleted 只认 turn/fact——链外派生项在下面直接 SQL 清。
+      // cascade_of 取 plan.causeOf（只记级联项）；derived_purged 只挂顶层目标、
+      // 且只含由该顶层目标引起的派生项——不把整份 plan 摊到每条事件上。
+      const tops2 = new Set(ids.filter(i => !plan.notFound.includes(i)))
+      const vectorsOf = (ownerPairs: Array<[string, string]>): number => {
+        let n = 0
+        for (const [k, i] of ownerPairs) n += (this.db.prepare('SELECT count(*) AS c FROM mem_vectors WHERE owner_kind = ? AND owner_id = ?').get(k, i) as { c: number }).c
+        return n
+      }
+      // 孤儿实体归属：归到第一个（plan.turns 顺序）提及它的被删 turn。
+      const orphanOwner = new Map<string, string>()
+      if (plan.turns.length > 0) {
+        const slots = plan.turns.map(() => '?').join(',')
+        const rows = this.db.prepare(
+          `SELECT m.entity_key AS k, m.turn_id AS t FROM mem_mentions m WHERE m.turn_id IN (${slots})`,
+        ).all(...plan.turns) as { k: string; t: string }[]
+        const hasOutside = (k: string) => (this.db.prepare(
+          `SELECT count(*) AS c FROM mem_mentions WHERE entity_key = ? AND turn_id NOT IN (${slots})`,
+        ).get(k, ...plan.turns) as { c: number }).c > 0
+        for (const t of plan.turns) {
+          for (const r of rows.filter(x => x.t === t)) {
+            if (!orphanOwner.has(r.k) && !hasOutside(r.k)) orphanOwner.set(r.k, t)
+          }
+        }
+      }
+      const derivedOf = (topId: string): Record<string, unknown> => {
+        const factsOf = plan.facts.filter(f => plan.causeOf[f] === topId)
+        const profilesOf = plan.profiles.filter(p => plan.causeOf[p] === topId)
+        const sumsOf = plan.summaries.filter(x => plan.causeOf[x] === topId)
+        const ownerPairs: Array<[string, string]> = [
+          [topId.startsWith('turn-') ? 'turn' : topId.startsWith('fact-') ? 'fact' : topId.startsWith('profile-') ? 'profile' : 'summary', topId],
+          ...factsOf.map((i): [string, string] => ['fact', i]),
+          ...profilesOf.map((i): [string, string] => ['profile', i]),
+        ]
+        return {
+          profiles: profilesOf, summaries: sumsOf,
+          vectors: vectorsOf(ownerPairs),
+          mentions: topId.startsWith('turn-')
+            ? (this.db.prepare('SELECT count(*) AS c FROM mem_mentions WHERE turn_id = ?').get(topId) as { c: number }).c : 0,
+          orphan_entities: [...orphanOwner.values()].filter(v => v === topId).length,
+        }
+      }
+      for (const [kind, list] of [['turn', plan.turns], ['fact', plan.facts]] as const) {
+        for (const id of list) {
+          const deletionId = `del-${randomUUID()}`
+          this.appendEvent({
+            kind: 'memory.deleted', actor, recordedAtMs: now,
+            payload: {
+              deletion_id: deletionId, target_kind: kind, target_id: id,
+              derivatives: ['body', 'projection', 'derived'],
+              ...(id in plan.causeOf ? { cascade_of: plan.causeOf[id] } : {}),
+              ...(tops2.has(id) ? { derived_purged: derivedOf(id) } : {}),
+            },
+          })
+          this.appendEvent({ kind: 'deletion.derivative-done', actor, recordedAtMs: now, payload: { deletion_id: deletionId } })
+        }
+      }
+      // profiles：删行 + FTS
+      for (const id of plan.profiles) {
+        const rid = (this.db.prepare('SELECT rowid AS r FROM mem_profiles WHERE profile_id = ?').get(id) as { r: number } | undefined)?.r
+        if (rid !== undefined) this.db.prepare('DELETE FROM mem_fts_profiles WHERE rowid = ?').run(rid)
+        this.db.prepare('DELETE FROM mem_profiles WHERE profile_id = ?').run(id)
+      }
+      // summaries：删行 + FTS + 清正文（summaries 的 body 在 mem_bodies）
+      for (const id of plan.summaries) {
+        const row = this.db.prepare('SELECT rowid AS r, body_ref FROM mem_summaries WHERE summary_id = ?').get(id) as { r: number; body_ref: string | null } | undefined
+        if (row?.body_ref) this.db.prepare('UPDATE mem_bodies SET body = NULL WHERE body_ref = ?').run(row.body_ref)
+        if (row) this.db.prepare('DELETE FROM mem_fts_summaries WHERE rowid = ?').run(row.r)
+        this.db.prepare('UPDATE mem_summaries SET body_ref = NULL, deleted_at_ms = ? WHERE summary_id = ?').run(now, id)
+      }
+      // vectors / mentions / 孤儿实体
+      for (const [k, i] of [
+        ...plan.turns.map((x): [string, string] => ['turn', x]),
+        ...plan.facts.map((x): [string, string] => ['fact', x]),
+        ...plan.profiles.map((x): [string, string] => ['profile', x]),
+      ]) this.db.prepare('DELETE FROM mem_vectors WHERE owner_kind = ? AND owner_id = ?').run(k, i)
+      for (const t of plan.turns) this.db.prepare('DELETE FROM mem_mentions WHERE turn_id = ?').run(t)
+      const orphans = this.db.prepare(
+        `SELECT entity_key FROM mem_entities e
+          WHERE NOT EXISTS (SELECT 1 FROM mem_mentions m WHERE m.entity_key = e.entity_key)`,
+      ).all() as { entity_key: string }[]
+      for (const o of orphans) {
+        this.db.prepare('DELETE FROM mem_links WHERE from_key = ? OR to_key = ?').run(o.entity_key, o.entity_key)
+        // topic 主键就是 entity_key（consolidate.ts 的 upsertTopic 按同一 key 写）——
+        // 它是实体名的规范化形态，属于内容，必须随实体删。
+        this.db.prepare('DELETE FROM mem_topics WHERE topic = ?').run(o.entity_key)
+        this.db.prepare('DELETE FROM mem_entities WHERE entity_key = ?').run(o.entity_key)
+      }
+      // sessions：剩余 turn 重算 body；无剩余则删行
+      for (const sid of plan.sessionsToRebuild) {
+        const sess = this.db.prepare(
+          `SELECT group_concat(b2.body, ' ') AS body, count(*) AS n
+             FROM mem_turns t2 JOIN mem_bodies b2 ON b2.body_ref = t2.body_ref
+            WHERE t2.session_id = ? AND b2.body IS NOT NULL AND t2.deleted_at_ms IS NULL`,
+        ).get(sid) as { body: string | null; n: number } | undefined
+        const rid = (this.db.prepare('SELECT rowid AS r FROM mem_sessions WHERE session_id = ?').get(sid) as { r: number } | undefined)?.r
+        if (sess !== undefined && sess.body !== null && sess.body !== '') {
+          this.db.prepare('UPDATE mem_sessions SET body = ?, turn_count = ?, updated_at_ms = ? WHERE session_id = ?').run(sess.body, sess.n, now, sid)
+          if (rid !== undefined) {
+            this.db.prepare('DELETE FROM mem_fts_sessions WHERE rowid = ?').run(rid)
+            this.db.prepare('INSERT INTO mem_fts_sessions(rowid, body) VALUES (?,?)').run(rid, sess.body)
+          }
+        } else {
+          if (rid !== undefined) this.db.prepare('DELETE FROM mem_fts_sessions WHERE rowid = ?').run(rid)
+          this.db.prepare('DELETE FROM mem_sessions WHERE session_id = ?').run(sid)
+        }
+      }
+      this.db.exec('COMMIT')
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+    // 提交后做物理层收口：FTS 段合并（旧 token 仍在段里）+ WAL 截断（旧页还在文件里）。
+    for (const t of ['mem_fts_turns', 'mem_fts_facts', 'mem_fts_sessions', 'mem_fts_profiles', 'mem_fts_summaries']) {
+      this.db.exec(`INSERT INTO ${t}(${t}) VALUES('optimize')`)
+    }
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+    return { ok: true, plan }
+  }
+
+  /** 所有者纠正：新 fact 顶替旧值；旧行退役且记 superseded_by（可逆）。turn 只能删不能改。 */
+  correctFact(input: { factId: string; object: string; actor?: ActorKind }): string {
+    const actor = input.actor ?? 'owner'
+    if (input.factId.startsWith('turn-')) {
+      throw new Error('对话原文（turn）只能删除，不能纠正——内容已发生，修改等于改写历史')
+    }
+    const old = this.db.prepare(
+      'SELECT fact_id, subject, predicate, identity_key, origin, retention_class, importance, deleted_at_ms, retired_at_ms, superseded_by, valid_from_ms, applicable_when, confidence FROM mem_facts WHERE fact_id = ?',
+    ).get(input.factId) as {
+      fact_id: string; subject: string; predicate: string; identity_key: string; origin: string
+      retention_class: string; importance: number; deleted_at_ms: number | null; retired_at_ms: number | null
+      superseded_by: string | null; valid_from_ms: number | null; applicable_when: string | null; confidence: number | null
+    } | undefined
+    if (old === undefined || old.deleted_at_ms !== null) throw new Error(`correctFact：${input.factId} 不存在或已删除`)
+    if (old.superseded_by !== null) throw new Error(`correctFact：${input.factId} 已被 ${old.superseded_by} 取代，改它没意义——纠正新行`)
+    const now = Date.now()
+    const newFactId = `fact-${randomUUID()}`
+    const bodyRef = `body-${randomUUID()}`
+    const bodySha = sha256hex(input.object)
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(
+        `INSERT INTO mem_bodies (body_ref, sha256, body, byte_length, written_at_ms) VALUES (?,?,?,?,?)`,
+      ).run(bodyRef, bodySha, input.object, Buffer.byteLength(input.object, 'utf8'), now)
+      this.appendEvent({
+        kind: 'fact.corrected', actor, recordedAtMs: now,
+        payload: {
+          fact_id: input.factId, new_fact_id: newFactId,
+          subject: old.subject, predicate: old.predicate,
+          identity_key: `${old.subject.trim().toLowerCase()}|${old.predicate.trim().toLowerCase()}|${bodySha}`,
+          body_ref: bodyRef, body_sha256: bodySha,
+          provenance: 'stated', confirmation_basis: 'owner-stated',
+          origin: old.origin, retention_class: old.retention_class,
+          importance: Math.max(old.importance, 0.8), source_turn_ids: [],
+          valid_from_ms: old.valid_from_ms, applicable_when: old.applicable_when, confidence: old.confidence,
+        },
+      })
+      this.db.exec('COMMIT')
+      return newFactId
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
   }
 
   rebuildProjections(): void {

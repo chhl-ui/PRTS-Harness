@@ -18,6 +18,9 @@ import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Ledger } from '../ledger/index.ts'
+import type { MemoryStore } from '../memory/index.ts'
+import { findForOwner, forgetFlow, correctFlow } from '../memory/forget-flow.ts'
+import { AuditLog } from '../audit/audit.ts'
 import type { Authority } from '../authority/index.ts'
 import type { ApprovalBridge } from '../runtime/start.ts'
 
@@ -132,6 +135,10 @@ export interface ChatDeps {
   onIdle?: () => void
   /** 任务账本；未提供时 /task 系列命令不可用（明确报错，不静默忽略）。 */
   ledger?: Ledger
+  /** 记忆库句柄；未提供时 /memory /forget /correct 报不可用。 */
+  memory?: MemoryStore
+  /** core.sqlite 路径；forget 用它在同库记 K4 删除。 */
+  dbPath?: string
   /**
    * E3 授权句柄（与运行时同库）。未提供时越界操作走 fail-closed：
    * pre-execute 仍会发起 ask，但没有 answerer 应答，结果是 'unavailable' → 拒绝。
@@ -363,6 +370,44 @@ async function runBudget(deps: ChatDeps, id: string, json: string, sessionId: st
   deps.onIdle?.()
 }
 
+// ---- P0-2a：所有者记忆命令。斜杠命令不发模型、不落记忆 turn（handler 在分发处直接 return）。 ----
+async function runMemoryFind(deps: ChatDeps, query: string): Promise<void> {
+  if (deps.memory === undefined) { deps.out('[prts] 未配置记忆库，/memory 不可用\n'); return }
+  if (query === '') { deps.out('[prts] 用法：/memory <检索词>\n'); return }
+  const hits = findForOwner(deps.memory, query)
+  if (hits.length === 0) { deps.out('[prts] 无命中\n'); return }
+  deps.out(hits.map(h => `${h.id}\t${h.kind}\t${h.time ?? '时间未知'}\t${h.text}`).join('\n') + '\n')
+}
+
+async function runForget(deps: ChatDeps, arg: string): Promise<void> {
+  if (deps.memory === undefined) { deps.out('[prts] 未配置记忆库，/forget 不可用\n'); return }
+  const yes = arg.endsWith('--yes') || arg.includes(' --yes')
+  const ids = arg.replace(/--yes/g, '').split(',').map(x => x.trim()).filter(x => x !== '')
+  if (ids.length === 0) { deps.out('[prts] 用法：/forget <id,...> [--yes]\n'); return }
+  let audit: AuditLog | undefined
+  try {
+    if (yes && deps.dbPath !== undefined) audit = AuditLog.open(deps.dbPath)
+    const r = forgetFlow({
+      store: deps.memory, audit,
+      sessionsRoot: join(deps.dataRoot, 'dsh-home', 'sessions'),
+      ids, confirm: yes,
+    })
+    deps.out(r.message + '\n')
+  } finally { audit?.close() }
+}
+
+async function runCorrect(deps: ChatDeps, arg: string): Promise<void> {
+  if (deps.memory === undefined) { deps.out('[prts] 未配置记忆库，/correct 不可用\n'); return }
+  const i = arg.indexOf(' ')
+  if (i < 0) { deps.out('[prts] 用法：/correct <factId> <新内容>\n'); return }
+  try {
+    const r = correctFlow({ store: deps.memory, factId: arg.slice(0, i), object: arg.slice(i + 1) })
+    deps.out(r.message + '\n')
+  } catch (e) {
+    deps.out(`[prts] ${e instanceof Error ? e.message : String(e)}\n`)
+  }
+}
+
 async function runTasks(deps: ChatDeps): Promise<void> {
   if (deps.ledger === undefined) {
     deps.out('[prts] 未配置 ledger，/tasks 不可用\n')
@@ -495,6 +540,19 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
       }
       if (line.startsWith('/task-approve')) {
         await runTaskApprove(deps, line.slice('/task-approve'.length).trim(), sessionId)
+        continue
+      }
+      // ---- P0-2a 所有者记忆命令：不触发模型回合 ----
+      if (line === '/memory' || line.startsWith('/memory ')) {
+        await runMemoryFind(deps, line.slice('/memory'.length).trim())
+        continue
+      }
+      if (line === '/forget' || line.startsWith('/forget ')) {
+        await runForget(deps, line.slice('/forget'.length).trim())
+        continue
+      }
+      if (line === '/correct' || line.startsWith('/correct ')) {
+        await runCorrect(deps, line.slice('/correct'.length).trim())
         continue
       }
       // 所有者裁决命令：全部走 owner 通道，不经模型工具层。

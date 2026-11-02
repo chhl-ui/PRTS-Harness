@@ -200,6 +200,10 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 - credentials `resolve(ref)`：`credentialRef()` 返回品牌字符串（ref 即 'DEEPSEEK_API_KEY'）；适配器取 `hit.value`；DeepSeek 请求头是 `x-api-key`（无 Authorization）。
 - llm 消息 `content` 是块数组 `[{type:'text',text}]`；`baseURL` 经 patch `config:{baseURL}` 可指向假端点（请求路径 `/v1/messages`）。
 
+### 记忆的所有者删除与纠正（P0-2a）
+
+`MemoryStore.planForget / forget / correctFact` + `forget-flow.ts` 编排：turn/fact 级联删除（含 vectors/mentions/孤儿实体/sessions 重算 + FTS optimize + wal_checkpoint 物理收口），fact 可纠正（`superseded_by` 可逆）；turn 只能删不能改。入口：`prts memory find/forget/correct` 与 chat 的 `/memory /forget /correct`——全是所有者通道，模型面零工具。设计与边界（含 P0-2b 会话日志未做的原因）见 `docs/design-memory-forget.md`。
+
 ## 外部参考与选型
 
 实现本项目没有的能力、或做技术选型前，先检索 GitHub（repo 看有没有、code 看怎么实现、issue 看坑）与论文（arXiv / Papers with Code，优先选有开源实现的），评估许可证、活性、真实度、契合度、代价，结论必须是「复用 / 适配 / 借鉴设计 / 自建」四选一并写理由。

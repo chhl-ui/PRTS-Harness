@@ -90,6 +90,10 @@ const createAppReady = () => {
 }
 
 export async function startRuntime(o: StartRuntimeOptions): Promise<{
+  /** 记忆库句柄（打不开时为 undefined）。 */
+  memory?: MemoryStore
+  /** Authority/Ledger 共用的 core.sqlite 路径。 */
+  dbPath: string
   ctx: Context
   ledger: Ledger
   authority: Authority
@@ -557,6 +561,10 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     ledger,
     authority,
     approvalBridge,
+    /** 记忆库句柄（打不开时为 undefined；chat 的所有者记忆命令据此报不可用）。 */
+    memory,
+    /** Authority/Ledger 共用的 core.sqlite 路径——chat 的 forgetFlow 用它在同库记 K4 删除。 */
+    dbPath,
     /** 本次实际注册的 prts_task_* / prts_memory_* 工具名（来自注册回执，不是手写常量）。 */
     toolNames: [...taskTools.names, ...(memoryTools?.names ?? [])],
     /** 本会话最近一次模型创建的 draft；进程内易失提示，不是账本事实。 */

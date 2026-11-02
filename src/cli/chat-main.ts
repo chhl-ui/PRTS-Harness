@@ -91,6 +91,9 @@ try {
     dataRoot,
     // 账本句柄来自 startRuntime（W0）。不传的话 /task 系列命令会在终端里报不可用。
     ledger: app.ledger,
+    // P0-2a：所有者记忆命令（/memory /forget /correct）——同库同句柄，不再开第二个 store。
+    memory: app.memory,
+    dbPath: app.dbPath,
     // E3 审批：授权句柄 + 能力桥都来自 startRuntime；缺任一则越界操作 fail-closed。
     authority: app.authority,
     approvalBridge: app.approvalBridge,

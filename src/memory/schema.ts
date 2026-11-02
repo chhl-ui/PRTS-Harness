@@ -297,6 +297,8 @@ function ensureFactAccessColumns(db: DatabaseSync): void {
     db.exec('ALTER TABLE mem_facts ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0')
   }
   if (!cols.includes('last_access_ms')) db.exec('ALTER TABLE mem_facts ADD COLUMN last_access_ms INTEGER')
+  // fact.corrected 的旧行指针（P0-2a）。纠正可逆靠它找回旧值；不写进 SCHEMA 索引。
+  if (!cols.includes('superseded_by')) db.exec('ALTER TABLE mem_facts ADD COLUMN superseded_by TEXT')
 }
 
 /**

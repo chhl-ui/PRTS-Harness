@@ -75,6 +75,46 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       }
       break
     }
+    case 'fact.corrected': {
+      const p = JSON.parse(e.payload_json) as FactAssertedPayload & {
+        fact_id: string
+        new_fact_id: string
+      }
+      // 新行：与 fact.asserted 同一插入（correctFact 已保证新 id 不与现有行撞）。
+      db.prepare(
+        `INSERT INTO mem_facts (
+           fact_id, scope, subject, predicate, identity_key, body_ref, valid_from_ms, valid_to_ms,
+           recorded_at_ms, provenance, confirmation_basis, origin, confidence,
+           revision, applicable_when, retention_class, source_turn_ids, importance
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(fact_id) DO NOTHING`,
+      ).run(
+        p.new_fact_id, e.scope, p.subject, p.predicate,
+        (p as { identity_key?: string }).identity_key
+          ?? `${p.subject.trim().toLowerCase()}|${p.predicate.trim().toLowerCase()}|${p.body_sha256 ?? ''}`,
+        p.body_ref,
+        p.valid_from_ms ?? null, p.valid_to_ms ?? null, e.recorded_at_ms,
+        p.provenance, p.confirmation_basis, p.origin, p.confidence ?? null,
+        1, p.applicable_when ?? null, p.retention_class,
+        JSON.stringify(p.source_turn_ids ?? []), p.importance,
+      )
+      const rid = (db.prepare('SELECT rowid AS r FROM mem_facts WHERE fact_id = ?')
+        .get(p.new_fact_id) as { r: number } | undefined)?.r
+      const obj = p.body_ref === null ? '' : (
+        db.prepare('SELECT body FROM mem_bodies WHERE body_ref = ?')
+          .get(p.body_ref) as { body: string | null } | undefined
+      )?.body ?? ''
+      if (rid !== undefined) {
+        db.prepare('INSERT INTO mem_fts_facts(rowid, body) VALUES (?,?)')
+          .run(rid, `${p.subject} ${p.predicate} ${obj}`)
+      }
+      // 旧行退役 + 指向新行——纠正可逆靠 superseded_by 找回旧值。
+      db.prepare(
+        `UPDATE mem_facts SET retired_at_ms = ?, superseded_by = ?
+          WHERE fact_id = ? AND deleted_at_ms IS NULL AND retired_at_ms IS NULL`,
+      ).run(e.recorded_at_ms, p.new_fact_id, p.fact_id)
+      break
+    }
     case 'fact.retired': {
       const p = JSON.parse(e.payload_json) as {
         fact_id: string

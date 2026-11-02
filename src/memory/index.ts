@@ -37,4 +37,8 @@ export type {
   RecallPath,
   RetentionClass,
   VectorOwnerKind,
+  ForgetPlan,
+  ForgetResult,
 } from './types.ts'
+export { findForOwner, forgetFlow, correctFlow } from './forget-flow.ts'
+export type { OwnerHit, ForgetFlowResult } from './forget-flow.ts'

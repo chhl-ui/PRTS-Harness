@@ -15,7 +15,8 @@
  * 库路径优先级与运行时一致：`--db` > `PRTS_MEMORY_DB` > `<PRTS_DATA_ROOT>/memory.sqlite`。
  */
 import { join } from 'node:path'
-import { MemoryStore, type VectorOwnerKind } from '../memory/index.ts'
+import { MemoryStore, findForOwner, forgetFlow, correctFlow, type VectorOwnerKind } from '../memory/index.ts'
+import { AuditLog } from '../audit/audit.ts'
 import { OllamaEmbedder } from '../memory/embedding.ts'
 import { OllamaGenerator } from '../memory/generate.ts'
 
@@ -24,6 +25,9 @@ const USAGE = `usage:
   prts memory consolidate [--db <path>]
   prts memory retire     [--db <path>] [--limit N] [--floor F] [--min-age-days D] [--apply]
   prts memory restore <factId...> [--db <path>]
+  prts memory find --query <text> [--db <path>]
+  prts memory forget --id <id,...> [--yes] [--db <path>]
+  prts memory correct --fact <id> --object <text> [--db <path>]
   prts memory extract-facts [--db <path>] [--limit N] [--batch N] [--model M] [--ollama URL] --apply
   prts memory embed        [--db <path>] [--kinds turn,fact,profile] [--limit N] [--model M] [--ollama URL] --apply`
 
@@ -205,6 +209,9 @@ export function memoryCommand(args: string[]): number {
       case 'consolidate': return consolidate(store)
       case 'retire': return retire(store, args)
       case 'restore': return restore(store, args)
+      case 'find': return find(store, args)
+      case 'forget': return forget(store, args)
+      case 'correct': return correct(store, args)
       default:
         console.error(`prts memory: 未知子命令 ${sub}`)
         console.error(USAGE)
@@ -265,4 +272,50 @@ export async function memoryEmbedVectors(args: string[]): Promise<number> {
   } finally {
     store?.close()
   }
+}
+
+
+/** 所有者找回：带退役行（找回「淡忘的东西」）。 */
+function find(store: MemoryStore, args: string[]): number {
+  const q = arg(args, '--query')
+  if (q === undefined) { console.error('prts memory find: 需要 --query <text>'); return 2 }
+  const hits = findForOwner(store, q)
+  if (hits.length === 0) { console.log('无命中'); return 0 }
+  for (const h of hits) console.log(`${h.id}	${h.kind}	${h.time ?? '时间未知'}	${h.text}`)
+  return 0
+}
+
+/** 所有者删除：--yes 才执行；K4 记账需要 PRTS_DATA_ROOT。 */
+function forget(store: MemoryStore, args: string[]): number {
+  const raw = arg(args, '--id')
+  if (raw === undefined) { console.error('prts memory forget: 需要 --id <id,...>'); return 2 }
+  const ids = raw.split(',').map(s => s.trim()).filter(s => s !== '')
+  const yes = args.includes('--yes')
+  const dataRoot = process.env.PRTS_DATA_ROOT
+  let audit: AuditLog | undefined
+  if (yes) {
+    if (dataRoot === undefined) {
+      console.error('prts memory forget --yes: 需要 PRTS_DATA_ROOT（定位 core.sqlite 与会话日志）')
+      return 2
+    }
+    audit = AuditLog.open(process.env.PRTS_DB ?? join(dataRoot, 'core.sqlite'))
+  }
+  try {
+    const r = forgetFlow({
+      store, audit,
+      sessionsRoot: dataRoot === undefined ? undefined : join(dataRoot, 'dsh-home', 'sessions'),
+      ids, confirm: yes,
+    })
+    console.log(r.message)
+    return r.ok ? (yes ? 0 : 2) : 2
+  } finally { audit?.close() }
+}
+
+/** 所有者纠正：新值顶替旧值，旧值可逆找回。 */
+function correct(store: MemoryStore, args: string[]): number {
+  const id = arg(args, '--fact'); const obj = arg(args, '--object')
+  if (id === undefined || obj === undefined) { console.error('prts memory correct: 需要 --fact <id> --object <text>'); return 2 }
+  const r = correctFlow({ store, factId: id, object: obj })
+  console.log(r.message)
+  return r.ok ? 0 : 2
 }

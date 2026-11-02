@@ -74,6 +74,8 @@ export interface MemoryQuery {
   nowMs?: number
   /** 默认 `['live']`——基准数据不进验收路径。 */
   includeOrigin?: Origin[]
+  /** 所有者视图：退役行也参与检索（找回「淡忘的东西」用）。默认 false。 */
+  includeRetired?: boolean
   /** 第一版恒为 `'prts'`；暴露出来是为了让多 scope 守卫测试能查到它。 */
   scope?: string
   /**
@@ -197,6 +199,7 @@ export type MemoryEventKind =
   | 'fact.reinforced'
   | 'turn.recorded'
   | 'summary.generated'
+  | 'fact.corrected'
   | 'memory.deleted'
   | 'deletion.derivative-done'
 
@@ -225,4 +228,25 @@ export interface MemoryEventRow {
   payload_json: string
   prev_hash: string
   hash: string
+}
+
+/** `planForget` 的只读计划：`turns/facts/profiles/summaries` 为 id 列表，其余为计数。不含正文。 */
+export interface ForgetPlan {
+  turns: string[]
+  facts: string[]
+  profiles: string[]
+  summaries: string[]
+  vectors: number
+  mentions: number
+  orphanEntities: number
+  sessionsToRebuild: string[]
+  notFound: string[]
+  /** 级联得到的 fact/profile/summary id → 触发它的顶层 id（链式级联时也指向最顶层）。 */
+  causeOf: Record<string, string>
+}
+export interface ForgetResult {
+  ok: boolean
+  reason?: string
+  /** 事务内实际执行的计划（可与预览不同——间隔内的写入会被重新级联进来）。 */
+  plan?: ForgetPlan
 }
