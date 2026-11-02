@@ -151,3 +151,8 @@ UNIQUE(project, qualified_name)
 - 本文覆盖 §5.3 的十三项，未覆盖 §5.3 的「工作区装配（上下文）」部分——那属于 §5.3 后半段，另需一组对账（V1-08 长对话约束保持、V1-16 装配 P95 ≤ 1s、V1-18 宿主装配 vs 模型自管对比）。
 - 本文未涉及 §5.4 进化的完整机制，只在「技能与经验」格侧面碰到（可进化对象之一是技能，但候选/启用分离的评估流程在 §5.4）。
 - 架构需求 §9 记忆一行的候选，本文核实了 `hindsight`，未核实 `hermes` / `openviking` / `llama-index`（不在参考库）。
+
+> **2026-11-02 续**：上表里 **Graphiti 与 HippoRAG 已对账**，见 `memory-landscape-graphiti-hipporag-2026-11-02.md`。
+> 结论与本文同类（不可复用），但两家各给了一条可操作路径：Graphiti 的双时间边失效 → P2 时间图；
+> HippoRAG 的无向 PPR（damping 0.5）→ 扩散激活的形态重估（我们 −31.2pp 否决的是加权求和，不是 PPR）。
+> **Letta/MemGPT 与 Generative Agents 仍未对账**，别重复本文已完成的三家。
