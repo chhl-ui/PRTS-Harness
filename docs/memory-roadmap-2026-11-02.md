@@ -36,7 +36,7 @@
 |---|---|
 | 索引 | ✅ 有（规则实体、画像、摘要、生命周期的 chunk 化= turn 原样） |
 | 检索 | ✅ 混合路已上生产（opt-in `PRTS_EMBED=1`，Ollama 探活门控，失败降级纯 bm25） |
-| **阅读** | ❌ **几乎没有**：注入 5 条原始 turn，不做时间线/实体卡片/冲突消解 |
+| **阅读** | ✅ **已落地**（2026-11-02）：命中按主题/会话归组成卡，组内时间升序标「最新/较早」——`src/memory/reading.ts`，注入与 `prts_memory_recall` 共用 |
 
 ## 三、实测数据支撑的判断（本会话产出）
 
@@ -65,7 +65,7 @@
 - 成本：向量化 44 分钟 / 1.0 GB 已就绪；查询 +0.25 s；需处理 Ollama 不可用时的降级（退化为纯 bm25，不能报错）。
 - 风险：内存常驻 1 GB；Ollama 的 embedding runner 连续跑 1–2 万条会崩（分片绕过）。
 
-### P1：补「阅读」阶段（当前最大的结构性缺口）
+### P1：补「阅读」阶段（当前最大的结构性缺口）——**已实现**（2026-11-02）
 
 现在只做「检索 top-k 原始 turn」，模型自己拼。LongMemEval 的三阶段框架里，PRTS 缺的是最后一段。
 这也直接对应 `830ce83f` 那类失败：答案分散在多条 turn 里，top-5 只取到一条。
@@ -74,6 +74,12 @@
   冲突时显式标「较早值 / 最新值」。
 - 判据：multi-session 分型的 recall@8 从 27.2% 提升，且 knowledge-update 不再因旧值干扰掉分。
 - 成本：纯本地拼接，无模型调用；改的是注入层的组织方式。
+- **落地形态**（`src/memory/reading.ts`）：聚合键从强到弱为 fact slot →
+  turn 实体提及（`mem_mentions`）→ turn 正文含 fact slot 名 → fact 的 `sourceTurnIds`
+  → 同 sessionId 兜底；分不出组的命中保持平铺（与旧格式逐字一致，评测口径不变）。
+  注入与 `prts_memory_recall` 共用 `renderReading`。附带修了一个检索缺口：
+  LIKE 兜底路的 fact 条件补 `f.slot`——「咖啡/相机」这类 2 字主题名原本不可达。
+- **判据状态**：结构已就位；multi-session/knowledge-update 分型的复测待 benchmark 口径下做。
 
 ### P2：时间图（对应 recency 偏置的根因）
 

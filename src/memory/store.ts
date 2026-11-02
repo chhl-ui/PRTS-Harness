@@ -31,8 +31,8 @@ import { parseTime } from './time.ts'
 import { tokenize } from './tokenize.ts'
 import { looksLikeCorrection, normalizeSlotKey } from './correction.ts'
 import type {
-  ActorKind, AssertFactInput, ImportStats, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput, ForgetPlan, ForgetResult,
-  VectorOwnerKind,
+  ActorKind, AssertFactInput, FactMeta, ImportStats, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput, ForgetPlan, ForgetResult,
+  TurnEntityMention, VectorOwnerKind,
 } from './types.ts'
 
 const SCOPE = 'prts'
@@ -659,6 +659,70 @@ export class MemoryStore {
     return out
   }
 
+  /**
+   * 阅读阶段（`reading.ts`，roadmap P1）的事实元数据二阶补查。
+   *
+   * 不挂 `MemoryHit`：`search()` 的投影面已横跨四张表，而 subject/slot/
+   * sourceTurnIds 只有注入与召回这两个「组织上下文」的消费方才用。
+   * IN 查询走主键，调用方按命中条数传参（注入 ≤ limit、召回 ≤ 20），代价可忽略。
+   */
+  factMeta(factIds: readonly string[]): Map<string, FactMeta> {
+    const out = new Map<string, FactMeta>()
+    if (factIds.length === 0) return out
+    const rows = this.db.prepare(
+      `SELECT fact_id, subject, predicate, slot, valid_from_ms, recorded_at_ms, source_turn_ids
+         FROM mem_facts
+        WHERE scope = ? AND fact_id IN (${factIds.map(() => '?').join(',')})`,
+    ).all(SCOPE, ...factIds) as Array<{
+      fact_id: string
+      subject: string
+      predicate: string
+      slot: string | null
+      valid_from_ms: number | null
+      recorded_at_ms: number | null
+      source_turn_ids: string | null
+    }>
+    for (const r of rows) {
+      let sourceTurnIds: string[] = []
+      if (r.source_turn_ids !== null) {
+        try {
+          const parsed = JSON.parse(r.source_turn_ids) as unknown
+          if (Array.isArray(parsed)) sourceTurnIds = parsed.filter((x): x is string => typeof x === 'string')
+        } catch { /* 投影损坏时按无来源处理，不阻断阅读阶段 */ }
+      }
+      out.set(r.fact_id, {
+        subject: r.subject, predicate: r.predicate, slot: r.slot,
+        validFromMs: r.valid_from_ms, recordedAtMs: r.recorded_at_ms, sourceTurnIds,
+      })
+    }
+    return out
+  }
+
+  /**
+   * turn 命中的实体提及（`mem_mentions` × `mem_entities`）。
+   * 阅读阶段拿它做主题卡聚合键；`mentionCount` 供消费方过滤枢纽实体。
+   */
+  turnEntities(turnIds: readonly string[]): Map<string, TurnEntityMention[]> {
+    const out = new Map<string, TurnEntityMention[]>()
+    if (turnIds.length === 0) return out
+    const rows = this.db.prepare(
+      `SELECT m.turn_id, m.entity_key, e.name, e.mention_count
+         FROM mem_mentions m JOIN mem_entities e ON e.entity_key = m.entity_key
+        WHERE e.scope = ? AND m.turn_id IN (${turnIds.map(() => '?').join(',')})`,
+    ).all(SCOPE, ...turnIds) as Array<{
+      turn_id: string
+      entity_key: string
+      name: string
+      mention_count: number
+    }>
+    for (const r of rows) {
+      const list = out.get(r.turn_id) ?? []
+      list.push({ key: r.entity_key, name: r.name, mentionCount: r.mention_count })
+      out.set(r.turn_id, list)
+    }
+    return out
+  }
+
   /** 当前库里的 fact 条数（含已删除）。 */
   countFacts(): number {
     return (this.db.prepare('SELECT count(*) c FROM mem_facts WHERE scope = ?').get(SCOPE) as { c: number }).c
@@ -1116,14 +1180,18 @@ export class MemoryStore {
       : (fused.size === 0 && longTokens.length > 0 ? tokens : [])
     if (likeTokens.length > 0) {
       const pats = likeTokens.map((t) => `%${escapeLike(t)}%`)
+      // fact 的可检索口径 = subject + predicate + body + slot（与 FTS 建索引的
+      // 文本一致）。slot 不能漏：「咖啡/相机」这类 2 字主题名走的就是这条
+      // LIKE 兜底（trigram 要 ≥3 字符），漏掉等于 2 字 slot 名不可检索。
       const factConds = likeTokens
-        .map(() => "(b.body LIKE ? ESCAPE '\\' OR f.subject LIKE ? ESCAPE '\\' OR f.predicate LIKE ? ESCAPE '\\')")
+        .map(() => "(b.body LIKE ? ESCAPE '\\' OR f.subject LIKE ? ESCAPE '\\' OR f.predicate LIKE ? ESCAPE '\\' OR f.slot LIKE ? ESCAPE '\\')")
         .join(' OR ')
       const turnConds = likeTokens.map(() => "b.body LIKE ? ESCAPE '\\'").join(' OR ')
       const factHitExpr = likeTokens
         .map(() => `(CASE WHEN b.body LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END
                        + CASE WHEN f.subject LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END
-                       + CASE WHEN f.predicate LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)`)
+                       + CASE WHEN f.predicate LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END
+                       + CASE WHEN f.slot LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)`)
         .join(' + ')
       const turnHitExpr = likeTokens
         .map(() => `(CASE WHEN b.body LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END)`)
@@ -1139,8 +1207,8 @@ export class MemoryStore {
           ORDER BY hit_count DESC, f.recorded_at_ms DESC
           LIMIT ?`,
       ).all(
-        ...pats.flatMap((p) => [p, p, p]), scope, ...origins,
-        ...pats.flatMap((p) => [p, p, p]), cap,
+        ...pats.flatMap((p) => [p, p, p, p]), scope, ...origins,
+        ...pats.flatMap((p) => [p, p, p, p]), cap,
       ) as Array<{
         fact_id: string
         provenance: 'stated' | 'inferred'

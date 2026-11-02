@@ -25,7 +25,8 @@
  *   在对话中触发。它们的入口留待 CLI 子命令，见文末遗留。
  */
 import type { ToolRegistry } from './task-tools.ts'
-import type { Embedder, MemoryHit, MemoryStore } from '../memory/index.ts'
+import { renderReading } from '../memory/index.ts'
+import type { Embedder, MemoryHit, MemoryStore, ReadingDeps } from '../memory/index.ts'
 
 export interface MemoryToolDeps {
   store: MemoryStore
@@ -132,10 +133,23 @@ export function createMemoryTools(tools: ToolRegistry, deps: MemoryToolDeps): Me
         ...(queryVector === undefined ? {} : { queryVector, semanticTopK: limit, semanticMinSim: deps.semanticMinSim ?? 0.25 }),
       })
 
+      // 阅读阶段（roadmap P1）：命中按主题/会话归组成卡，与注入同一渲染。
+      // 元数据补查失败降级平铺——归组是增强不是闸门。
+      let reading: ReadingDeps = {}
+      if (hits.length > 0) {
+        const factIds = hits.filter((h) => h.kind === 'fact').map((h) => h.id)
+        const turnIds = hits.filter((h) => h.kind === 'turn').map((h) => h.id)
+        try {
+          reading = {
+            ...(factIds.length > 0 ? { factMeta: deps.store.factMeta(factIds) } : {}),
+            ...(turnIds.length > 0 ? { turnEntities: deps.store.turnEntities(turnIds) } : {}),
+          }
+        } catch { /* 元数据补查失败退回平铺 */ }
+      }
+      const rendered = renderReading(hits, reading)
       const body = hits.length === 0
         ? `记忆检索「${query}」没有命中。可能确实没记过，也可能换一组关键词再试。`
-        : `记忆检索「${query}」命中 ${hits.length} 条（按相关度排序）：\n${
-          hits.map((h, i) => `${i + 1}. [${h.kind}] ${toWire(h).occurredAt ?? '时间未知'} — ${h.text}`).join('\n')}`
+        : `记忆检索「${query}」命中 ${hits.length} 条（${rendered.grouped ? '已按主题/会话归组' : '按相关度排序'}）：\n${rendered.body}`
 
       // 用进废退：模型真的拿到了这些记忆才算「用过」。只强化 fact——
       // turn 没有重要性列，强化它没有落点。

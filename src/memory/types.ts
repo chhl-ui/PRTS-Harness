@@ -278,3 +278,31 @@ export interface ForgetResult {
   /** 事务内实际执行的计划（可与预览不同——间隔内的写入会被重新级联进来）。 */
   plan?: ForgetPlan
 }
+
+/**
+ * 阅读阶段（reading.ts，roadmap P1）的事实元数据。
+ *
+ * 不挂在 `MemoryHit` 上：`search()` 的投影面已经横跨四张表，而
+ * subject/slot/sourceTurnIds 只有注入与召回这两个「组织上下文」的消费方才用——
+ * 由 `store.factMeta()` 按需二阶补查，检索主路径不背这份成本。
+ */
+export interface FactMeta {
+  subject: string
+  predicate: string
+  /** 已规范化（写入时过过 normalizeSlotKey）；null = 无槽，不参与主题卡聚合。 */
+  slot: string | null
+  validFromMs: number | null
+  recordedAtMs: number | null
+  /** 产出本事实的来源 turn——更正 turn 与由它抽出的新事实天然同卡。 */
+  sourceTurnIds: string[]
+}
+
+/** turn 上的实体提及（`mem_mentions` × `mem_entities` 联查）。 */
+export interface TurnEntityMention {
+  /** `normalizeKey` 规范化后的实体键，与 slot 的规范化口径兼容。 */
+  key: string
+  /** 展示用原始写法（保留大小写）。 */
+  name: string
+  /** 全库提及数。枢纽实体（"Python" 之类）会把无关命中连成大卡，消费方据此跳过。 */
+  mentionCount: number
+}

@@ -335,7 +335,8 @@ test('U4 过滤后仍凑满 limit', async () => {
     const p = payloadOfTurn('光学镜头', 's1', 1)
     const out = await fake.fire(p, async () => enter([p.messages[0]]))
     const text = msgText(out, 1)
-    const hitLines = text.split('\n').filter(l => /^\d+\. \[/.test(l))
+    // 阅读阶段（P1）后命中可能归组成卡：编号行与卡内行都算命中行。
+    const hitLines = text.split('\n').filter(l => /^\d+\. \[/.test(l) || /^ {2}- \[/.test(l))
     assert.equal(hitLines.length, 2, `应凑满 limit=2：${text}`)
     assert.equal(text.includes('占位 A'), false, '本 session turn 应被滤掉')
     att.dispose()
@@ -377,6 +378,35 @@ test('U7 语义路接线：字面零重叠的命中经向量路进注入（咖�
     const out2 = await fake2.fire(p2, async () => enter([p2.messages[0]]))
     assert.equal(injCount(out2), 0, '无 embedder 时该查询应零命中')
     att.dispose(); att2.dispose()
+  } finally { t.cleanup(store) }
+})
+
+test('I9 阅读阶段接线：fact slot 把新旧值归成主题卡并标「最新」（拿铁场景）', async () => {
+  const t = makeTmp('prts-inj-i9-'); const store = MemoryStore.open(t.db())
+  try {
+    const now = Date.now()
+    store.recordTurn({
+      actor: 'system', sessionId: 'old', turnIndex: 0, speaker: 'user',
+      text: '我喜欢美式咖啡，每天一杯', occurredAtMs: now - 10 * 86_400_000,
+    })
+    const correctionTurn = store.recordTurn({
+      actor: 'system', sessionId: 'old', turnIndex: 1, speaker: 'user',
+      text: '更正一下：我最近改喝拿铁了，不再喝美式', occurredAtMs: now - 86_400_000,
+    })
+    store.assertFact({
+      actor: 'model', subject: '博士', predicate: '偏好', object: '拿铁',
+      provenance: 'inferred', confirmationBasis: 'model-inferred',
+      slot: '咖啡', sourceTurnIds: [correctionTurn],
+    })
+    const fake = fakeHookCtx()
+    const att = attachMemoryInjection(fake.ctx, { store })
+    const p = payloadOfTurn('我喝咖啡有什么习惯', 's1', 1)
+    const out = await fake.fire(p, async () => enter([p.messages[0]]))
+    const text = msgText(out, 1)
+    assert.match(text, /【咖啡】/, `三条命中应归成一张「咖啡」卡：${text}`)
+    assert.match(text, /· 较早 — 我喜欢美式咖啡/, '旧值标「较早」')
+    assert.match(text, /· 最新 — /, '卡内最新一条标「最新」')
+    att.dispose()
   } finally { t.cleanup(store) }
 })
 

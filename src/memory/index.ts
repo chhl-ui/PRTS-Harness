@@ -28,6 +28,7 @@ export type {
   ActorKind,
   AssertFactInput,
   ConfirmationBasis,
+  FactMeta,
   MemoryEventKind,
   MemoryEventRow,
   MemoryHit,
@@ -36,6 +37,7 @@ export type {
   Provenance,
   RecallPath,
   RetentionClass,
+  TurnEntityMention,
   VectorOwnerKind,
   ForgetPlan,
   ForgetResult,
@@ -43,3 +45,7 @@ export type {
 export { findForOwner, forgetFlow, correctFlow } from './forget-flow.ts'
 export type { OwnerHit, ForgetFlowResult } from './forget-flow.ts'
 export { looksLikeCorrection } from './correction.ts'
+export {
+  organizeReading, renderReading,
+  type ReadingDeps, type ReadingCard, type ReadingRender,
+} from './reading.ts'

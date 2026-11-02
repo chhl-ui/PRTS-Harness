@@ -23,7 +23,8 @@
  * 注入 runtime context 时用的同一条通道。
  */
 import { randomUUID } from 'node:crypto'
-import type { Embedder, MemoryHit, MemoryStore } from '../memory/index.ts'
+import { renderReading } from '../memory/index.ts'
+import type { Embedder, MemoryHit, MemoryStore, ReadingDeps } from '../memory/index.ts'
 
 export interface MemoryInjectionDeps {
   store: MemoryStore
@@ -95,22 +96,23 @@ function normalizeText(s: string): string {
   return s.replace(/\s+/g, '').replace(/[，。？！；：、,.?!;:]/g, '').toLowerCase()
 }
 
-function formatTime(hit: MemoryHit): string {
-  if (hit.occurredAtMs === null || hit.occurredAtMs === undefined) return hit.occurredRaw ?? '时间未知'
-  return new Date(hit.occurredAtMs).toISOString()
-}
-
 /**
  * 注入正文。必须自报来源，否则模型会把它当成用户这一轮说的话。
  *
  * 导出是给评测用的：离线探针必须喂**与生产完全相同**的文本，否则判分口径会漂——
  * 实测过一次（同一批题，带前缀的注入文本判 14/20，裸命中列表判 7/20），
  * 差 7 题全在格式而不是检索。
+ *
+ * `deps` 缺省时输出与历史版逐字一致的平铺编号列表；给出 `factMeta`/
+ * `turnEntities`（`store` 的二阶补查）后进入「阅读」阶段（roadmap P1）：
+ * 共享主题/会话的命中归组成卡，组内按时间升序并标出「最新」。
  */
-export function renderInjection(hits: MemoryHit[]): string {
-  const lines = hits.map((h, i) => `${i + 1}. [${h.kind}] ${formatTime(h)} — ${h.text}`)
-  return '[记忆检索] 与当前问题可能相关的历史记录（按相关度排序，来自长期记忆；不是用户本轮发言）：\n'
-    + lines.join('\n')
+export function renderInjection(hits: MemoryHit[], deps: ReadingDeps = {}): string {
+  const r = renderReading(hits, deps)
+  const header = r.grouped
+    ? '[记忆检索] 与当前问题可能相关的历史记录（已按主题/会话归组；组内按时间排序，「最新」指该主题下最近一次记录，「较早」是更早的陈述。来自长期记忆，不是用户本轮发言）：\n'
+    : '[记忆检索] 与当前问题可能相关的历史记录（按相关度排序，来自长期记忆；不是用户本轮发言）：\n'
+  return header + r.body
 }
 
 export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectionDeps): MemoryInjection {
@@ -182,10 +184,21 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
       injectedSteps.add(stepKey)
       for (const h of hits) seen.add(h.id)
       injectedHitIds.set(sessionId, seen)
+      // 阅读阶段（roadmap P1）：补查 fact 元数据与 turn 实体提及，
+      // 把命中组织成主题/会话卡。失败降级平铺——归组是增强不是闸门。
+      let reading: ReadingDeps = {}
+      const factIds = hits.filter((h) => h.kind === 'fact').map((h) => h.id)
+      const turnIds = hits.filter((h) => h.kind === 'turn').map((h) => h.id)
+      try {
+        reading = {
+          ...(factIds.length > 0 ? { factMeta: deps.store.factMeta(factIds) } : {}),
+          ...(turnIds.length > 0 ? { turnEntities: deps.store.turnEntities(turnIds) } : {}),
+        }
+      } catch { /* 元数据补查失败退回平铺注入 */ }
       const injected = {
         id: `mem-${randomUUID()}`,
         role: 'user',
-        content: [{ type: 'text', text: renderInjection(hits) }],
+        content: [{ type: 'text', text: renderInjection(hits, reading) }],
         source: { kind: 'user' },
       }
       return { ...decision, messages: [...decision.messages, injected] }
