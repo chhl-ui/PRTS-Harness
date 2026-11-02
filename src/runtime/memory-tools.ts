@@ -26,6 +26,7 @@
  */
 import type { ToolRegistry } from './task-tools.ts'
 import { renderReading } from '../memory/index.ts'
+import { applyRerank, type Reranker } from '../memory/rerank.ts'
 import type { Embedder, MemoryHit, MemoryStore, ReadingDeps } from '../memory/index.ts'
 
 export interface MemoryToolDeps {
@@ -36,6 +37,11 @@ export interface MemoryToolDeps {
   embedder?: () => Promise<Embedder | undefined>
   /** 语义路余弦下限，默认 0.25（与注入同口径，理由见 memory-inject.ts）。 */
   semanticMinSim?: number
+  /**
+   * 交叉编码器精排器（`PRTS_RERANK=1` 时由 start.ts 传入）。
+   * 与注入同口径：只重排候选池、不新增命中；抛错时保持原顺序。
+   */
+  reranker?: Reranker
 }
 
 export interface MemoryTools {
@@ -124,14 +130,26 @@ export function createMemoryTools(tools: ToolRegistry, deps: MemoryToolDeps): Me
           if (emb !== undefined) queryVector = (await emb.embed([query]))[0]
         } catch { /* 嵌入失败降级纯字面检索，不吞工具的可用性 */ }
       }
-      const hits = deps.store.search({
+      // 有精排器时先扩池（limit*3）再重排截回；没有则维持原口径，一行不变。
+      const pool = deps.reranker === undefined ? limit : Math.min(MAX_LIMIT * 3, limit * 3)
+      let hits = deps.store.search({
         text: query,
-        limit,
+        limit: pool,
         // 显式写死 live：默认值在 store 里已是 ['live']，工具面再钉一次，
         // 避免将来有人改默认值把评测数据带进生产检索。
         includeOrigin: ['live'],
-        ...(queryVector === undefined ? {} : { queryVector, semanticTopK: limit, semanticMinSim: deps.semanticMinSim ?? 0.25 }),
+        ...(queryVector === undefined ? {} : { queryVector, semanticTopK: pool, semanticMinSim: deps.semanticMinSim ?? 0.25 }),
       })
+
+      if (deps.reranker !== undefined && hits.length > 1) {
+        try {
+          const scores = await deps.reranker.score(query, hits.map((h) => h.text))
+          hits = applyRerank(hits, scores).slice(0, limit)
+        } catch (error) {
+          console.error(`[prts] memory tool rerank failed — 用原始顺序: ${error instanceof Error ? error.message : String(error)}`)
+          hits = hits.slice(0, limit)
+        }
+      }
 
       // 阅读阶段（roadmap P1）：命中按主题/会话归组成卡，与注入同一渲染。
       // 元数据补查失败降级平铺——归组是增强不是闸门。

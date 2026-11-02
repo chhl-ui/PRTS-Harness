@@ -426,3 +426,98 @@ test('U8 embedder 抛错降级：注入不退化，字面路照常工作', async
     att.dispose()
   } finally { t.cleanup(store) }
 })
+
+// ---- 精排（reranker）接入：只重排、不新增；任何失败都回落原顺序 ----
+
+/** 跑一次注入，返回注入正文（无注入时为空串）。 */
+async function captureText(
+  deps: Parameters<typeof attachMemoryInjection>[1],
+  query: string,
+): Promise<string> {
+  const fake = fakeHookCtx()
+  const att = attachMemoryInjection(fake.ctx, deps)
+  try {
+    const payload = payloadOf(query)
+    const out = await fake.fire(payload, async () => enter([...payload.messages])) as {
+      messages: Array<{ content: Array<{ text?: string }> }>
+    }
+    return out.messages[1]?.content?.[0]?.text ?? ''
+  } finally {
+    att.dispose()
+  }
+}
+
+/** 三条同主题事实，给精排器提供可重排的候选。 */
+function seedThree(store: MemoryStore): void {
+  for (const obj of ['甲方案 85mm', '乙方案 105mm', '丙方案 50mm']) {
+    store.assertFact({
+      actor: 'owner', subject: '博士', predicate: '偏好', object: obj,
+      provenance: 'stated', confirmationBasis: 'owner-stated',
+    })
+  }
+}
+
+/** 只给含 `target` 的候选打高分的假精排器。 */
+function prefer(target: string): { score(q: string, docs: readonly string[]): Promise<number[]>; close(): void } {
+  return {
+    async score(_q: string, docs: readonly string[]): Promise<number[]> {
+      return docs.map((d) => (d.includes(target) ? 10 : 0))
+    },
+    close() {},
+  }
+}
+
+test('RR1 精排器决定注入哪一条：换个目标就换一条命中', async () => {
+  const t = makeTmp('prts-inj-rr1-')
+  const store = MemoryStore.open(t.db())
+  try {
+    seedThree(store)
+    const q = '博士的光学镜头偏好是什么'
+    const without = await captureText({ store, limit: 1 }, q)
+    assert.notEqual(without, '', '前置：无精排时必须有注入')
+
+    const withB = await captureText({ store, limit: 1, reranker: prefer('乙方案') }, q)
+    const withC = await captureText({ store, limit: 1, reranker: prefer('丙方案') }, q)
+    assert.ok(withB.includes('乙方案'), '精排结果必须决定注入内容')
+    assert.ok(withC.includes('丙方案'), '换一个目标必须换一条命中——两条同时成立才排除巧合')
+    assert.notEqual(withB, withC)
+  } finally { t.cleanup(store) }
+})
+
+test('RR2 精排器抛错时回落原顺序，注入照常发生', async () => {
+  const t = makeTmp('prts-inj-rr2-')
+  const store = MemoryStore.open(t.db())
+  try {
+    seedThree(store)
+    const q = '博士的光学镜头偏好是什么'
+    const without = await captureText({ store, limit: 2 }, q)
+    const broken = {
+      async score(): Promise<number[]> { throw new Error('python 挂了') },
+      close() {},
+    }
+    const withBroken = await captureText({ store, limit: 2, reranker: broken }, q)
+    assert.equal(withBroken, without, '容器挂了不能改变注入内容，更不能让注入消失')
+  } finally { t.cleanup(store) }
+})
+
+test('RR3 命中不足两条时不调用精排器（省掉无意义的进程开销）', async () => {
+  const t = makeTmp('prts-inj-rr3-')
+  const store = MemoryStore.open(t.db())
+  try {
+    store.assertFact({
+      actor: 'owner', subject: '博士', predicate: '偏好', object: '光学镜头设计',
+      provenance: 'stated', confirmationBasis: 'owner-stated',
+    })
+    let calls = 0
+    const spy = {
+      async score(_q: string, docs: readonly string[]): Promise<number[]> {
+        calls += 1
+        return docs.map(() => 0)
+      },
+      close() {},
+    }
+    const text = await captureText({ store, limit: 5, reranker: spy }, '光学镜头')
+    assert.ok(text.includes('光学镜头设计'), '前置：单条命中也必须注入')
+    assert.equal(calls, 0, '只有一条候选时重排没有意义，不该起子进程')
+  } finally { t.cleanup(store) }
+})

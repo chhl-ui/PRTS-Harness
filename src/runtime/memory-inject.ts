@@ -24,12 +24,20 @@
  */
 import { randomUUID } from 'node:crypto'
 import { renderReading } from '../memory/index.ts'
+import { applyRerank, type Reranker } from '../memory/rerank.ts'
 import type { Embedder, MemoryHit, MemoryStore, ReadingDeps } from '../memory/index.ts'
 
 export interface MemoryInjectionDeps {
   store: MemoryStore
   /** 注入条数上限，默认 5。 */
   limit?: number
+  /**
+   * 交叉编码器精排器（`PRTS_RERANK=1` 时由 start.ts 传入）。
+   *
+   * 只重排候选、不新增命中：候选池内召回是硬上限，它解决的是「答案在池里、
+   * 但排不进 5 个注入名额」。未传或抛错时保持原有顺序，注入照常发生。
+   */
+  reranker?: Reranker
   /** 短于这么多字符的查询不检索：两个字的噪声大于信息，默认 4。 */
   minQueryChars?: number
   /**
@@ -172,13 +180,26 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
         .filter((h) => h.kind !== 'turn' || h.sessionId !== sessionId)
         .filter((h) => !seen.has(h.id))
         .filter((h) => h.kind !== 'turn' || normalizeText(h.text) !== queryKey)
+      // 精排（交叉编码器）：只重排 ranked，更正钉住（pinned）永远保持最前。
+      // 依据：产品口径 @5 28.8% → 38.1%（+22 题，McNemar p=0.0000），
+      // 见 docs/memory-recall-criteria-retest-2026-11-03.md 第九节。
+      // 失败一律回落原顺序——记忆可以少几条精排，不能因为精排器挂了就不注入。
+      let ordered = ranked
+      if (deps.reranker !== undefined && ranked.length > 1) {
+        try {
+          const scores = await deps.reranker.score(query, ranked.map((h) => h.text))
+          ordered = applyRerank(ranked, scores)
+        } catch (error) {
+          console.error(`[prts] memory rerank failed — 用原始顺序: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
       // 更正钉住：近 30 天带更正标记的 user turn 直接进名额，排在字面命中之前。
       // 已过滤同会话（它在上下文里）与已注入过的 id。
       const pinned = correctionPins <= 0 ? [] : deps.store
         .recentCorrections({ sinceMs: Date.now() - correctionWindowMs, limit: correctionPins, excludeSessionId: sessionId })
         .filter((h) => !seen.has(h.id))
       const pinnedIds = new Set(pinned.map((h) => h.id))
-      const hits = [...pinned, ...ranked.filter((h) => !pinnedIds.has(h.id))].slice(0, limit)
+      const hits = [...pinned, ...ordered.filter((h) => !pinnedIds.has(h.id))].slice(0, limit)
       if (hits.length === 0) return decision
 
       injectedSteps.add(stepKey)

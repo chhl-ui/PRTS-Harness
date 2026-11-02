@@ -19,6 +19,7 @@ import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
 import { MemoryStore, OllamaEmbedder, OllamaGenerator } from '../memory/index.ts'
+import { PythonReranker } from '../memory/rerank.ts'
 import { attachSpill, resolveSpillRoot } from '../spill/wiring.ts'
 
 export interface StartRuntimeOptions {
@@ -549,6 +550,25 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       ? new OllamaEmbedder({ baseUrl: ollamaUrl, model: process.env.PRTS_EMBED_MODEL ?? 'bge-m3' })
       : undefined
 
+  // 交叉编码器精排（可选）：`PRTS_RERANK=1` 开启。
+  //
+  // 依据：产品口径（注入 5 条、候选池 15 条）@5 从 28.8% → 38.1%
+  // （+22 题，McNemar p=0.0000），见 `docs/memory-recall-criteria-retest-2026-11-03.md` 第九节。
+  // 只重排候选、不新增命中——候选池内召回的 41.9% 是硬上限。
+  //
+  // 为什么默认关闭：它依赖 Python + sentence-transformers（Ollama 不提供 rerank 接口），
+  // 是额外运行时依赖；不开时检索行为与之前逐字一致。
+  // 失败降级：进程起不来 / 超时 / 崩溃一律回落原顺序，注入照常发生（见 memory-inject.ts）。
+  const reranker = process.env.PRTS_RERANK === '1'
+    ? new PythonReranker({
+      script: process.env.PRTS_RERANK_SCRIPT
+        ?? fileURLToPath(new URL('../../scripts/rerank-server.py', import.meta.url)),
+      ...(process.env.PRTS_RERANK_PYTHON === undefined ? {} : { python: process.env.PRTS_RERANK_PYTHON }),
+      ...(process.env.PRTS_RERANK_MODEL === undefined ? {} : { model: process.env.PRTS_RERANK_MODEL }),
+      timeoutMs: envNum('PRTS_RERANK_TIMEOUT_MS', 10_000),
+    })
+    : undefined
+
   // 语义路启用时预热内存向量索引。
   //
   // 为什么必须做：`search` 的语义路在未预热时走 SQL 降级路径，
@@ -575,6 +595,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   const memoryTools = memory === undefined ? undefined : createMemoryTools(tools, {
     store: memory,
     ...(embedderResolver === undefined ? {} : { embedder: embedderResolver }),
+    ...(reranker === undefined ? {} : { reranker }),
   })
 
   // 每轮自动注入：挂在 `agent/pre-step` waterfall 上，在模型看到本轮消息之前
@@ -592,6 +613,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     {
       store: memory, limit: injectLimit,
       ...(embedderResolver === undefined ? {} : { embedder: embedderResolver }),
+      ...(reranker === undefined ? {} : { reranker }),
     },
   )
 
@@ -670,6 +692,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       memoryInjection?.dispose()
       memoryScheduler?.dispose()
       memoryTools?.dispose()
+      // 精排器是常驻 Python 子进程，必须显式收掉，否则退出后残留。
+      reranker?.close()
       memory?.close()
       spillWiring.dispose()
       taskTools.dispose()
