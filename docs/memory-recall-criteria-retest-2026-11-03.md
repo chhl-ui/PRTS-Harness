@@ -234,11 +234,21 @@ gold turn 被挤出绝对前 8 的也是 **0 题**。差额来源未完全定位
 | reranker | 参数 | @8 | 配对 | McNemar | CPU 延迟 |
 |---|---|---|---|---|---|
 | （原始融合排序） | — | 80/236 = 33.9% | — | — | — |
-| bge-reranker-base | 278M | 101/236 = **42.8%** | 只原 8 / 只新 29 | p = 0.0008 | 1.57 s/题 |
+| bge-reranker-base | 278M | 101/236 = 42.8% | 只原 8 / 只新 29 | p = 0.0008 | 1.57 s/题 |
 | **ms-marco-MiniLM-L-6-v2** | **22M** | 105/236 = **44.5%** | 只原 4 / 只新 29 | **p = 0.0000** | **0.24 s/题** |
+| bge-reranker-v2-m3 | 568M | 103/236 = 43.6% | 只原 8 / 只新 31 | p = 0.0003 | 5.74 s/题 |
+
+**三个模型都显著，但参数量与效果反相关**：22M 的 ms-marco 最好（44.5%），568M 的 v2-m3
+只有 43.6%，且慢 24 倍。原因不难理解——ms-marco-MiniLM 是专门为英文 passage reranking
+训练的，而 bge-reranker-v2-m3 是多语言通用模型，为跨语言场景做了取舍。这条直接否掉了
+「换更大的模型会更好」的直觉：**在这份数据上，任务匹配度比参数量重要**。
+
+分型上两者各有胜负：v2-m3 在 single-session-user 上 60.9%（ms-marco 57.8%），
+但 multi-session 只有 42.4%（ms-marco 44.8%），temporal 两者都不动（52.9%）。
 
 两个独立模型都大幅提升、都显著 → 增益来自 rerank 机制本身，不是某个模型的偶然；
 且**小 12 倍的模型反而更好**（它是专门为 passage reranking 训练的）。
+
 
 - 候选池内存在 gold 的题 **121/236 = 51.3%**（rerank 的理论上限）。
 - 池内有 gold 却排不进前 8 的 41 题里，两个模型都**救回 29 题（71%）**。
@@ -267,6 +277,35 @@ gold turn 被挤出绝对前 8 的也是 **0 题**。差额来源未完全定位
   这与 PRTS「Node 单栈」的现状冲突，是产品化前要拍板的地方。
 - 本机 torch 是 CPU 版（`2.14.0+cpu`）；要 GPU 加速需另装 CUDA 版 torch。
 
+
+### sparse / colbert 两条路（bge-m3 的另外两种输出）
+
+bge-m3 一次前向产出三种表示，PRTS 只用了 dense（Ollama `/api/embed` 只返回 1024 维稠密向量）：
+
+| 输出 | 形态 | 取法 | PRTS 现状 |
+|---|---|---|---|
+| dense | 1024 维向量 | 已在用 | ✅ 生产 |
+| sparse | `dict[token_id → 权重]` | `FlagEmbedding` `return_sparse=True` | ❌ 无 |
+| colbert | token 级多向量 | `return_colbert_vecs=True` | ❌ 无 |
+
+实测（本机 FlagEmbedding + bge-m3 2.14 GB，CPU）：
+
+```
+query "what camera do I use" → 5 个 token，最高权重 0.318
+vs "I shoot with a Sony A7 IV camera body" → 0.0824
+vs "I drink tea every morning"             → 0.0188
+vs "My daughter plays piano"               → 0.0000
+```
+
+排序正确，但分值极低——**sparse 依赖精确 token 重叠**，问句与陈述句共享的 token 通常只有一两个。
+机制上与 bm25 同类（区别只在权重是学出来的而非 IDF），因此它攻的正是 bm25 已经较强的词面领域。
+
+**成本是决定性的**：已有 24.6 万条 dense 拿不到 sparse，必须重新 encode。
+本机实测吞吐约 11 条/秒（模型加载 133 s 不在内）→ 全量约 **6 小时**，比当初 Ollama 跑 dense 的
+44 分钟慢 8 倍（FlagEmbedding 在 CPU 上没有 Ollama 的批处理与量化）。
+
+结论：sparse 不在优先队列。要验证也应走最小口径——抽 20 题、题内、只算 query 侧 sparse
+与候选池的重叠，1 小时可判趋势，不必全量重算。
 
 ## 九、复现命令
 
