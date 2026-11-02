@@ -12,9 +12,10 @@
  *
  * ## 设计取舍（每条都有理由，不是默认值）
  *
- * - **只走 bm25（LIKE + FTS）**：向量路需要 embedder，生产不保证有 Ollama；
- *   画像 30 题全量实测无增益（`docs/memory-profile-wave3-30q-2026-11-02.md`），
- *   `profileQuota` 默认 0 不打开。先给一个可解释的检索，不给没人验证过增益的混合路。
+ * - **向量语义路（Wave 2）**：`embedder` 依赖在场时把查询嵌入后进
+ *   `search({queryVector, semanticTopK})`，补「咖啡→拿铁」这类零字面重叠；
+ *   不在场/嵌入失败时退化纯 bm25。画像 30 题全量实测无增益
+ *   （`docs/memory-profile-wave3-30q-2026-11-02.md`），`profileQuota` 默认 0 不打开。
  * - **只读 `live`**：benchmark 数据不进生产检索（设计稿 §6.4）。画像污染事件
  *   （267 条实验画像被标成 live）就是这么来的，工具面再加一道默认值。
  * - **`limit` 上限 20**：工具结果直接进上下文，模型一次要太多会挤掉真正的对话。
@@ -24,12 +25,16 @@
  *   在对话中触发。它们的入口留待 CLI 子命令，见文末遗留。
  */
 import type { ToolRegistry } from './task-tools.ts'
-import type { MemoryHit, MemoryStore } from '../memory/index.ts'
+import type { Embedder, MemoryHit, MemoryStore } from '../memory/index.ts'
 
 export interface MemoryToolDeps {
   store: MemoryStore
   /** 覆盖检索条数上限（测试用），默认 8。 */
   defaultLimit?: number
+  /** 惰性取 embedder：Ollama 不在/嵌入失败时退化纯字面检索。 */
+  embedder?: () => Promise<Embedder | undefined>
+  /** 语义路余弦下限，默认 0.25（与注入同口径，理由见 memory-inject.ts）。 */
+  semanticMinSim?: number
 }
 
 export interface MemoryTools {
@@ -111,12 +116,20 @@ export function createMemoryTools(tools: ToolRegistry, deps: MemoryToolDeps): Me
       const raw = typeof a.limit === 'number' && Number.isFinite(a.limit) ? Math.floor(a.limit) : defaultLimit
       const limit = Math.min(MAX_LIMIT, Math.max(1, raw))
 
+      let queryVector: number[] | undefined
+      if (deps.embedder !== undefined) {
+        try {
+          const emb = await deps.embedder()
+          if (emb !== undefined) queryVector = (await emb.embed([query]))[0]
+        } catch { /* 嵌入失败降级纯字面检索，不吞工具的可用性 */ }
+      }
       const hits = deps.store.search({
         text: query,
         limit,
         // 显式写死 live：默认值在 store 里已是 ['live']，工具面再钉一次，
         // 避免将来有人改默认值把评测数据带进生产检索。
         includeOrigin: ['live'],
+        ...(queryVector === undefined ? {} : { queryVector, semanticTopK: limit, semanticMinSim: deps.semanticMinSim ?? 0.25 }),
       })
 
       const body = hits.length === 0

@@ -341,3 +341,58 @@ test('U4 过滤后仍凑满 limit', async () => {
     att.dispose()
   } finally { t.cleanup(store) }
 })
+
+test('U7 语义路接线：字面零重叠的命中经向量路进注入（咖啡→拿铁类缺口）', async () => {
+  const t = makeTmp('prts-inj-u7-'); const store = MemoryStore.open(t.db())
+  try {
+    // 两条历史 turn：语义上 A 该命中、B 是正交噪声。文本与查询零共享 token——
+    // 字面路召不回 A，只能由向量路带进注入。
+    const a = store.recordTurn({
+      actor: 'system', sessionId: 'old', turnIndex: 0, speaker: 'user',
+      text: '书房的绿萝该浇水了', occurredAtMs: Date.now() - 1000,
+    })
+    const b = store.recordTurn({
+      actor: 'system', sessionId: 'old', turnIndex: 1, speaker: 'user',
+      text: '打印机又卡纸了', occurredAtMs: Date.now() - 2000,
+    })
+    // 查询向量 = A 的方向；B 与其正交。
+    store.putVectors([
+      { ownerKind: 'turn', ownerId: a, vector: [1, 0, 0, 0] },
+      { ownerKind: 'turn', ownerId: b, vector: [0, 1, 0, 0] },
+    ], 'fake-embed')
+    const embedder = async () => ({ model: 'fake-embed', embed: async () => [[1, 0, 0, 0]] })
+
+    const fake = fakeHookCtx()
+    const att = attachMemoryInjection(fake.ctx, { store, embedder })
+    const p = payloadOfTurn('阳台的花盆怎么选', 's1', 1)
+    const out = await fake.fire(p, async () => enter([p.messages[0]]))
+    const text = msgText(out, 1)
+    assert.ok(text.includes('绿萝'), `语义近邻应进注入：${text}`)
+    assert.equal(text.includes('卡纸'), false, `正交噪声不应进注入：${text}`)
+
+    // 对照：同一 query 不给 embedder → 无注入（字面零命中）。
+    const fake2 = fakeHookCtx()
+    const att2 = attachMemoryInjection(fake2.ctx, { store })
+    const p2 = payloadOfTurn('阳台的花盆怎么选', 's2', 1)
+    const out2 = await fake2.fire(p2, async () => enter([p2.messages[0]]))
+    assert.equal(injCount(out2), 0, '无 embedder 时该查询应零命中')
+    att.dispose(); att2.dispose()
+  } finally { t.cleanup(store) }
+})
+
+test('U8 embedder 抛错降级：注入不退化，字面路照常工作', async () => {
+  const t = makeTmp('prts-inj-u8-'); const store = MemoryStore.open(t.db())
+  try {
+    store.recordTurn({
+      actor: 'system', sessionId: 'other', turnIndex: 0, speaker: 'user',
+      text: '光学镜头设计偏好 85mm', occurredAtMs: Date.now(),
+    })
+    const broken = async () => { throw new Error('ollama down') }
+    const fake = fakeHookCtx()
+    const att = attachMemoryInjection(fake.ctx, { store, embedder: broken })
+    const p = payloadOfTurn('光学镜头是什么', 's1', 1)
+    const out = await fake.fire(p, async () => enter([p.messages[0]]))
+    assert.ok(msgText(out, 1).includes('85mm'), 'embedder 挂掉时字面命中照常注入')
+    att.dispose()
+  } finally { t.cleanup(store) }
+})

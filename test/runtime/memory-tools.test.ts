@@ -261,3 +261,37 @@ test('MT7 端到端：运行时注册了工具，模型调用后对话正常完�
     t.cleanup()
   }
 })
+
+test('MT8 embedder 在场时 queryVector 进 search：语义命中出现在工具结果里', async () => {
+  const { store, cleanup } = seededStore('prts-mt8-')
+  try {
+    const tid = store.recordTurn({
+      actor: 'system', sessionId: 'old', turnIndex: 0, speaker: 'user',
+      text: '书房的绿萝该浇水了', occurredAtMs: Date.now(),
+    })
+    store.putVectors([{ ownerKind: 'turn', ownerId: tid, vector: [1, 0, 0, 0] }], 'fake-embed')
+    const embedder = async () => ({ model: 'fake-embed', embed: async () => [[1, 0, 0, 0]] })
+
+    const reg = fakeRegistry()
+    createMemoryTools(reg.registry, { store, embedder })
+    const tool = reg.get('prts_memory_recall')
+    // 查询与正文零共享 token：字面路必不中，命中只能来自向量路。
+    const r = await tool.execute({ query: '阳台的花盆怎么选' }) as { message: string }
+    assert.ok(r.message.includes('绿萝'), `语义命中应出现在工具消息里：${r.message}`)
+  } finally { cleanup() }
+})
+
+test('MT9 embedder 抛错：工具照常返回字面结果，不吞可用性', async () => {
+  const { store, cleanup } = seededStore('prts-mt9-')
+  try {
+    store.recordTurn({
+      actor: 'system', sessionId: 'old', turnIndex: 0, speaker: 'user',
+      text: '光学镜头设计偏好 85mm', occurredAtMs: Date.now(),
+    })
+    const broken = async () => { throw new Error('ollama down') }
+    const reg = fakeRegistry()
+    createMemoryTools(reg.registry, { store, embedder: broken })
+    const r = await reg.get('prts_memory_recall').execute({ query: '光学镜头' }) as { message: string }
+    assert.ok(r.message.includes('85mm'), 'embedder 挂时字面命中照常返回')
+  } finally { cleanup() }
+})

@@ -115,3 +115,39 @@ test('SCH5 Ollama 探活：不可达端口返回 false 且结果进缓存', asyn
   assert.equal(await probe(), false)
   assert.equal(calls, 1, '缓存期内不重复探测')
 })
+
+test('SCH6 嵌入阶段：embedder 在场时给 turn/fact 补向量并计数', async () => {
+  const t = makeTmp('prts-sch6-'); const store = MemoryStore.open(t.db())
+  try {
+    const tid = store.recordTurn({ actor: 'system', sessionId: 's1', turnIndex: 0, speaker: 'user', text: '实验室搬到 C 楼 203 室' })
+    const fakeEmbedder = async () => ({ model: 'fake-embed', embed: async (ts: string[]) => ts.map(() => [0.5, 0.5, 0, 0]) })
+    const sch = attachMemoryScheduler({ store, embedder: fakeEmbedder, idleMs: 60_000 })
+    try {
+      await sch.runOnce()
+      const st = sch.stats()
+      assert.ok(st.embedded >= 1, `应补成至少 1 条向量：${JSON.stringify(st)}`)
+      const vs = store.vectorStats()
+      assert.ok(vs.some(v => v.ownerKind === 'turn' && v.model === 'fake-embed'), `turn 向量应入库：${JSON.stringify(vs)}`)
+      // 幂等：第二轮没有待补项。
+      await sch.runOnce()
+      assert.ok(sch.stats().embedded === st.embedded, '第二轮不应重复嵌入')
+      void tid
+    } finally { sch.dispose() }
+  } finally { t.cleanup(store) }
+})
+
+test('SCH7 embedder 抛错：嵌入阶段记失败但不拖垮规则巩固', async () => {
+  const t = makeTmp('prts-sch7-'); const store = MemoryStore.open(t.db())
+  try {
+    store.recordTurn({ actor: 'system', sessionId: 's1', turnIndex: 0, speaker: 'user', text: '实体巩固探针甲' })
+    const broken = async () => { throw new Error('embed boom') }
+    const sch = attachMemoryScheduler({ store, embedder: broken, idleMs: 60_000 })
+    try {
+      await sch.runOnce()
+      const st = sch.stats()
+      assert.equal(st.embedFailed, 1)
+      assert.ok(st.rulesTurns >= 1, '嵌入失败不得拖垮规则巩固')
+      assert.equal(st.lastError, null, '阶段内捕获，不算整轮失败')
+    } finally { sch.dispose() }
+  } finally { t.cleanup(store) }
+})

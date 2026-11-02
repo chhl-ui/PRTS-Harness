@@ -23,7 +23,7 @@
  * 注入 runtime context 时用的同一条通道。
  */
 import { randomUUID } from 'node:crypto'
-import type { MemoryHit, MemoryStore } from '../memory/index.ts'
+import type { Embedder, MemoryHit, MemoryStore } from '../memory/index.ts'
 
 export interface MemoryInjectionDeps {
   store: MemoryStore
@@ -31,6 +31,19 @@ export interface MemoryInjectionDeps {
   limit?: number
   /** 短于这么多字符的查询不检索：两个字的噪声大于信息，默认 4。 */
   minQueryChars?: number
+  /**
+   * 向量语义路（Wave 2）：惰性取 embedder——Ollama 探活不过时返回
+   * undefined，本轮退化为纯字面检索。嵌入失败同样降级，不阻断注入。
+   * 与更正钉住互补：pin 保证更正句必进，语义路补「咖啡→拿铁」这类
+   * 零字面重叠的普通查询。
+   */
+  embedder?: () => Promise<Embedder | undefined>
+  /**
+   * 语义路余弦下限，默认 0.25：store 默认 0 会把余弦 0 的正交噪声也拉进
+   * 融合（`sim >= 0` 全收），小库里噪声会占满 topK。bge-m3 中文短文本上
+   * 无关对通常 <0.3、弱相关 ≥0.35——0.25 保弱命中、挡真噪声，可调。
+   */
+  semanticMinSim?: number
   /**
    * 更正钉住名额（默认 2）：近期带更正标记的 user turn 不经检索直接占位。
    * 存在的理由是 V1-06 F10——「我最近改喝拿铁了」没有「咖啡」二字，BM25
@@ -103,6 +116,7 @@ export function renderInjection(hits: MemoryHit[]): string {
 export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectionDeps): MemoryInjection {
   const limit = deps.limit ?? 5
   const minQueryChars = deps.minQueryChars ?? 4
+  const semanticMinSim = deps.semanticMinSim ?? 0.25
   const correctionPins = deps.correctionPins ?? 2
   const correctionWindowMs = deps.correctionWindowMs ?? 30 * 86_400_000
   // 防同一 step 重放重复注入（waterfall 重试可对同一步触发多次）。
@@ -141,8 +155,18 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
       //   早期同会话内容只能靠 prts_memory_recall 工具找回，注入不再带回——工具侧
       //   不做此过滤）2) 本会话已注入过的命中 id 3) 本轮原话（兜底）。
       // search 多取 limit*3 补齐过滤损耗，再截回 limit。
-      const lexical = deps.store
-        .search({ text: query, limit: limit * 3, includeOrigin: ['live'] })
+      let queryVector: number[] | undefined
+      if (deps.embedder !== undefined) {
+        try {
+          const emb = await deps.embedder()
+          if (emb !== undefined) queryVector = (await emb.embed([query]))[0]
+        } catch { /* 嵌入失败降级为纯字面检索，不阻断对话 */ }
+      }
+      const ranked = deps.store
+        .search({
+          text: query, limit: limit * 3, includeOrigin: ['live'],
+          ...(queryVector === undefined ? {} : { queryVector, semanticTopK: limit * 3, semanticMinSim }),
+        })
         .filter((h) => h.kind !== 'turn' || h.sessionId !== sessionId)
         .filter((h) => !seen.has(h.id))
         .filter((h) => h.kind !== 'turn' || normalizeText(h.text) !== queryKey)
@@ -152,7 +176,7 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
         .recentCorrections({ sinceMs: Date.now() - correctionWindowMs, limit: correctionPins, excludeSessionId: sessionId })
         .filter((h) => !seen.has(h.id))
       const pinnedIds = new Set(pinned.map((h) => h.id))
-      const hits = [...pinned, ...lexical.filter((h) => !pinnedIds.has(h.id))].slice(0, limit)
+      const hits = [...pinned, ...ranked.filter((h) => !pinnedIds.has(h.id))].slice(0, limit)
       if (hits.length === 0) return decision
 
       injectedSteps.add(stepKey)

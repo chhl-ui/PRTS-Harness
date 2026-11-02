@@ -18,7 +18,7 @@ import { Authority, classify } from '../authority/index.ts'
 import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
-import { MemoryStore, OllamaGenerator } from '../memory/index.ts'
+import { MemoryStore, OllamaEmbedder, OllamaGenerator } from '../memory/index.ts'
 import { attachSpill, resolveSpillRoot } from '../spill/wiring.ts'
 
 export interface StartRuntimeOptions {
@@ -532,7 +532,27 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 记忆消费出口（2026-11-02）：此前 `search()` 在 src 内零调用方，记忆只写不读。
   // 库打不开时 `memory` 为 undefined，工具面一起缺席——不注册一个永远报错的工具，
   // 那只会让模型学会绕开它。
-  const memoryTools = memory === undefined ? undefined : createMemoryTools(tools, { store: memory })
+  // Wave 2 向量语义路：`PRTS_EMBED=1` 显式开启（与 PRTS_CONSOLIDATE_MODEL
+  // 同一纪律——本地模型是加分项，主人没表态前不擅自拉起 GPU）。开启后：
+  // 注入与 prts_memory_recall 的查询会被嵌入并走 search({queryVector})，
+  // 调度器空闲时给 fact/profile/turn 补向量；Ollama 探活不过或嵌入失败时
+  // 各环节各自降级为纯字面检索。模型用 PRTS_EMBED_MODEL 覆盖（默认 bge-m3）。
+  const envNum = (name: string, fallback: number): number => {
+    const raw = Number(process.env[name] ?? '')
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback
+  }
+  const ollamaUrl = process.env.PRTS_OLLAMA_URL ?? 'http://127.0.0.1:11434'
+  const ollamaProbe = createOllamaProbe({ baseUrl: ollamaUrl })
+  const embedderResolver = (process.env.PRTS_EMBED !== '1')
+    ? undefined
+    : async () => (await ollamaProbe())
+      ? new OllamaEmbedder({ baseUrl: ollamaUrl, model: process.env.PRTS_EMBED_MODEL ?? 'bge-m3' })
+      : undefined
+
+  const memoryTools = memory === undefined ? undefined : createMemoryTools(tools, {
+    store: memory,
+    ...(embedderResolver === undefined ? {} : { embedder: embedderResolver }),
+  })
 
   // 每轮自动注入：挂在 `agent/pre-step` waterfall 上，在模型看到本轮消息之前
   // 追加一条记忆摘要。库打不开时整体缺席——没有库就没有可注入的内容。
@@ -546,7 +566,10 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     ctx as unknown as {
       on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
     },
-    { store: memory, limit: injectLimit },
+    {
+      store: memory, limit: injectLimit,
+      ...(embedderResolver === undefined ? {} : { embedder: embedderResolver }),
+    },
   )
 
   // P1-3 后台巩固调度：空闲时把 live turn 巩固成实体图与事实。
@@ -556,14 +579,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 才会去探活 Ollama 并跑推理。不设则只跑零成本的规则巩固——在主人没表态
   // 之前，空闲时擅自把 GPU 拉起来跑本地模型不是该系统默认做的事。
   // 探活不过时当轮只跑规则巩固（降级不是失败）。
-  // 其余旋钮：PRTS_OLLAMA_URL（默认 http://127.0.0.1:11434）、
+  // 其余旋钮：PRTS_OLLAMA_URL（默认 http://127.0.0.1:11434，与向量路共用探活）、
   // PRTS_CONSOLIDATE_IDLE_MS、PRTS_CONSOLIDATE_RULES_MAX、PRTS_CONSOLIDATE_FACTS_MAX。
-  const envNum = (name: string, fallback: number): number => {
-    const raw = Number(process.env[name] ?? '')
-    return Number.isFinite(raw) && raw > 0 ? raw : fallback
-  }
-  const ollamaUrl = process.env.PRTS_OLLAMA_URL ?? 'http://127.0.0.1:11434'
-  const ollamaProbe = createOllamaProbe({ baseUrl: ollamaUrl })
   const consolidateModel = process.env.PRTS_CONSOLIDATE_MODEL
   const memoryScheduler = (memory === undefined || process.env.PRTS_CONSOLIDATE === 'off') ? undefined : attachMemoryScheduler({
     store: memory,
@@ -578,6 +595,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
         })
         : undefined,
     }),
+    ...(embedderResolver === undefined ? {} : { embedder: embedderResolver, embedLimit: envNum('PRTS_EMBED_MAX', 200) }),
     idleMs: envNum('PRTS_CONSOLIDATE_IDLE_MS', 3000),
     rulesMaxTurns: envNum('PRTS_CONSOLIDATE_RULES_MAX', 500),
     factsLimit: envNum('PRTS_CONSOLIDATE_FACTS_MAX', 20),

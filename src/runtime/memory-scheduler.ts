@@ -25,7 +25,7 @@
  *
  * 所有失败只写 stderr——巩固是后台事，绝不能影响前台对话。
  */
-import type { MemoryStore, TextGenerator } from '../memory/index.ts'
+import type { Embedder, MemoryStore, TextGenerator } from '../memory/index.ts'
 
 export interface MemorySchedulerDeps {
   store: MemoryStore
@@ -33,6 +33,11 @@ export interface MemorySchedulerDeps {
   events?: { on(name: string, fn: (payload: unknown) => void): () => void }
   /** 惰性取生成器：Ollama 探活不过时返回 undefined，本次只跑规则巩固。 */
   generator?: () => Promise<TextGenerator | undefined>
+  /**
+   * 惰性取向量后端（Wave 2）：与 generator 独立——嵌入（bge-m3）与事实
+   * 抽取（q38）是两个模型，探活/可用性各自判定。缺席时跳过嵌入阶段。
+   */
+  embedder?: () => Promise<Embedder | undefined>
   /** 回合结束后多少毫秒视为空闲，默认 3000。 */
   idleMs?: number
   /** 每次运行规则巩固的 turn 预算，默认 500。 */
@@ -41,6 +46,12 @@ export interface MemorySchedulerDeps {
   factsLimit?: number
   /** 事实抽取每批条数，默认 10。 */
   factsBatch?: number
+  /**
+   * 每次运行补向量的条数上限，默认 200。kinds 固定 ['fact','profile','turn']：
+   * 生产 live 库量级小（日均数十 turn），turn 是必须含的——「咖啡→拿铁」
+   * 这类语义缺口在 turn 正文里，不是 fact 里。
+   */
+  embedLimit?: number
   log?: (msg: string) => void
 }
 
@@ -51,6 +62,9 @@ export interface MemorySchedulerStats {
   factsAdded: number
   /** 连续跳过模型阶段的次数（探活不过）。 */
   modelSkips: number
+  /** 嵌入阶段累计补成的向量条数与失败条数。 */
+  embedded: number
+  embedFailed: number
   lastError: string | null
   lastRunAtMs: number | null
   running: boolean
@@ -68,11 +82,13 @@ export function attachMemoryScheduler(deps: MemorySchedulerDeps): MemorySchedule
   const rulesMaxTurns = deps.rulesMaxTurns ?? 500
   const factsLimit = deps.factsLimit ?? 20
   const factsBatch = deps.factsBatch ?? 10
+  const embedLimit = deps.embedLimit ?? 200
   const log = deps.log ?? ((msg: string) => console.error(msg))
 
   const stats: MemorySchedulerStats = {
     runs: 0, rulesTurns: 0, factsTurns: 0, factsAdded: 0,
-    modelSkips: 0, lastError: null, lastRunAtMs: null, running: false,
+    modelSkips: 0, embedded: 0, embedFailed: 0,
+    lastError: null, lastRunAtMs: null, running: false,
   }
   const abort = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -116,6 +132,24 @@ export function attachMemoryScheduler(deps: MemorySchedulerDeps): MemorySchedule
         }
       } else if (rules.stopped === 'budget') {
         schedule(500)
+      }
+
+      // 3. 向量补齐：与模型阶段独立——嵌入后端缺席/失败不拖垮前两段的成果。
+      // kinds 显式含 turn：live 库量级小，且「咖啡→拿铁」式语义缺口在 turn 正文里。
+      if (deps.embedder !== undefined && !abort.signal.aborted) {
+        try {
+          const emb = await deps.embedder()
+          if (emb !== undefined) {
+            const r = await deps.store.embedPending({
+              embedder: emb, limit: embedLimit, kinds: ['fact', 'profile', 'turn'],
+            })
+            stats.embedded += r.embedded
+            stats.embedFailed += r.failed
+          }
+        } catch (e) {
+          stats.embedFailed++
+          log(`[prts] memory embed stage failed: ${e instanceof Error ? e.message : String(e)}`)
+        }
       }
 
       stats.runs++
