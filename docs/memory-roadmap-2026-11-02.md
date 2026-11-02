@@ -28,7 +28,7 @@
 | sleep-phase consolidation | ✅ 规则 + 模型两套 | `consolidateRules` / `consolidateProfiles`，真机跑通 |
 | interference-based forgetting | ✅ 退役 + 衰减 | `retireFacts` / `decayedImportance`，11 个单测 |
 | entity knowledge graph | ✅ 153,304 实体 / 1,098,122 边 | 真机计数 |
-| hybrid multi-cue retrieval | ✅ **已接生产**（2026-11-02，`PRTS_EMBED=1`） | 注入/召回工具走 `search({queryVector, semanticWeight:0.5})`，调度器空闲补 turn 向量；benchmark 级判据（@8/temporal）未复测 |
+| hybrid multi-cue retrieval | ⚠️ **已接生产（2026-11-02，`PRTS_EMBED=1`），但 11-03 复测显示当前 cap 下无收益** | 注入/召回工具走 `search({queryVector, semanticWeight:0.5})`，调度器空闲补 turn 向量。判据复测：全量扫描下门控 w1:0.5 @8 36.9% / temporal 64.7%（达标）；但 `SEMANTIC_SCAN_CAP=50_000` 只覆盖 19.9% turn 向量，该上限下 @8 30.9% < bm25 31.8%（p=0.83）。详见 `docs/memory-recall-criteria-retest-2026-11-03.md` |
 | engram maturation | ❌ 无 | 新记忆与旧记忆同等对待 |
 | reconsolidation upon retrieval | ⚠️ 只有计数强化 | `reinforceFacts` 改 access_count，不改写内容 |
 
@@ -36,7 +36,7 @@
 |---|---|
 | 索引 | ✅ 有（规则实体、画像、摘要、生命周期的 chunk 化= turn 原样） |
 | 检索 | ✅ 混合路已上生产（opt-in `PRTS_EMBED=1`，Ollama 探活门控，失败降级纯 bm25） |
-| **阅读** | ✅ **已落地**（2026-11-02）：命中按主题/会话归组成卡，组内时间升序标「最新/较早」——`src/memory/reading.ts`，注入与 `prts_memory_recall` 共用 |
+| **阅读** | ✅ **已落地，零回归，收益未证明**（2026-11-02 落地 / 11-03 复测）：命中按主题/会话归组成卡，组内时间升序标「最新/较早」——`src/memory/reading.ts`，注入与 `prts_memory_recall` 共用。QA 级 A/B（同批命中、同一判分器）：平铺 10/20 vs 成卡 10/20，McNemar p=1.00；5/20 题两份文本逐字相同（无同主题命中可归并） |
 
 ## 三、实测数据支撑的判断（本会话产出）
 
@@ -62,6 +62,8 @@
 - 做法：`search` 支持 turn 的语义路（`mem_vectors.owner_kind='turn'`），与 bm25 做**加权** RRF。
 - 权重：bm25 : 向量 = 1.0 : 0.5 起步（等权会牺牲 temporal，实测 −11.8pp）。
 - 判据：**@8 ≥ 34.7% 且 temporal ≥ 60%**。达不到就再加门控（含时间词的查询只走 bm25）。
+- **11-03 复测**：全量扫描下门控 w1:0.5 达标（@8 36.9%、temporal 64.7%、p=0.0357）；
+  但产品 `SEMANTIC_SCAN_CAP=50_000` 下不达标（@8 30.9%、p=0.83）。**先修扫描上限，本判据才有意义。**
 - 成本：向量化 44 分钟 / 1.0 GB 已就绪；查询 +0.25 s；需处理 Ollama 不可用时的降级（退化为纯 bm25，不能报错）。
 - 风险：内存常驻 1 GB；Ollama 的 embedding runner 连续跑 1–2 万条会崩（分片绕过）。
 
