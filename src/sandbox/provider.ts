@@ -25,6 +25,9 @@ import type { ConfinedArgv, SandboxPolicy } from '@deepseek-ai/dsh-sandbox'
 import type { Context } from '@deepseek-ai/cordis'
 import { confineArgv } from './confine.ts'
 
+/** AppContainer 沙箱 profile 名：provider、workspace-acl 修法的容器 SID 派生共用此名。 */
+export const PRTS_APPCONTAINER_PROFILE = 'PRTS.Sandbox'
+
 export interface AppContainerProviderOptions {
   /** AppContainer profile 名。同名复用；建议按部署固定。 */
   profile: string

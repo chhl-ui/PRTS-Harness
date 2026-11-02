@@ -1,5 +1,8 @@
 export type Capability = string
 
+/** workspace 内保持只读的子路径缺省名单：K2a（fs 工具层）与 workspace-acl（shell 层）共用一份。 */
+export const DEFAULT_READ_ONLY_SUBPATHS = ['.git'] as const
+
 export interface AuthorityConfig {
   /** 绝对路径，可写工作区。 */
   workspaceRoots: string[]

@@ -248,6 +248,21 @@ function drainPipe(handle: unknown): string {
 
 // ---------------------------------------------------------------- 实现
 
+/** 只派生 AppContainer 包 SID，不创建 profile。供 workspace-acl 的 allow-only 修法定位 ACE。 */
+export function deriveAppContainerSid(name: string): string {
+  if (typeof name !== 'string' || name === '') {
+    throw new Error('prts: deriveAppContainerSid 需要非空的 profile 名')
+  }
+  const out: unknown[] = [null]
+  const hr = DeriveAppContainerSid(name, out) as number
+  if (hr !== 0) {
+    throw new Error(`prts: 派生 AppContainer SID 失败 hr=0x${(hr >>> 0).toString(16).padStart(8, '0')}`)
+  }
+  const sid = sidToString(out[0])
+  LocalFree(out[0])
+  return sid
+}
+
 export async function createAppContainer(opts: AppContainerOptions): Promise<AppContainer> {
   if (typeof opts.name !== 'string' || opts.name === '') {
     throw new Error('prts: AppContainer 需要非空的 profile 名')

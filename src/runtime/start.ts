@@ -6,8 +6,10 @@ import { boot } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import type { Context } from '@deepseek-ai/cordis'
 import { attachErrorReporter } from './error-report.ts'
-import { AppContainerSandboxProvider } from '../sandbox/provider.ts'
-import { localBackendWarning } from '../sandbox/confine.ts'
+import { AppContainerSandboxProvider, PRTS_APPCONTAINER_PROFILE } from '../sandbox/provider.ts'
+import { ensureWorkspaceWriteOwner, protectSubpathLocal, protectSubpathAppContainer } from '../sandbox/workspace-acl.ts'
+import { deriveAppContainerSid } from '../sandbox/appcontainer.ts'
+import { DEFAULT_READ_ONLY_SUBPATHS } from '../authority/index.ts'
 import { createStepAllocator, createTaskTools, isLedgerTool } from './task-tools.ts'
 import { createMemoryTools } from './memory-tools.ts'
 import { attachMemoryInjection } from './memory-inject.ts'
@@ -35,6 +37,15 @@ export interface StartRuntimeOptions {
    * 曾导致一次不可重现的失败。
    */
   memoryDbPath?: string
+  /**
+   * 测试注入点：替换 workspace-acl 的三步实现（默认真执行 icacls/PowerShell）。
+   * 失败注入用于验证「protect 抛错 → 启动拒绝」的 fail-closed 接线。
+   */
+  aclOps?: {
+    ensureWO?: typeof ensureWorkspaceWriteOwner
+    protectLocal?: typeof protectSubpathLocal
+    protectAC?: typeof protectSubpathAppContainer
+  }
 }
 
 /**
@@ -95,11 +106,35 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 时必须先禁用配置里的 `sandbox` 条目——两者都注册成 ctx.sandbox，会同名冲突。
   // 用开关而不是直接替换，是为了出问题能一行改回去。
   const backend = process.env.PRTS_SANDBOX_BACKEND === 'appcontainer' ? 'appcontainer' : 'local'
-  // local 是默认后端，但它在 C:\ 下的 workspace 上 shell 起不来（grantWrite 的
-  // SetNamedSecurityInfoW 返回 Win32 5）。把它在启动时说出来，否则撞上的人要
-  // 追到 dsh-sandbox-windows-acl 内部才能发现。
-  const backendWarning = localBackendWarning(backend, o.workspace)
-  if (backendWarning !== undefined) console.warn(backendWarning)
+  // local 是默认后端；C:\ 下 workspace 的 shell 故障根因是 WRITE_OWNER（实测：
+  // grantWrite 设 Low 标签需要 WO，UAC 未提权下 C:\ 自建目录只有继承 ACL）。
+  // 启动时自动授 WO——失败不 throw（shell 不可用是功能降级，不是安全问题），
+  // 但 warn 出管理员要执行的确切命令。
+  const aclOps = {
+    ensureWO: o.aclOps?.ensureWO ?? ensureWorkspaceWriteOwner,
+    protectLocal: o.aclOps?.protectLocal ?? protectSubpathLocal,
+    protectAC: o.aclOps?.protectAC ?? protectSubpathAppContainer,
+  }
+  if (backend === 'local') {
+    try {
+      await aclOps.ensureWO(o.workspace)
+    } catch (error) {
+      console.warn(
+        `[prts] workspace WRITE_OWNER 授权失败：${error instanceof Error ? error.message : String(error)}`
+        + `——shell 在该 workspace 上可能起不来。管理员可执行：`
+        + `icacls "${o.workspace}" /grant "%USERNAME%:(OI)(CI)(WO)"`
+        + `（或换用 PRTS_SANDBOX_BACKEND=appcontainer）。`,
+      )
+    }
+  }
+  // .git 对 shell 只读（K2a readOnlySubpaths 只管 fs 工具，pwsh 不受管）——
+  // local 用显式 DENY，appcontainer 用断继承+去写+授 RX（容器 SID 的 DENY
+  // 被内核忽略，allow-only 模型）。protect 失败必须 throw：保护不上意味着
+  // 模型可以改写 git 历史，fail-closed 拒绝启动。
+  for (const sub of DEFAULT_READ_ONLY_SUBPATHS) {
+    if (backend === 'local') await aclOps.protectLocal(o.workspace, sub)
+    else await aclOps.protectAC(o.workspace, sub, deriveAppContainerSid(PRTS_APPCONTAINER_PROFILE))
+  }
   const bootPatches = [...(o.patches ?? [])]
   if (backend === 'appcontainer') bootPatches.push({ id: 'sandbox', disabled: true })
   process.env.DSH_HOME = join(o.dataRoot, 'dsh-home')
@@ -126,7 +161,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     } catch { /* 交给 spill 写入时报错 */ }
     if (backend === 'appcontainer') {
       void new AppContainerSandboxProvider(hostCtx, {
-        profile: 'PRTS.Sandbox',
+        profile: PRTS_APPCONTAINER_PROFILE,
         runnerPath: fileURLToPath(new URL('../sandbox/runner.ts', import.meta.url)),
         // spill 根要给沙箱读权限：不给的话卸载的文件在 shell 里 `Test-Path`
         // 返回 Access is denied（真机实测），卸载了却读不回来。

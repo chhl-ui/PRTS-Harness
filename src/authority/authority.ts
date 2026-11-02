@@ -6,6 +6,7 @@ import type { AuditActor, AuditEvent } from '../audit/index.ts'
 import { raise } from './errors.ts'
 import { cap, capabilityKey, parseCapability } from './capability.ts'
 import { isWithin, normalizePath, realpathBestEffort } from './paths.ts'
+import { DEFAULT_READ_ONLY_SUBPATHS } from './types.ts'
 import type { AuthorityConfig, Capability, Decision, GrantView, ToolCall } from './types.ts'
 
 const OWNER: AuditActor = { kind: 'owner' }
@@ -38,7 +39,7 @@ export class Authority {
     this.protectedRoots = config.protectedRoots.map(realpathBestEffort)
     this.spillRoots = (config.spillRoots ?? []).map(realpathBestEffort)
     // 只读子路径是相对名（如 '.git'），不做 realpath——它由 workspace 根现拼。
-    this.readOnlySubpaths = config.readOnlySubpaths ?? ['.git']
+    this.readOnlySubpaths = config.readOnlySubpaths ?? [...DEFAULT_READ_ONLY_SUBPATHS]
     this.now = now
   }
 

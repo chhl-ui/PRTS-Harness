@@ -83,31 +83,6 @@ export function workspaceTraversalRisk(workspaceRoot: string): string | undefine
 }
 
 /**
- * 启动时该不该警告「local 后端在这个 workspace 上起不了 shell」。
- *
- * 背景：`dsh-sandbox-windows-acl` 的 `grantWrite` 对 `C:\` 下的目录做
- * `SetNamedSecurityInfoW` 会返回 Win32 5，命令一行都不执行（实测，见 AGENTS.md）。
- * 而 local 正是**默认**后端——默认配置在标准 workspace 上是断的，且报错指向的
- * 地方和真实原因隔了两层。这里在启动时说清楚，别让人重走一遍诊断。
- *
- * 判定：`workspaceTraversalRisk` 返回 `undefined` 表示该路径不在 AppContainer
- * 无法 traverse 的深路径下——也就是 `C:\` 这类浅层目录，恰好是 local 会失败的位置。
- */
-export function localBackendWarning(
-  backend: 'local' | 'appcontainer',
-  workspaceRoot: string,
-): string | undefined {
-  if (backend !== 'local') return undefined
-  if (workspaceTraversalRisk(workspaceRoot) !== undefined) return undefined
-  return `[prts] local 后端在 ${workspaceRoot} 上可能起不了 shell：`
-    + 'dsh-sandbox-windows-acl 的 grantWrite 对 C:\\ 下的目录返回 Win32 5'
-    + '（SetNamedSecurityInfoW），命令一行都不会执行。'
-    + '需要 shell 请设 PRTS_SANDBOX_BACKEND=appcontainer，'
-    + '并先以管理员身份运行 scripts/grant-sandbox-read.ps1'
-    + '（给容器授 node/git 的读授权）。详见 AGENTS.md 的沙箱一节。'
-}
-
-/**
  * 生成受限 argv。纯函数——同样的输入永远得到同样的输出，便于测试与审计。
  *
  * @throws 参数非法或 workspace 落在不可 traverse 的路径下时抛错（fail-closed）。
