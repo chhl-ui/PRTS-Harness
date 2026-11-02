@@ -109,3 +109,38 @@ test('MW2: 记忆库不可用时不影响对话', { skip: !WIN, timeout: 120000 
     t.cleanup()
   }
 })
+
+test('MW4: live turn 写入时间落在 [before, after]，renderInjection 显示 ISO 而非「时间未知」', { skip: !WIN, timeout: 120000 }, async () => {
+  const t = makeTmp('prts-rt-memory-time-')
+  let app: Awaited<ReturnType<typeof boot>> | undefined
+  const before = Date.now()
+  try {
+    app = await boot(t, [{ type: 'text', text: '记住了。' } as ScriptedStep])
+    await runTurn(app.ctx as Context, '时间断言探针消息', { cwd: app.workspace })
+    const after = Date.now()
+
+    const raw = new DatabaseSync(join(app.dataRoot, 'memory.sqlite'), { readOnly: true })
+    const rows = raw.prepare(
+      `SELECT t.speaker, t.occurred_at_ms, t.occurred_raw FROM mem_turns t WHERE t.origin = 'live'`,
+    ).all() as Array<{ speaker: string; occurred_at_ms: number | null; occurred_raw: string | null }>
+    raw.close()
+    const user = rows.find(r => r.speaker === 'user')
+    const assistant = rows.find(r => r.speaker === 'assistant')
+    assert.ok(user && assistant, `应有 user+assistant 两条 live turn：${JSON.stringify(rows)}`)
+    for (const r of [user, assistant]) {
+      assert.ok(r.occurred_at_ms !== null, `${r.speaker} 的 occurred_at_ms 不应为 NULL`)
+      assert.ok(r.occurred_at_ms! >= before && r.occurred_at_ms! <= after, `${r.speaker} 时间 ${r.occurred_at_ms} 不在 [${before},${after}]`)
+      assert.match(r.occurred_raw ?? '', /^\d{4}-\d{2}-\d{2}T/, 'occurred_raw 应为 ISO')
+    }
+
+    const { renderInjection } = await import('../../src/runtime/memory-inject.ts')
+    const ms = user.occurred_at_ms!
+    const rendered = renderInjection([{ kind: 'turn', id: 'x', score: 1, text: '旧文本', occurredAtMs: ms, occurredRaw: null, sessionId: 's', turnIndex: 0, source: 'exact' } as never])
+    assert.match(rendered, /^\[记忆检索\]/, '前缀正确')
+    assert.equal(rendered.includes('时间未知'), false, `不应出现时间未知：${rendered}`)
+    assert.ok(rendered.includes(new Date(ms).toISOString()), `应含 ISO 时间：${rendered}`)
+  } finally {
+    await app?.dispose()
+    t.cleanup()
+  }
+})

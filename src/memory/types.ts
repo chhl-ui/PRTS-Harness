@@ -45,6 +45,11 @@ export interface RecordTurnInput {
   text: string
   /** 原始时间串，如 `"1:56 pm on 8 May, 2023"`。解析失败也保留。 */
   occurredRaw?: string
+  /**
+   * 发生时刻（Unix ms）。传入时 `occurred_raw` 缺省落 ISO 串；
+   * 与 `occurredRaw` 同传时以本值为准、raw 原样保留。非有限数直接 throw。
+   */
+  occurredAtMs?: number
   origin?: Origin
   /** LongMemEval 的 `has_answer`。 */
   isEvidence?: boolean

@@ -442,6 +442,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
         turnIndex: typeof p.turn === 'number' ? p.turn : 0,
         speaker: 'user',
         text,
+        occurredAtMs: Date.now(),
       })
     } catch (error) {
       console.error(`[prts] memory recordTurn failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -492,6 +493,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
         turnIndex: typeof p.turn === 'number' ? p.turn : 0,
         speaker: 'assistant',
         text,
+        occurredAtMs: Date.now(),
       })
     } catch (error) {
       console.error(`[prts] memory recordTurn(assistant) failed: ${error instanceof Error ? error.message : String(error)}`)

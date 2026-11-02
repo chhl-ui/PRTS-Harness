@@ -612,8 +612,11 @@ export class MemoryStore {
     }
     const bodyRef = `body-${randomUUID()}`
     const bodySha = sha256hex(input.text)
-    const occurredRaw = input.occurredRaw ?? null
-    const occurredAtMs = occurredRaw === null ? null : parseTime(occurredRaw)
+    if (input.occurredAtMs !== undefined && !Number.isFinite(input.occurredAtMs)) {
+      throw new Error('recordTurn: occurredAtMs 必须是有限数')
+    }
+    const occurredAtMs = input.occurredAtMs ?? (input.occurredRaw === undefined ? null : parseTime(input.occurredRaw))
+    const occurredRaw = input.occurredRaw ?? (input.occurredAtMs === undefined ? null : new Date(input.occurredAtMs).toISOString())
 
     this.db.exec('BEGIN IMMEDIATE')
     try {
