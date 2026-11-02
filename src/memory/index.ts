@@ -42,3 +42,4 @@ export type {
 } from './types.ts'
 export { findForOwner, forgetFlow, correctFlow } from './forget-flow.ts'
 export type { OwnerHit, ForgetFlowResult } from './forget-flow.ts'
+export { looksLikeCorrection } from './correction.ts'

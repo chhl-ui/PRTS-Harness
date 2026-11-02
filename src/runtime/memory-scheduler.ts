@@ -1,0 +1,183 @@
+/**
+ * 后台巩固调度（P1-3）：空闲时把 live turn 巩固成关联图与事实。
+ *
+ * ## 为什么必须有它
+ *
+ * 巩固此前只有 CLI 手动入口（`prts memory consolidate / extract-facts`），运行时
+ * 零调度——生产库里永远只有对话原文，没有实体/事实，`mem_facts` 空转，「纠正了
+ * 还答旧值」（V1-06 F10）的修复链路第一段就断在这里。
+ *
+ * ## 触发与预算
+ *
+ * - 挂 `agent/turn-stopping`：回合结束后 idle 毫秒无事发生才跑——巩固不能跟
+ *   用户回合抢事件循环（规则巩固是同步 SQL，跑在进程内）。
+ * - 启动时先 kick 一次：上次关机留下的积压不用等第一轮对话。
+ * - 每次运行有独立预算（rulesMaxTurns / factsLimit）：到顶即停，`budget` 状态
+ *   会安排紧接着的下一轮，积压期间逐步消化而不是一次跑死。
+ * - 随时可取消：`dispose()` 中止当前运行（ AbortSignal 只在批边界生效，
+ *   不留下半成品——巩固管线的既有不变量）。
+ *
+ * ## 模型阶段的可有可无
+ *
+ * 规则巩固零成本、必跑；事实抽取要调本地 Ollama。探活失败（Ollama 没起、
+ * 端口不通）时**跳过模型阶段而不是报错**——本地模型是加分项不是前置条件，
+ * 降级期间规则图照长，检索照常工作。探活结果缓存，避免每轮一次 HTTP。
+ *
+ * 所有失败只写 stderr——巩固是后台事，绝不能影响前台对话。
+ */
+import type { MemoryStore, TextGenerator } from '../memory/index.ts'
+
+export interface MemorySchedulerDeps {
+  store: MemoryStore
+  /** 事件总线（agent/turn-stopping）。不给也能用——只能靠 runOnce 手动触发。 */
+  events?: { on(name: string, fn: (payload: unknown) => void): () => void }
+  /** 惰性取生成器：Ollama 探活不过时返回 undefined，本次只跑规则巩固。 */
+  generator?: () => Promise<TextGenerator | undefined>
+  /** 回合结束后多少毫秒视为空闲，默认 3000。 */
+  idleMs?: number
+  /** 每次运行规则巩固的 turn 预算，默认 500。 */
+  rulesMaxTurns?: number
+  /** 每次运行事实抽取处理的 turn 数，默认 20。 */
+  factsLimit?: number
+  /** 事实抽取每批条数，默认 10。 */
+  factsBatch?: number
+  log?: (msg: string) => void
+}
+
+export interface MemorySchedulerStats {
+  runs: number
+  rulesTurns: number
+  factsTurns: number
+  factsAdded: number
+  /** 连续跳过模型阶段的次数（探活不过）。 */
+  modelSkips: number
+  lastError: string | null
+  lastRunAtMs: number | null
+  running: boolean
+}
+
+export interface MemoryScheduler {
+  /** 立刻跑一轮（不等 idle）。已在跑时排队——返回的 Promise 代表「已排上」。 */
+  runOnce(): Promise<void>
+  stats(): MemorySchedulerStats
+  dispose(): void
+}
+
+export function attachMemoryScheduler(deps: MemorySchedulerDeps): MemoryScheduler {
+  const idleMs = deps.idleMs ?? 3000
+  const rulesMaxTurns = deps.rulesMaxTurns ?? 500
+  const factsLimit = deps.factsLimit ?? 20
+  const factsBatch = deps.factsBatch ?? 10
+  const log = deps.log ?? ((msg: string) => console.error(msg))
+
+  const stats: MemorySchedulerStats = {
+    runs: 0, rulesTurns: 0, factsTurns: 0, factsAdded: 0,
+    modelSkips: 0, lastError: null, lastRunAtMs: null, running: false,
+  }
+  const abort = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let running = false
+  let queued = false
+  let disposed = false
+
+  const schedule = (delayMs: number): void => {
+    if (disposed || timer !== undefined) return
+    timer = setTimeout(() => {
+      timer = undefined
+      void runOnce()
+    }, delayMs)
+  }
+
+  const runOnce = async (): Promise<void> => {
+    if (disposed) return
+    if (running) { queued = true; return }
+    running = true
+    stats.running = true
+    try {
+      // 1. 规则巩固：同步、零成本，一次一个预算单位。
+      const rules = deps.store.consolidateRules({ maxTurns: rulesMaxTurns, signal: abort.signal })
+      stats.rulesTurns += rules.turns
+
+      // 2. 事实抽取：生成器可用才跑。生成器自身/抽取失败都不影响规则成果。
+      if (deps.generator !== undefined && !abort.signal.aborted) {
+        let gen: TextGenerator | undefined
+        try { gen = await deps.generator() } catch { gen = undefined }
+        if (gen === undefined) {
+          stats.modelSkips++
+        } else {
+          const r = await deps.store.consolidateFacts({
+            generator: gen, limit: factsLimit, batchSize: factsBatch,
+            actor: 'system', signal: abort.signal,
+          })
+          stats.factsTurns += r.turns
+          stats.factsAdded += r.added
+          // 事实层 backlog 还在：马上排下一轮，别等下一次对话空闲。
+          if (r.stop === 'budget' || rules.stopped === 'budget') schedule(500)
+        }
+      } else if (rules.stopped === 'budget') {
+        schedule(500)
+      }
+
+      stats.runs++
+      stats.lastError = null
+      stats.lastRunAtMs = Date.now()
+    } catch (error) {
+      // 巩固失败只记账——绝不往事件 handler 里抛（会污染 agent 的错误通道）。
+      stats.lastError = error instanceof Error ? error.message : String(error)
+      log(`[prts] memory scheduler run failed: ${stats.lastError}`)
+    } finally {
+      running = false
+      stats.running = false
+      if (queued && !disposed) {
+        queued = false
+        schedule(0)
+      }
+    }
+  }
+
+  const off = deps.events?.on('agent/turn-stopping', () => {
+    // 每回合都重置 idle 计时：连续对话期间不抢资源。
+    if (timer !== undefined) { clearTimeout(timer); timer = undefined }
+    schedule(idleMs)
+  })
+
+  // 启动 kick：清上次关机留下的积压。
+  schedule(idleMs)
+
+  return {
+    runOnce,
+    stats: () => ({ ...stats }),
+    dispose() {
+      disposed = true
+      if (timer !== undefined) { clearTimeout(timer); timer = undefined }
+      abort.abort()
+      off?.()
+    },
+  }
+}
+
+/**
+ * Ollama 探活器：本地生成器可用性的带缓存判定。
+ *
+ * 探活本身是一次 `/api/version` GET，毫秒级；缓存 60 s 让「Ollama 没起」
+ * 期间的每轮巩固不至于都等满超时（超时默认 1.5 s，Ollama 不跑时每次都白等）。
+ */
+export function createOllamaProbe(opts: { baseUrl: string; timeoutMs?: number; cacheMs?: number; fetchImpl?: typeof fetch }): () => Promise<boolean> {
+  const baseUrl = opts.baseUrl.replace(/\/+$/, '')
+  const timeoutMs = opts.timeoutMs ?? 1500
+  const cacheMs = opts.cacheMs ?? 60_000
+  const fetchImpl = opts.fetchImpl ?? fetch
+  let cached: { up: boolean; at: number } | undefined
+  return async () => {
+    if (cached !== undefined && Date.now() - cached.at < cacheMs) return cached.up
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), timeoutMs)
+    let up = false
+    try {
+      const res = await fetchImpl(`${baseUrl}/api/version`, { signal: ctrl.signal })
+      up = res.ok
+    } catch { up = false } finally { clearTimeout(t) }
+    cached = { up, at: Date.now() }
+    return up
+  }
+}

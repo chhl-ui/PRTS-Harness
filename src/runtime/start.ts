@@ -13,11 +13,12 @@ import { DEFAULT_READ_ONLY_SUBPATHS } from '../authority/index.ts'
 import { createStepAllocator, createTaskTools, isLedgerTool } from './task-tools.ts'
 import { createMemoryTools } from './memory-tools.ts'
 import { attachMemoryInjection } from './memory-inject.ts'
+import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
-import { MemoryStore } from '../memory/index.ts'
+import { MemoryStore, OllamaGenerator } from '../memory/index.ts'
 import { attachSpill, resolveSpillRoot } from '../spill/wiring.ts'
 
 export interface StartRuntimeOptions {
@@ -102,6 +103,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   toolNames: readonly string[]
   /** 本会话最近一次模型创建的 draft；进程内易失提示，不是账本事实。 */
   draftTaskForSession(sessionId: string): TaskId | undefined
+  /** 后台巩固调度器（`PRTS_CONSOLIDATE=off` 或记忆库不可用时为 undefined）。 */
+  memoryScheduler?: MemoryScheduler
   /** 本次实际生效的 shell 沙箱后端（`PRTS_SANDBOX_BACKEND` 的解析结果）。 */
   sandboxBackend: 'local' | 'appcontainer'
   dispose(): Promise<void>
@@ -209,6 +212,15 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   try {
     mkdirSync(o.dataRoot, { recursive: true })
     memory = MemoryStore.open(o.memoryDbPath ?? process.env.PRTS_MEMORY_DB ?? join(o.dataRoot, 'memory.sqlite'))
+    // P2-1：启动即校验记忆事件链。链断说明事件被改/被截——投影可能来自
+    // 被篡改的历史，注入它比没有记忆更糟，所以整条记忆面停用（fail-closed：
+    // 对话仍能进行，只是没有记忆，且 stderr 留下明确痕迹）。
+    const chain = memory.verifyChain()
+    if (!chain.ok) {
+      console.error(`[prts] memory chain broken at seq ${chain.brokenAtSeq} — memory disabled for this run`)
+      memory.close()
+      memory = undefined
+    }
   } catch (error) {
     console.error(`[prts] memory store unavailable: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -537,6 +549,40 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     { store: memory, limit: injectLimit },
   )
 
+  // P1-3 后台巩固调度：空闲时把 live turn 巩固成实体图与事实。
+  // `PRTS_CONSOLIDATE=off` 整体关闭。
+  //
+  // 模型阶段（事实抽取）是**显式 opt-in**：只有设了 `PRTS_CONSOLIDATE_MODEL`
+  // 才会去探活 Ollama 并跑推理。不设则只跑零成本的规则巩固——在主人没表态
+  // 之前，空闲时擅自把 GPU 拉起来跑本地模型不是该系统默认做的事。
+  // 探活不过时当轮只跑规则巩固（降级不是失败）。
+  // 其余旋钮：PRTS_OLLAMA_URL（默认 http://127.0.0.1:11434）、
+  // PRTS_CONSOLIDATE_IDLE_MS、PRTS_CONSOLIDATE_RULES_MAX、PRTS_CONSOLIDATE_FACTS_MAX。
+  const envNum = (name: string, fallback: number): number => {
+    const raw = Number(process.env[name] ?? '')
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback
+  }
+  const ollamaUrl = process.env.PRTS_OLLAMA_URL ?? 'http://127.0.0.1:11434'
+  const ollamaProbe = createOllamaProbe({ baseUrl: ollamaUrl })
+  const consolidateModel = process.env.PRTS_CONSOLIDATE_MODEL
+  const memoryScheduler = (memory === undefined || process.env.PRTS_CONSOLIDATE === 'off') ? undefined : attachMemoryScheduler({
+    store: memory,
+    events: events as { on(name: string, fn: (payload: unknown) => void): () => void } | undefined,
+    ...(consolidateModel === undefined ? {} : {
+      generator: async () => (await ollamaProbe())
+        ? new OllamaGenerator({
+          baseUrl: ollamaUrl,
+          model: consolidateModel === '' ? 'q38-gsq-iq3s' : consolidateModel,
+          // 60 s 封顶：巩固是后台事，一批卡住不该无限挂住调度器。
+          timeoutMs: envNum('PRTS_CONSOLIDATE_TIMEOUT_MS', 60_000),
+        })
+        : undefined,
+    }),
+    idleMs: envNum('PRTS_CONSOLIDATE_IDLE_MS', 3000),
+    rulesMaxTurns: envNum('PRTS_CONSOLIDATE_RULES_MAX', 500),
+    factsLimit: envNum('PRTS_CONSOLIDATE_FACTS_MAX', 20),
+  })
+
   // turn 内失败只经 agent/error 上报：dsh-agent-loop 的 throwError() emit 后 throw，
   // kick() 的 catch 吞掉异常传播。不订阅则失败完全静默。
   // 工具结果卸载（spill）接线。它是优化、不是启动前置：根与受保护根/工作区根
@@ -569,6 +615,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     toolNames: [...taskTools.names, ...(memoryTools?.names ?? [])],
     /** 本会话最近一次模型创建的 draft；进程内易失提示，不是账本事实。 */
     draftTaskForSession: (sessionId: string) => taskTools.draftTaskForSession(sessionId),
+    /** 后台巩固调度器（未启用时为 undefined）：诊断可读 stats()，测试可 runOnce()。 */
+    memoryScheduler,
     sandboxBackend: backend,
     dispose: async () => {
       detachGuard()
@@ -579,6 +627,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       offMemoryAssistantStream?.()
       offMemoryTurnStop?.()
       memoryInjection?.dispose()
+      memoryScheduler?.dispose()
       memoryTools?.dispose()
       memory?.close()
       spillWiring.dispose()

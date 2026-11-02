@@ -121,6 +121,25 @@ test('M4 幂等：跑完再跑不再处理（游标已到末尾）', async () =>
   }
 })
 
+test('M6 生成器收到的 prompt 含指令与 turn 正文（防空壳 prompt 回归）', async () => {
+  const t = makeTmp('prts-mem-consolidate-prompt-')
+  const m = MemoryStore.open(t.db('memory.sqlite'))
+  try {
+    seed(m, 3)
+    const seen: string[] = []
+    const spy: TextGenerator = {
+      model: 'spy',
+      async generate(p: string) { seen.push(p); return '[]' },
+    }
+    await consolidateProfiles(openDb(m), { generator: spy, maxTurns: 100 })
+    assert.equal(seen.length, 1, '一批一次调用')
+    assert.ok(seen[0]!.includes('durable preferences'), `prompt 必须含画像指令：${seen[0]!.slice(0, 120)}`)
+    assert.ok(seen[0]!.includes('turn 0 about camera gear'), `prompt 必须含 turn 正文：${seen[0]!.slice(0, 200)}`)
+  } finally {
+    t.cleanup(m)
+  }
+})
+
 test('M5 生成器输出非 JSON 时不崩，也不写垃圾画像', async () => {
   const t = makeTmp('prts-mem-consolidate-garbage-')
   const m = MemoryStore.open(t.db('memory.sqlite'))

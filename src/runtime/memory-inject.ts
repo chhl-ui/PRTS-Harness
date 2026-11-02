@@ -31,6 +31,16 @@ export interface MemoryInjectionDeps {
   limit?: number
   /** 短于这么多字符的查询不检索：两个字的噪声大于信息，默认 4。 */
   minQueryChars?: number
+  /**
+   * 更正钉住名额（默认 2）：近期带更正标记的 user turn 不经检索直接占位。
+   * 存在的理由是 V1-06 F10——「我最近改喝拿铁了」没有「咖啡」二字，BM25
+   * 在「我喝咖啡有什么习惯」下召不回它，模型于是答了旧值。在语义检索
+   * 落地之前，更正句是宁可多注也不能漏的信号。占 limit 内名额：
+   * 钉住的优先级高于字面命中，但总量不超限（上下文成本不变）。
+   */
+  correctionPins?: number
+  /** 更正标记的回看窗口，默认 30 天。 */
+  correctionWindowMs?: number
 }
 
 export interface MemoryInjection {
@@ -93,6 +103,8 @@ export function renderInjection(hits: MemoryHit[]): string {
 export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectionDeps): MemoryInjection {
   const limit = deps.limit ?? 5
   const minQueryChars = deps.minQueryChars ?? 4
+  const correctionPins = deps.correctionPins ?? 2
+  const correctionWindowMs = deps.correctionWindowMs ?? 30 * 86_400_000
   // 防同一 step 重放重复注入（waterfall 重试可对同一步触发多次）。
   // 键必须是 sessionId+turn+step——DSH 每轮 step 归 0（dsh-agent-loop/lib/index.js:955），
   // 只记 step 会把每轮首步都当成「已注入」而跳过，生产上实测变成只有首轮注入。
@@ -129,12 +141,18 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
       //   早期同会话内容只能靠 prts_memory_recall 工具找回，注入不再带回——工具侧
       //   不做此过滤）2) 本会话已注入过的命中 id 3) 本轮原话（兜底）。
       // search 多取 limit*3 补齐过滤损耗，再截回 limit。
-      const hits = deps.store
+      const lexical = deps.store
         .search({ text: query, limit: limit * 3, includeOrigin: ['live'] })
         .filter((h) => h.kind !== 'turn' || h.sessionId !== sessionId)
         .filter((h) => !seen.has(h.id))
         .filter((h) => h.kind !== 'turn' || normalizeText(h.text) !== queryKey)
-        .slice(0, limit)
+      // 更正钉住：近 30 天带更正标记的 user turn 直接进名额，排在字面命中之前。
+      // 已过滤同会话（它在上下文里）与已注入过的 id。
+      const pinned = correctionPins <= 0 ? [] : deps.store
+        .recentCorrections({ sinceMs: Date.now() - correctionWindowMs, limit: correctionPins, excludeSessionId: sessionId })
+        .filter((h) => !seen.has(h.id))
+      const pinnedIds = new Set(pinned.map((h) => h.id))
+      const hits = [...pinned, ...lexical.filter((h) => !pinnedIds.has(h.id))].slice(0, limit)
       if (hits.length === 0) return decision
 
       injectedSteps.add(stepKey)

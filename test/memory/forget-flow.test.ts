@@ -71,6 +71,17 @@ test('FF4 confirm=true 无 audit：拒绝执行、记忆库不动', () => {
   assert.ok(store.search({ text: '孔雀9901', limit: 5 }).length > 0, '目标不得被删')
 })
 
+test('FF5 confirm=false 的计划列出整条原文（所有者盲删防线）', () => {
+  const { store, audit, sessionsRoot } = rig(true)
+  const turnId = store.recordTurn({ actor: 'system', sessionId: 's1', turnIndex: 0, speaker: 'user', text: '我改喝拿铁了，顺带复述了猫叫墨团和芒果过敏' })
+  const r = forgetFlow({ store, audit, sessionsRoot, ids: [turnId], confirm: false })
+  assert.equal(r.ok, true)
+  assert.ok(r.message.includes(turnId), `计划要带 id：${r.message}`)
+  assert.ok(r.message.includes('猫叫墨团'), `计划要带出整条正文，不能只给计数：${r.message}`)
+  // 未执行语义不变
+  assert.equal(audit.query().length, 0)
+})
+
 test('FF3 confirm=false：K4 与记忆库都不写', () => {
   const { store, audit, sessionsRoot } = rig(true)
   const turnId = store.recordTurn({ actor: 'system', sessionId: 's1', turnIndex: 0, speaker: 'user', text: '计划态 孔雀8807' })

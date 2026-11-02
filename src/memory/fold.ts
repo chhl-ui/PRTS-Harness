@@ -119,9 +119,11 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       const p = JSON.parse(e.payload_json) as {
         fact_id: string
         reason: string
-        threshold: number
-        effective_importance: number
-        age_days: number
+        threshold?: number
+        effective_importance?: number
+        age_days?: number
+        /** 同槽取代时填新事实 id——与 fact.corrected 同一形状，找回旧值靠它。 */
+        superseded_by?: string
       }
       // 退役 = 置 `retired_at_ms`，**不动正文、不动 FTS 索引**：这是可逆档，
       // 与 memory.deleted（清正文 + 删索引，不可逆）是两回事。
@@ -129,8 +131,8 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       // `AND retired_at_ms IS NULL` 让重复退役幂等：重放同一序列时状态一致，
       // 且不会用第二次的时间覆盖第一次——退役时间是「首次降档」的事实。
       db.prepare(
-        'UPDATE mem_facts SET retired_at_ms = ? WHERE fact_id = ? AND deleted_at_ms IS NULL AND retired_at_ms IS NULL',
-      ).run(e.recorded_at_ms, p.fact_id)
+        'UPDATE mem_facts SET retired_at_ms = ?, superseded_by = COALESCE(?, superseded_by) WHERE fact_id = ? AND deleted_at_ms IS NULL AND retired_at_ms IS NULL',
+      ).run(e.recorded_at_ms, p.superseded_by ?? null, p.fact_id)
       break
     }
     case 'fact.restored': {

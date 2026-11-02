@@ -287,6 +287,42 @@ test('U3 本会话 turn 被过滤，其它会话 turn 与 fact 保留', async ()
   } finally { t.cleanup(store) }
 })
 
+test('U5 更正钉住：零字面匹配的更正 turn 直接进注入（V1-06 F10 回归）', async () => {
+  const t = makeTmp('prts-inj-u5-'); const store = MemoryStore.open(t.db())
+  try {
+    // 「改喝拿铁」里没有「咖啡」二字——纯检索召不回，必须靠钉住名额进来。
+    store.recordTurn({
+      actor: 'system', sessionId: 'old', turnIndex: 0, speaker: 'user',
+      text: '我最近改喝拿铁了，不再喝美式。', occurredAtMs: Date.now(),
+    })
+    const fake = fakeHookCtx(); const att = attachMemoryInjection(fake.ctx, { store })
+    const p = payloadOfTurn('我喝咖啡有什么习惯', 's1', 1)
+    const out = await fake.fire(p, async () => enter([p.messages[0]]))
+    const text = msgText(out, 1)
+    assert.ok(text.includes('拿铁'), `更正句必须被钉进注入：${text}`)
+    att.dispose()
+  } finally { t.cleanup(store) }
+})
+
+test('U6 钉住的边界：同会话更正不注（已在上下文），普通陈述不注', async () => {
+  const t = makeTmp('prts-inj-u6-'); const store = MemoryStore.open(t.db())
+  try {
+    store.recordTurn({
+      actor: 'system', sessionId: 's1', turnIndex: 0, speaker: 'user',
+      text: '我改喝拿铁了。', occurredAtMs: Date.now(),
+    })
+    store.recordTurn({
+      actor: 'system', sessionId: 'other', turnIndex: 0, speaker: 'user',
+      text: '今天天气不错，聊聊项目进度。', occurredAtMs: Date.now(),
+    })
+    const fake = fakeHookCtx(); const att = attachMemoryInjection(fake.ctx, { store })
+    const p = payloadOfTurn('一个与历史完全无关的问题', 's1', 1)
+    const out = await fake.fire(p, async () => enter([p.messages[0]]))
+    assert.equal(injCount(out), 0, '同会话更正与普通陈述都不该进注入')
+    att.dispose()
+  } finally { t.cleanup(store) }
+})
+
 test('U4 过滤后仍凑满 limit', async () => {
   const t = makeTmp('prts-inj-u4-'); const store = MemoryStore.open(t.db())
   try {

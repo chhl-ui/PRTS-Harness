@@ -85,7 +85,19 @@ export function forgetFlow(opts: {
     + (plan.notFound.length > 0 ? ` notFound:[${plan.notFound.join(',')}]` : '')
     + (sessionHits.length > 0 ? ` 会话命中:[${sessionHits.map(h => h.sessionId).join(',')}]` : '')
   if (!confirm) {
-    return { ok: true, plan, sessionHits, message: `删除计划（未执行）：${planText}\n加 --yes 执行。` }
+    // 列出每条顶层目标的**完整正文**再请求确认：模型回复常在一条里复述多件
+    // 不相关的事（V1-06 实测，「改喝拿铁」的回复顺带复述了猫与过敏），只给
+    // 计数让所有者盲删，会把无关信息一起删掉。正文过长的截断展示并注明。
+    const lines = [`删除计划（未执行）：${planText}`]
+    for (const [kind, list] of [['turn', plan.turns], ['fact', plan.facts], ['summary', plan.summaries], ['profile', plan.profiles]] as const) {
+      for (const id of list) {
+        const b = store.readBodyForForget(kind, id)
+        const shown = b === null || b === '' ? '（正文已不可读）' : b.length > 1000 ? `${b.slice(0, 1000)}…（共 ${b.length} 字，截断展示）` : b
+        lines.push(`  [${kind}] ${id}\n    ${shown}`)
+      }
+    }
+    lines.push('加 --yes 执行。')
+    return { ok: true, plan, sessionHits, message: lines.join('\n') }
   }
   if (audit === undefined) {
     return { ok: false, reason: 'audit 缺失', plan, sessionHits,

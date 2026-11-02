@@ -17,7 +17,7 @@ export type ActorKind = 'owner' | 'model' | 'system'
  * 走了哪条召回路径。设计稿 §6.5 早已列出这三个值，实现时只写了 `'like'`——
  * 2026-11-01 换成混合检索后补齐。`'fts-unicode61'` 暂未启用（它对中文恒为 0）。
  */
-export type RecallPath = 'like' | 'fts-trigram' | 'fts-unicode61' | 'profile' | 'semantic' | 'spread'
+export type RecallPath = 'like' | 'fts-trigram' | 'fts-unicode61' | 'profile' | 'semantic' | 'spread' | 'correction'
 
 export interface AssertFactInput {
   actor: ActorKind
@@ -33,6 +33,19 @@ export interface AssertFactInput {
   validToMs?: number
   sourceTurnIds?: string[]
   retentionClass?: RetentionClass
+  /**
+   * 同槽取代开关（默认 false）。为 true 时，写入本事实后把同 `subject|predicate`
+   * 的在役旧事实退役并记 `superseded_by` 指向本行。
+   *
+   * 为什么默认关：同槽不同取值可能是**并存**而非取代（两台相机、两个项目），
+   * 字符串层分不出来——fold.ts `fact.asserted` 的注释早已写明「不能自动推断」。
+   * 调用方只能在有**显式更正证据**时开它：当前唯一的开启方是 `consolidateFacts`
+   * 检测到来源 turn 带更正标记（`correction.ts`）时。
+   *
+   * 保留的安全闸：model-inferred 的新事实**不许**取代 owner-stated / verifier
+   * 的旧事实——模型抽错一句话就把主人明说的事实顶掉，是不可接受的失败形态。
+   */
+  supersedeSameSlot?: boolean
 }
 
 export interface RecordTurnInput {
@@ -199,7 +212,6 @@ export type MemoryEventKind =
   | 'fact.reinforced'
   | 'turn.recorded'
   | 'summary.generated'
-  | 'fact.corrected'
   | 'memory.deleted'
   | 'deletion.derivative-done'
 

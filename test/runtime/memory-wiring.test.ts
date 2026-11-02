@@ -110,6 +110,34 @@ test('MW2: 记忆库不可用时不影响对话', { skip: !WIN, timeout: 120000 
   }
 })
 
+test('MW5: 记忆事件链损坏 → 启动校验停用整条记忆面（P2-1）', { skip: !WIN, timeout: 120000 }, async () => {
+  const t = makeTmp('prts-rt-memory-chain-')
+  let app: Awaited<ReturnType<typeof boot>> | undefined
+  try {
+    // 第一次启动写入一条 turn，让链非空
+    app = await boot(t, [{ type: 'text', text: '收到。' } as ScriptedStep])
+    await runTurn(app.ctx as Context, '链校验探针', { cwd: app.workspace })
+    assert.ok(app.memory !== undefined)
+    const dbPath = join(app.dataRoot, 'memory.sqlite')
+    await app.dispose()
+    app = undefined
+
+    // 直接篡改一条事件的 payload：hash 对不上，verifyChain 必断
+    const db = new DatabaseSync(dbPath)
+    db.prepare("UPDATE memory_events SET payload_json = '{\"tampered\":true}' WHERE seq = 1").run()
+    db.close()
+
+    app = await boot(t, [{ type: 'text', text: '收到。' } as ScriptedStep])
+    assert.equal(app.memory, undefined, '链断时记忆必须整体停用，而不是带着可疑投影继续注入')
+    // 对话能力不受影响
+    await runTurn(app.ctx as Context, '还能说话吗', { cwd: app.workspace })
+    assert.ok(app.ctx)
+  } finally {
+    await app?.dispose()
+    t.cleanup()
+  }
+})
+
 test('MW4: live turn 写入时间落在 [before, after]，renderInjection 显示 ISO 而非「时间未知」', { skip: !WIN, timeout: 120000 }, async () => {
   const t = makeTmp('prts-rt-memory-time-')
   let app: Awaited<ReturnType<typeof boot>> | undefined

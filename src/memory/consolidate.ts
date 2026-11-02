@@ -353,9 +353,10 @@ export async function consolidateProfiles(
     const text = batch.map((t, i) => `[${i}] (${t.sessionId}) ${t.body.slice(0, 300)}`).join('\n')
     let raw: string
     try {
-      raw = await opts.generator.generate(`\n
-Turns:
-`)
+      // 2026-11-02 修复：此前模板里的 ${PROFILE_PROMPT} 与 ${text} 在写入文件时
+      // 被 shell 剥掉，模型实际收到的是一段几乎为空的 prompt——管线自提交起
+      // 就没真正工作过（假 generator 不看 prompt，测试因此全程绿灯）。
+      raw = await opts.generator.generate(`${PROFILE_PROMPT}\n\nTurns:\n${text}`)
     } catch {
       failed += batch.length
       stopped = 'failed'

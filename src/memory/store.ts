@@ -29,6 +29,7 @@ import {
 } from './lifecycle.ts'
 import { parseTime } from './time.ts'
 import { tokenize } from './tokenize.ts'
+import { looksLikeCorrection } from './correction.ts'
 import type {
   ActorKind, AssertFactInput, ImportStats, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput, ForgetPlan, ForgetResult,
   VectorOwnerKind,
@@ -165,6 +166,38 @@ export class MemoryStore {
         occurredAtMs: payload.valid_from_ms,
         payload,
       })
+
+      // 同槽取代（显式开启才走）：把同 subject|predicate、不同正文的在役旧事实
+      // 退役并记 superseded_by。三条闸缺一不可：
+      //  - `identity_key <> 新键`：同一句更正被重复抽取时，库里的在役同文行就是
+      //    当前值本身，把它退役等于刚记住就忘掉（V1-06 F10 修复的直接回归点）。
+      //  - model-inferred 不取代非 model-inferred：模型抽错一句话就把主人明说
+      //    （owner-stated）或验证器确认的事实顶掉，是不可接受的失败形态。
+      //  - 全部在同一事务内：投影与事件同生共死，重放 rebuild 得到同一结果。
+      if (input.supersedeSameSlot === true) {
+        const slot = this.db.prepare(
+          `SELECT fact_id, confirmation_basis FROM mem_facts
+             WHERE scope = ? AND deleted_at_ms IS NULL AND retired_at_ms IS NULL
+               AND fact_id <> ? AND identity_key <> ?
+               AND lower(trim(subject)) = ? AND lower(trim(predicate)) = ?`,
+        ).all(
+          SCOPE, factId, payload.identity_key,
+          input.subject.trim().toLowerCase(), input.predicate.trim().toLowerCase(),
+        ) as Array<{ fact_id: string; confirmation_basis: string }>
+        for (const row of slot) {
+          if (input.confirmationBasis === 'model-inferred' && row.confirmation_basis !== 'model-inferred') continue
+          this.appendEvent({
+            kind: 'fact.retired',
+            actor: input.actor,
+            recordedAtMs: now,
+            payload: {
+              fact_id: row.fact_id,
+              reason: `superseded-by-slot: ${factId}`,
+              superseded_by: factId,
+            },
+          })
+        }
+      }
 
       this.db.exec('COMMIT')
       return factId
@@ -558,7 +591,10 @@ export class MemoryStore {
           provenance: 'inferred',
           confirmationBasis: 'model-inferred',
           origin: 'live',
+          // 只有来源 turn 显式带更正标记才开同槽取代——这是「新值顶替旧值」
+          // 与「同槽并存取值」在字符串层唯一可分的证据（correction.ts 头部）。
           ...(srcTurn === undefined ? {} : { sourceTurnIds: [srcTurn.tid] }),
+          ...(srcTurn !== undefined && looksLikeCorrection(srcTurn.body) ? { supersedeSameSlot: true } : {}),
         })
       }
       turns += batch.length
@@ -570,6 +606,46 @@ export class MemoryStore {
     }
 
     return { turns, extracted, added: this.countFacts() - before, skipped, cursor, stop }
+  }
+
+  /**
+   * 近期带更正标记的用户 turn（注入层的预留名额数据源，V1-06 F10）。
+   *
+   * 为什么不走 `search()`：更正句往往不含查询的关键词（「改喝拿铁」里没有「咖啡」），
+   * BM25/FTS 在语义检索落地前召不回它；而「主人最近说要改」恰恰是最不能让模型
+   * 错过的信号。这里按时间倒序取少量候选，用 `correction.ts` 的同一张词表过滤。
+   *
+   * 返回 MemoryHit 形状是为了直接进注入管线（sessionId 供同会话过滤）；
+   * `recallPath` 标 `'correction'`，审计时能分清它是钉进去的还是检索出来的。
+   */
+  recentCorrections(opts: { sinceMs?: number; limit?: number; excludeSessionId?: string } = {}): MemoryHit[] {
+    const sinceMs = opts.sinceMs ?? Date.now() - 30 * 86_400_000
+    const limit = Math.max(1, opts.limit ?? 5)
+    // 多取 10 倍给标记过滤留损耗——更正句是稀疏信号，窗口内绝大多数 turn 会被滤掉。
+    const rows = this.db.prepare(
+      `SELECT t.turn_id AS id, t.session_id AS sessionId,
+              t.occurred_at_ms AS atMs, t.occurred_raw AS raw, b.body AS body
+         FROM mem_turns t JOIN mem_bodies b ON b.body_ref = t.body_ref
+        WHERE t.scope = ? AND t.origin = 'live' AND t.deleted_at_ms IS NULL
+          AND t.speaker = 'user' AND t.occurred_at_ms >= ?
+          AND b.body IS NOT NULL AND b.body <> ''
+        ORDER BY t.occurred_at_ms DESC LIMIT ?`,
+    ).all(SCOPE, sinceMs, limit * 10) as Array<{
+      id: string; sessionId: string; atMs: number | null; raw: string | null; body: string
+    }>
+    const out: MemoryHit[] = []
+    for (const r of rows) {
+      if (opts.excludeSessionId !== undefined && r.sessionId === opts.excludeSessionId) continue
+      if (!looksLikeCorrection(r.body)) continue
+      out.push({
+        kind: 'turn', id: r.id, score: 0, origin: 'live',
+        sessionId: r.sessionId, occurredAtMs: r.atMs,
+        ...(r.raw === null ? {} : { occurredRaw: r.raw }),
+        text: r.body, recallPath: 'correction',
+      })
+      if (out.length >= limit) break
+    }
+    return out
   }
 
   /** 当前库里的 fact 条数（含已删除）。 */
