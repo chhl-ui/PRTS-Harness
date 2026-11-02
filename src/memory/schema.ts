@@ -128,6 +128,27 @@ CREATE TABLE IF NOT EXISTS mem_deletions (
 CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_turns USING fts5(body, tokenize='trigram');
 CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts_facts USING fts5(body, tokenize='trigram');
 
+-- V1-14 前瞻记忆：意图是事件，这张表是投影（与 mem_facts 同构）。
+-- fire_at_ms 是「应该触发」的计划时刻，fired_at_ms 是实际触发时刻——
+-- 定案走方案 B（进程内定时 + 启动补触发），两者可能相差很远，必须分开存，
+-- 补发时才能如实告知「原定 X，现在补发」。
+CREATE TABLE IF NOT EXISTS mem_intents (
+  intent_id       TEXT PRIMARY KEY,
+  scope           TEXT NOT NULL DEFAULT 'prts',
+  condition_raw   TEXT NOT NULL,
+  action          TEXT NOT NULL,
+  fire_at_ms      INTEGER NOT NULL,
+  status          TEXT NOT NULL,
+  created_at_ms   INTEGER NOT NULL,
+  fired_at_ms     INTEGER,
+  cancelled_at_ms INTEGER,
+  source_turn_id  TEXT,
+  CHECK (status IN ('pending','fired','cancelled')),
+  CHECK (status <> 'fired' OR fired_at_ms IS NOT NULL),
+  CHECK (status <> 'cancelled' OR cancelled_at_ms IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_mem_intents_due ON mem_intents(status, fire_at_ms);
+
 CREATE TABLE IF NOT EXISTS mem_sessions (
   session_id     TEXT PRIMARY KEY,
   scope          TEXT NOT NULL DEFAULT 'prts',

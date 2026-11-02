@@ -32,12 +32,59 @@ import { parseTime } from './time.ts'
 import { tokenize } from './tokenize.ts'
 import { looksLikeCorrection, normalizeSlotKey } from './correction.ts'
 import type {
-  ActorKind, AssertFactInput, FactMeta, ImportStats, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput, ForgetPlan, ForgetResult,
+  ActorKind, AssertFactInput, CreateIntentInput, FactMeta, ImportStats, IntentRow, IntentStatus,
+  MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput,
+  ForgetPlan, ForgetResult,
   TurnEntityMention, VectorOwnerKind,
 } from './types.ts'
 
 const SCOPE = 'prts'
 const DEFAULT_LIMIT = 20
+
+/**
+ * 意图触发时刻的合法窗口（V1-14）。
+ *
+ * 为什么要有下限：太近的时刻会在同一会话内触发，用户刚说完就被"提醒"，是噪声。
+ * 为什么要有上限：两年的意图等于没有意图，还会永久占着 pending 表。
+ * 这两个数是产品判断，不是物理常量——调整时改这里并同步文档。
+ */
+const INTENT_MIN_LEAD_MS = 60_000
+const INTENT_MAX_LEAD_MS = 2 * 365 * 86_400_000
+
+/** 时间校验：模型解析出的绝对时刻不可全信，这里是硬闸门。 */
+function validateFireAt(fireAtMs: number, nowMs: number): void {
+  if (!Number.isFinite(fireAtMs)) throw new Error(`intent: 非法的触发时刻 ${String(fireAtMs)}`)
+  if (fireAtMs <= nowMs) throw new Error('intent: 触发时刻必须在未来（过去的时间无法触发）')
+  if (fireAtMs - nowMs < INTENT_MIN_LEAD_MS) throw new Error('intent: 触发时刻过近，至少 1 分钟之后')
+  if (fireAtMs - nowMs > INTENT_MAX_LEAD_MS) throw new Error('intent: 触发时刻过远，最多 2 年')
+}
+
+/** `mem_intents` 的原始行（snake_case），只在 store 内部流转。 */
+interface RawIntentRow {
+  intent_id: string
+  condition_raw: string
+  action: string
+  fire_at_ms: number
+  status: string
+  created_at_ms: number
+  fired_at_ms: number | null
+  cancelled_at_ms: number | null
+  source_turn_id: string | null
+}
+
+function toIntentRow(r: RawIntentRow): IntentRow {
+  return {
+    intentId: r.intent_id,
+    conditionRaw: r.condition_raw,
+    action: r.action,
+    fireAtMs: r.fire_at_ms,
+    status: r.status as IntentStatus,
+    createdAtMs: r.created_at_ms,
+    firedAtMs: r.fired_at_ms,
+    cancelledAtMs: r.cancelled_at_ms,
+    sourceTurnId: r.source_turn_id,
+  }
+}
 /**
  * 时近衰减的权重上限（v2.7）。此前的 `score = recency × ...` 让 recency 成为乘性
  * 因子，实测把 bm25 名次靠前的证据压了下去：纯 FTS 探针 any@8 = 45.1%，
@@ -1566,6 +1613,106 @@ export class MemoryStore {
   }
 
   /** 向量覆盖情况——排查「为什么向量路没效果」时第一个要看的东西。 */
+  // ---- V1-14 前瞻记忆：意图 ----
+
+  /**
+   * 建一条前瞻意图。时间校验是硬闸门（见 `validateFireAt`）——
+   * 中文时间解析走「模型给绝对时刻 + 本地校验」（`docs/design-intent-memory-v1-14.md` 决策 1），
+   * 模型的时间算术不可全信，越界一律拒绝而不是静默接受。
+   */
+  createIntent(input: CreateIntentInput): string {
+    const now = Date.now()
+    validateFireAt(input.fireAtMs, now)
+    const conditionRaw = input.conditionRaw.trim()
+    const action = input.action.trim()
+    if (conditionRaw === '') throw new Error('intent: condition_raw 不能为空')
+    if (action === '') throw new Error('intent: action 不能为空')
+    const intentId = `int-${randomUUID()}`
+    this.appendEvent({
+      kind: 'intent.created',
+      actor: input.actor,
+      recordedAtMs: now,
+      payload: {
+        intent_id: intentId,
+        condition_raw: conditionRaw,
+        action,
+        fire_at_ms: input.fireAtMs,
+        created_at_ms: now,
+        source_turn_id: input.sourceTurnId ?? null,
+      },
+    })
+    return intentId
+  }
+
+  /**
+   * 取消未触发的意图。
+   *
+   * 终态纪律：已 fired 的拒绝（状态不可倒退）；已 cancelled 的**幂等无操作**，
+   * 且不改写首次记录的 `cancelled_at_ms`——重复取消不该让历史时刻漂移。
+   */
+  cancelIntent(input: { actor: ActorKind; intentId: string }): void {
+    const row = this.getIntent(input.intentId)
+    if (row === undefined) throw new Error(`intent: 不存在 ${input.intentId}`)
+    if (row.status === 'fired') throw new Error('intent: 已触发的意图不能取消（状态不可倒退）')
+    if (row.status === 'cancelled') return
+    this.appendEvent({
+      kind: 'intent.cancelled',
+      actor: input.actor,
+      recordedAtMs: Date.now(),
+      payload: { intent_id: input.intentId, cancelled_at_ms: Date.now() },
+    })
+  }
+
+  /**
+   * 记一次触发。`firedAtMs` 是**实际**触发时刻，可能与计划时刻差很远
+   * （方案 B：进程不在时下次启动补发）。非 pending 状态视为无操作——补触发可能重放。
+   */
+  markFired(input: { actor: ActorKind; intentId: string; firedAtMs: number }): void {
+    const row = this.getIntent(input.intentId)
+    if (row === undefined) throw new Error(`intent: 不存在 ${input.intentId}`)
+    if (row.status !== 'pending') return
+    this.appendEvent({
+      kind: 'intent.fired',
+      actor: input.actor,
+      recordedAtMs: Date.now(),
+      payload: { intent_id: input.intentId, fired_at_ms: input.firedAtMs },
+    })
+  }
+
+  getIntent(intentId: string): IntentRow | undefined {
+    const row = this.db.prepare(
+      `SELECT intent_id, condition_raw, action, fire_at_ms, status, created_at_ms,
+              fired_at_ms, cancelled_at_ms, source_turn_id
+         FROM mem_intents WHERE intent_id = ?`,
+    ).get(intentId) as unknown as RawIntentRow | undefined
+    return row === undefined ? undefined : toIntentRow(row)
+  }
+
+  listIntents(opts: { status?: IntentStatus } = {}): IntentRow[] {
+    const base = `SELECT intent_id, condition_raw, action, fire_at_ms, status, created_at_ms,
+                         fired_at_ms, cancelled_at_ms, source_turn_id
+                    FROM mem_intents`
+    const rows = (opts.status === undefined
+      ? this.db.prepare(`${base} ORDER BY created_at_ms DESC`).all()
+      : this.db.prepare(`${base} WHERE status = ? ORDER BY created_at_ms DESC`).all(opts.status)) as unknown as RawIntentRow[]
+    return rows.map(toIntentRow)
+  }
+
+  /**
+   * 已到点、仍 pending 的意图，按计划时刻升序。
+   * W3 的调度器在启动时用它做补触发，运行中用同一个查询判断是否到点。
+   */
+  dueIntents(nowMs: number): IntentRow[] {
+    const rows = this.db.prepare(
+      `SELECT intent_id, condition_raw, action, fire_at_ms, status, created_at_ms,
+              fired_at_ms, cancelled_at_ms, source_turn_id
+         FROM mem_intents
+        WHERE status = 'pending' AND fire_at_ms <= ?
+        ORDER BY fire_at_ms ASC`,
+    ).all(nowMs) as unknown as RawIntentRow[]
+    return rows.map(toIntentRow)
+  }
+
   vectorStats(): Array<{ ownerKind: string; model: string; count: number }> {
     return this.db.prepare(
       `SELECT owner_kind AS ownerKind, model, COUNT(*) AS count

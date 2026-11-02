@@ -273,6 +273,41 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       ).run(e.recorded_at_ms, p.deletion_id)
       break
     }
+    case 'intent.created': {
+      const p = JSON.parse(e.payload_json) as {
+        intent_id: string
+        condition_raw: string
+        action: string
+        fire_at_ms: number
+        created_at_ms: number
+        source_turn_id: string | null
+      }
+      // INSERT OR IGNORE：重放同一事件不该炸（真正的重复由链上的 seq 唯一性先拦住）。
+      db.prepare(
+        `INSERT OR IGNORE INTO mem_intents
+           (intent_id, condition_raw, action, fire_at_ms, status, created_at_ms, source_turn_id)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+      ).run(p.intent_id, p.condition_raw, p.action, p.fire_at_ms, p.created_at_ms, p.source_turn_id)
+      break
+    }
+    case 'intent.fired': {
+      const p = JSON.parse(e.payload_json) as { intent_id: string; fired_at_ms: number }
+      // 只从 pending 迁出：fired/cancelled 是终态。方案 B 的启动补触发可能重放同一事件，
+      // 用 WHERE status='pending' 让重放变成无操作，而不是把时刻改来改去。
+      db.prepare(
+        `UPDATE mem_intents SET status = 'fired', fired_at_ms = ?
+          WHERE intent_id = ? AND status = 'pending'`,
+      ).run(p.fired_at_ms, p.intent_id)
+      break
+    }
+    case 'intent.cancelled': {
+      const p = JSON.parse(e.payload_json) as { intent_id: string; cancelled_at_ms: number }
+      db.prepare(
+        `UPDATE mem_intents SET status = 'cancelled', cancelled_at_ms = ?
+          WHERE intent_id = ? AND status = 'pending'`,
+      ).run(p.cancelled_at_ms, p.intent_id)
+      break
+    }
     // 其余事件种类（fact.corrected / turn.recorded / summary.generated）
     // 尚未实现——第一版只做 fact.asserted 与删除这一条纵切。
     // **未实现的分支不静默忽略**：

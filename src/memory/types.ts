@@ -230,6 +230,34 @@ export type MemoryEventKind =
   | 'summary.generated'
   | 'memory.deleted'
   | 'deletion.derivative-done'
+  | 'intent.created'
+  | 'intent.fired'
+  | 'intent.cancelled'
+
+/** V1-14 前瞻记忆：意图状态。`fired` 与 `cancelled` 是终态，不可互转。 */
+export type IntentStatus = 'pending' | 'fired' | 'cancelled'
+
+/** `mem_intents` 投影的一行。`fireAtMs` 是计划时刻，`firedAtMs` 是实际时刻。 */
+export interface IntentRow {
+  intentId: string
+  /** 用户原话片段，原样保留——模型时间解析错时，回显它才能让用户看出来。 */
+  conditionRaw: string
+  action: string
+  fireAtMs: number
+  status: IntentStatus
+  createdAtMs: number
+  firedAtMs: number | null
+  cancelledAtMs: number | null
+  sourceTurnId: string | null
+}
+
+export interface CreateIntentInput {
+  actor: ActorKind
+  conditionRaw: string
+  fireAtMs: number
+  action: string
+  sourceTurnId?: string
+}
 
 /**
  * 可持有向量的记忆种类。
