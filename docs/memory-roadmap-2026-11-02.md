@@ -28,14 +28,14 @@
 | sleep-phase consolidation | ✅ 规则 + 模型两套 | `consolidateRules` / `consolidateProfiles`，真机跑通 |
 | interference-based forgetting | ✅ 退役 + 衰减 | `retireFacts` / `decayedImportance`，11 个单测 |
 | entity knowledge graph | ✅ 153,304 实体 / 1,098,122 边 | 真机计数 |
-| hybrid multi-cue retrieval | ⚠️ **仅离线验证** | 三路对比完成，产品 `search` 不对 turn 走向量路 |
+| hybrid multi-cue retrieval | ✅ **已接生产**（2026-11-02，`PRTS_EMBED=1`） | 注入/召回工具走 `search({queryVector, semanticWeight:0.5})`，调度器空闲补 turn 向量；benchmark 级判据（@8/temporal）未复测 |
 | engram maturation | ❌ 无 | 新记忆与旧记忆同等对待 |
 | reconsolidation upon retrieval | ⚠️ 只有计数强化 | `reinforceFacts` 改 access_count，不改写内容 |
 
 | 阶段 | PRTS 现状 |
 |---|---|
 | 索引 | ✅ 有（规则实体、画像、摘要、生命周期的 chunk 化= turn 原样） |
-| 检索 | ⚠️ 单路 bm25 上生产，混合只在离线验证 |
+| 检索 | ✅ 混合路已上生产（opt-in `PRTS_EMBED=1`，Ollama 探活门控，失败降级纯 bm25） |
 | **阅读** | ❌ **几乎没有**：注入 5 条原始 turn，不做时间线/实体卡片/冲突消解 |
 
 ## 三、实测数据支撑的判断（本会话产出）

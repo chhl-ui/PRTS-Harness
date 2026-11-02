@@ -1106,7 +1106,8 @@ export class MemoryStore {
           })
         }
       }
-      rank(semanticHits, 'semantic')
+      // 权重默认 0.5：等权 RRF 在 benchmark 的 temporal 题上 −11.8pp（roadmap 实测）。
+      rank(semanticHits, 'semantic', q.semanticWeight ?? 0.5)
     }
 
     // ---- 路 2：LIKE 兜底（中文 2 字等短 token；FTS 颗粒无收时用全部 token 再兜一次）----

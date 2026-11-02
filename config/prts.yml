@@ -101,7 +101,7 @@
   config:
     includeHarnessIdentity: false
     includeRuntimeContext: false
-    personaPrefix: "你是 PRTS（Primitive Rhodes Island Terminal Service），罗德岛的终端系统。回答冷静、精确、简洁，使用简体中文。"
+    personaPrefix: "你是 PRTS（Primitive Rhodes Island Terminal Service），罗德岛的终端系统。回答冷静、精确、简洁，使用简体中文。你与博士的对话由宿主自动记入长期记忆，无需也不应由你写入文件保存；需要回顾历史时使用 prts_memory_recall 检索。"
 
 - id: tools
   name: '@deepseek-ai/dsh-tools'

@@ -5,7 +5,7 @@
 - `src/memory/fold.ts` 的 `memory.deleted` 支持 target fact/turn（清 body、删 FTS 行、置 `deleted_at_ms`），但**没有任何调用入口**删 turn；`deleteFact` 无 CLI/chat 入口；`fact.corrected` 未实现。
 - 删除不清链外派生项：`mem_vectors`（无删除语句）、`mem_sessions.body` 与 `mem_fts_sessions`（删 turn 后不重算）、`mem_mentions`/`mem_entities`/`mem_links`/`mem_topics`（巩固产物，`consolidate.ts:155-180`）、`mem_profiles.evidence_fact_ids`、`mem_summaries.source_turn_ids`、`mem_facts.source_turn_ids`。`rebuildProjections` 不碰链外项（`store.ts:1576` 注释）。
 - K4 删除 API 已有：`deletion.requested {deletionId, target:{kind,id}, derivatives:[{kind,ref}]}` → 逐个 `deletion.derivative-done {deletionId, index}` → 最后一个完成时库内自动追加 `deletion.completed`（`src/audit/audit.ts:134-146,238-257`，`src/audit/types.ts:25-27`）。
-- DSH 会话日志 `<dataRoot>/dsh-home/sessions/**/session*.jsonl` 含对话原文与持久化的注入；DSH 无删除会话/判定会话是否在用的公开接口。**会话日志删除不在本轮（P0-2b）**，本轮只检测并如实记账。
+- DSH 会话日志 `<dataRoot>/dsh-home/sessions/**/session*.jsonl` 含对话原文与持久化的注入；**会话日志删除见文末「P0-2b 已完成」**——由 `/forget-session` 命令经 DSH 写锁协议判定空闲后整目录删除，并补记 K4 `session-log` derivative。
 
 ## 1. 存储层 `MemoryStore`
 
@@ -44,6 +44,13 @@
 - chat：`/memory <query>`、`/forget <id,...>`（计划）、`/forget <id,...> --yes`（执行）、`/correct <factId> <新内容>`。chat 用运行时同一个 MemoryStore 与 authority 的 dbPath（startRuntime 透出）；斜杠命令行不发模型、不落记忆。
 - 不注册任何模型工具。
 
-## P0-2b 未做（本轮明确排除）
+## P0-2b 已完成（2026-11-02，`src/memory/session-purge.ts`）
 
-会话日志删除，原因：DSH 无删除会话与在用判定的公开接口；Windows 上会话写锁是由路径派生的命名内核信号量（`dsh-session-persistence-jsonl/lib/index.js:617-717`），在用的会话文件无法安全改写。本轮以 K4 未完成删除项（`session-log` derivative）如实记账。
+会话日志删除已实现，解除此前「在用判定无公开接口」的阻塞：
+
+- **在用判定**：按上游 `SessionWriteLease` 同一协议，在 Windows 上尝试获取命名内核信号量 `Local\dsh-session-lock-<sha256(小写 resolve(<dir>/session.lock))>`（计数 1、零超时 wait）。拿到 = 空闲且持有期间新写者被 `SessionAlreadyOwnedError` 挡住——拿锁-删除-放锁无竞态；拿不到 = 在用（当前 chat 会话天然被自持锁拒删，不需特判）。锁是内核对象不是 `session.lock` 文件内容，进程死亡自动释放，无过期抢占语义。上游未导出该类，PRTS 用 koffi 按公开协议重实现，一致性靠契约测试钉住：真实运行时的活动会话必须探测为 busy（SP5）。
+- **删除粒度**：整个会话目录（`session.v4.jsonl` + 附属文件）。逐行改写 JSONL 会破坏 append-only 事件图（seq / sourceEventSeqs），续会话读到损坏历史——所以走独立命令与显式确认，不并入 `/forget` 的自动级联。
+- **入口**：`prts memory forget-session --id <sessionId,...> [--yes]`；chat `/forget-session <id,...> [--yes]`。无 --yes 打印探测（free/busy/missing/字节数）退出码 2。
+- **K4 闭环**：purge 成功后为所有挂着的 `session-log` derivative（按 ref=sessionId 匹配）补 `deletion.derivative-done`；全部完成时 `AuditLog` 自动补 `deletion.completed`。忙/失败的会话保持未完成、可重试。
+- **保守细节**：持锁期间先 `rename` 到 `*.purged-<ts>` 再 `rm`（rm 半途失败原路径也不再有可读日志）；sessionId 白名单校验拒绝路径穿越；单个会话的锁/删失败隔离到该会话不中止整批；探测拿锁异常按 busy 报，绝不假报 free。
+- **真机验收**（`.scratch/v106/run-2026-11-02T1456/`）：3 个会话目录删除、39 条 derivative-done 补记、13 条 deletion 全部 completed、会话日志 token 扫描为空。

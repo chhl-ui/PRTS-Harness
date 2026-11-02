@@ -145,6 +145,12 @@ export interface MemoryQuery {
   /** 余弦下限，默认 0（不设阈值，先靠排名融合吸收噪声）。 */
   semanticMinSim?: number
   /**
+   * 向量路在 RRF 融合里的权重，默认 0.5。依据 memory-roadmap 实测：
+   * 等权（1.0）融合在 temporal 题上比单 bm25 掉 11.8pp，1:0.5 是
+   * 数据支持的起始配比；调回 1.0 需谨慎，先过 temporal 回归。
+   */
+  semanticWeight?: number
+  /**
    * 扩散激活跳数（Wave 4）。默认 0（关闭），只支持 0 或 1。
    *
    * 做法：从直接命中的 turn 里抽实体当种子 → 沿 `mem_links` 取 1 跳邻居 →
