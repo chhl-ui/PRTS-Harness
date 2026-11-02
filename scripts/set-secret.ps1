@@ -1,4 +1,4 @@
-# 把 DeepSeek API key 存进 Windows Credential Manager（DPAPI 保护）。
+﻿# 把 DeepSeek API key 存进 Windows Credential Manager（DPAPI 保护）。
 #
 # 为什么不用 cmdkey：`cmdkey /pass:<key>` 会把明文放进命令行，进程列表里能看到。
 # 这里用 Read-Host -AsSecureString 交互输入，再用 CredWrite 直接写 blob。
