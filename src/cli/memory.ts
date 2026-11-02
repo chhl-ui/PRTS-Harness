@@ -15,7 +15,8 @@
  * 库路径优先级与运行时一致：`--db` > `PRTS_MEMORY_DB` > `<PRTS_DATA_ROOT>/memory.sqlite`。
  */
 import { join } from 'node:path'
-import { MemoryStore } from '../memory/index.ts'
+import { MemoryStore, type VectorOwnerKind } from '../memory/index.ts'
+import { OllamaEmbedder } from '../memory/embedding.ts'
 import { OllamaGenerator } from '../memory/generate.ts'
 
 const USAGE = `usage:
@@ -23,7 +24,8 @@ const USAGE = `usage:
   prts memory consolidate [--db <path>]
   prts memory retire     [--db <path>] [--limit N] [--floor F] [--min-age-days D] [--apply]
   prts memory restore <factId...> [--db <path>]
-  prts memory extract-facts [--db <path>] [--limit N] [--batch N] [--model M] [--ollama URL] --apply`
+  prts memory extract-facts [--db <path>] [--limit N] [--batch N] [--model M] [--ollama URL] --apply
+  prts memory embed        [--db <path>] [--kinds turn,fact,profile] [--limit N] [--model M] [--ollama URL] --apply`
 
 /** 与 `prts.ts` 同构的最小参数解析：带值 flag 取下一个元素，不做 `--k=v` 形式。 */
 function arg(args: string[], name: string): string | undefined {
@@ -210,6 +212,55 @@ export function memoryCommand(args: string[]): number {
     }
   } catch (e) {
     console.error(`prts memory ${sub} 失败: ${e instanceof Error ? e.message : String(e)}`)
+    return 1
+  } finally {
+    store?.close()
+  }
+}
+
+/**
+ * 子命令 embed：给记忆补向量。
+ *
+ * 与 `extract-facts` 同构——默认只报计划，`--apply` 才真跑。区别是默认 kinds 是 `turn`：
+ * turn 是 24.6 万级主检索对象（约 44 分钟本地推理），必须由人显式发起，不能挂在启动路径
+ * 或例行巩固上。分片规模用 `--limit` 控制；幂等（已补齐的不会被重选），可断点续跑。
+ */
+export async function memoryEmbedVectors(args: string[]): Promise<number> {
+  const dbPath = resolveDbPath(args)
+  if (dbPath === undefined) {
+    console.error('prts memory: 无法确定记忆库路径——传 --db，或设置 PRTS_MEMORY_DB / PRTS_DATA_ROOT')
+    return 2
+  }
+  const apply = args.includes('--apply')
+  const limit = numArg(args, '--limit') ?? 200
+  const model = arg(args, '--model')
+  const baseUrl = arg(args, '--ollama')
+  const kindsArg = arg(args, '--kinds') ?? 'turn'
+  const valid: VectorOwnerKind[] = ['fact', 'profile', 'turn']
+  const kinds = kindsArg.split(',').map((s) => s.trim()).filter((s) => s !== '') as VectorOwnerKind[]
+  if (kinds.length === 0 || kinds.some((k) => !valid.includes(k))) {
+    console.error(`prts memory embed: --kinds 只接受 ${valid.join(',')}，收到 "${kindsArg}"`)
+    return 2
+  }
+
+  let store: MemoryStore | undefined
+  try {
+    store = MemoryStore.open(dbPath)
+    const embedder = new OllamaEmbedder({
+      ...(model === undefined ? {} : { model }),
+      ...(baseUrl === undefined ? {} : { baseUrl }),
+    })
+    if (!apply) {
+      console.log(`将给最多 ${limit} 条 ${kinds.join(',')} 补向量，模型 ${embedder.model}`)
+      console.log('加 --apply 才会真正调用 embedder 并写库。')
+      console.log('提示：turn 全量约 24.6 万条、本地 bge-m3 约 44 分钟；分片跑用 --limit 控制单次规模。')
+      return 0
+    }
+    const result = await store.embedPending({ embedder, limit, kinds })
+    console.log(JSON.stringify(result))
+    return 0
+  } catch (e) {
+    console.error(`prts memory embed 失败: ${e instanceof Error ? e.message : String(e)}`)
     return 1
   } finally {
     store?.close()

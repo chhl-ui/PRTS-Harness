@@ -36,4 +36,5 @@ export type {
   Provenance,
   RecallPath,
   RetentionClass,
+  VectorOwnerKind,
 } from './types.ts'

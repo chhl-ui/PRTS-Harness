@@ -10,7 +10,7 @@ import { IntegrityError } from '../integrity/errors.ts'
 import { initCoreDb } from '../core/init.ts'
 import { startupCheck } from '../core/startup-check.ts'
 import { AuditLog } from '../audit/index.ts'
-import { memoryCommand, memoryExtractFacts } from './memory.ts'
+import { memoryCommand, memoryEmbedVectors, memoryExtractFacts } from './memory.ts'
 
 function arg(args: string[], name: string): string | undefined {
   const i = args.indexOf(name)
@@ -117,7 +117,9 @@ try {
     // 两条路径都返回退出码，process.exit 仍只在本函数末尾调用一次。
     code = args[1] === 'extract-facts'
       ? await memoryExtractFacts(args.slice(1))
-      : memoryCommand(args.slice(1))
+      : args[1] === 'embed'
+        ? await memoryEmbedVectors(args.slice(1))
+        : memoryCommand(args.slice(1))
   }
   else {
     console.error('usage: prts upgrade ... | prts memory <stats|consolidate|retire|restore> ...')

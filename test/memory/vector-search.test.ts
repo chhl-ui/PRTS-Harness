@@ -193,3 +193,54 @@ test('V8 换模型（model 变了）时同一条会被重算覆盖，不留下�
     t.cleanup(m)
   }
 })
+
+/**
+ * V9 是 Wave 1 的验收测试：turn 向量端到端可用。
+ *
+ * 在此之前 turn 向量**三处都断**：`putVectors` 的 ownerKind 类型只允许 fact|profile、
+ * `embedPending` 的选行 SQL 不查 mem_turns、语义路回表只有 fact/profile 两个分支
+ * （turn 命中被静默丢弃，症状与「库里没有向量」完全一样）。
+ *
+ * 所以这条测试必须断言到「检索得到且带正文」为止——只断言「写入成功」会让第三处
+ * 的静默丢弃继续隐形。
+ */
+test('V9 turn 向量端到端：可写入、可检索、来源标 semantic', async () => {
+  const t = makeTmp('prts-mem-vec-turn-')
+  const path = t.db('memory.sqlite')
+  const m = MemoryStore.open(path)
+  try {
+    m.recordTurn({
+      actor: 'system', sessionId: 's1', turnIndex: 0, speaker: 'user',
+      text: 'I shoot with a Sony A7R IV camera and prefer Sony accessories.',
+    })
+    m.recordTurn({
+      actor: 'system', sessionId: 's1', turnIndex: 1, speaker: 'assistant',
+      text: 'Nikon Z6 tripod recommendations for landscape work.',
+    })
+
+    const r = await m.embedPending({ embedder: bagEmbedder(), kinds: ['turn'] })
+    assert.equal(r.embedded, 2, '两条 turn 都应完成向量化')
+    assert.equal(r.failed, 0, '不应有失败批次')
+    assert.deepEqual(
+      m.vectorStats().map((s) => `${s.ownerKind}:${s.count}`),
+      ['turn:2'],
+      '向量表应记录 turn 种类',
+    )
+
+    const [qv] = await bagEmbedder().embed(['Sony camera accessories'])
+    const hits = m.search({ text: 'Sony camera accessories', limit: 5, queryVector: qv, semanticTopK: 2 })
+    const sources = (h: { recallPath: string; recallPaths?: string[] }) => h.recallPaths ?? [h.recallPath]
+    const turnHits = hits.filter((h) => h.kind === 'turn' && sources(h).includes('semantic'))
+    assert.ok(
+      turnHits.length > 0,
+      `turn 向量必须能召回，实际 ${JSON.stringify(hits.map((h) => [h.kind, h.id, sources(h)]))}`,
+    )
+    assert.ok(
+      turnHits.every((h) => h.text.length > 0),
+      'turn 的向量命中必须带正文——回表丢了正文等于没检索',
+    )
+    assert.ok(turnHits.some((h) => h.text.includes('Sony')), 'Sony 那条应被召回')
+  } finally {
+    t.cleanup(m)
+  }
+})

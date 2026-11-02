@@ -76,6 +76,10 @@ recall@8 从 31.8% 提到 36.9%（p=0.036）、temporal 保持 64.7%。本篇回
   要断言「检索得到」
 - **成本**：24.6 万条 × 92.8 条/秒 ≈ **44 分钟**（已有实测），向量表约 1.0 GB
 
+**Wave 1 落地记录（2026-11-02 已实现）**：三处断点全部修好——`putVectors` 的类型放宽为 `VectorOwnerKind`（含 turn）；`embedPending` 新增 turn 分支（文本口径 = body，与 `mem_fts_turns` 的索引列一致；**默认 kinds 仍不含 turn**，避免例行补齐突然跑 44 分钟）；语义路回表新增 turn 分支（id 用裸 `turn_id`，与 FTS 路同 id 才能在 `fused` 里合并名次）。调度入口：`prts memory embed --kinds turn --limit N --apply`，默认 dry-run。
+
+验证（全部本轮实跑）：单测 V9 先红（`0 !== 2`）后绿——写入 2 条 turn 后 `embedded:2/failed:0`、`vectorStats` 显示 `turn:2`、`search` 命中且 `recallPaths` 含 `semantic`；真链路（真 bge-m3 + CLI `--apply`）返回 `{"embedded":2,"failed":0}`，检索得到 2 条 turn，其中 1 条来源 `fts-trigram+semantic`、1 条**仅 `semantic`**（向量独家立功）；全量回归 **338/338**、`tsc` 无错误；选行 SQL 在真实 24.6 万条库上 200 条 2 ms、2000 条 9 ms。
+
 ### Wave 2：常驻向量快照
 
 - 新增 `SemanticIndex`：懒加载 `owner_kind='turn'` 的向量到 `Float32Array` + `ids` 数组，单例持有；

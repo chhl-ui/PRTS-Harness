@@ -31,6 +31,7 @@ import { parseTime } from './time.ts'
 import { tokenize } from './tokenize.ts'
 import type {
   ActorKind, AssertFactInput, ImportStats, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput,
+  VectorOwnerKind,
 } from './types.ts'
 
 const SCOPE = 'prts'
@@ -933,6 +934,42 @@ export class MemoryStore {
         for (const r of rows) profById.set(r.profile_id, r)
       }
 
+      // turn 回表（2026-11-02）：此前只处理 fact/profile，turn 命中被静默丢弃——
+      // 症状与「库里没有向量」完全一样，是最隐蔽的一处断点。
+      // id 用裸 turn_id：与 FTS 路同 id，同一个 turn 被两路命中时才能在 `fused` 里合并名次。
+      const turnIds = top.filter((t) => t.ownerKind === 'turn').map((t) => t.ownerId)
+      const turnById = new Map<string, {
+        turn_id: string
+        session_id: string
+        turn_index: number
+        external_id: string | null
+        origin: Origin
+        occurred_at_ms: number | null
+        occurred_raw: string | null
+        body: string | null
+      }>()
+      if (turnIds.length > 0) {
+        const rows = this.db.prepare(
+          `SELECT t.turn_id, t.session_id, t.turn_index, t.external_id, t.origin,
+                  t.occurred_at_ms, t.occurred_raw, b.body
+             FROM mem_turns t
+             LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref
+            WHERE t.turn_id IN (${turnIds.map(() => '?').join(',')})
+              AND t.scope = ? AND t.deleted_at_ms IS NULL
+              AND t.origin IN (${originSlots})`,
+        ).all(...turnIds, scope, ...origins) as unknown as Array<{
+          turn_id: string
+          session_id: string
+          turn_index: number
+          external_id: string | null
+          origin: Origin
+          occurred_at_ms: number | null
+          occurred_raw: string | null
+          body: string | null
+        }>
+        for (const r of rows) turnById.set(r.turn_id, r)
+      }
+
       const semanticHits: MemoryHit[] = []
       for (const t of top) {
         if (t.ownerKind === 'fact') {
@@ -958,6 +995,22 @@ export class MemoryStore {
             score: 0.5 + r.confidence,
             origin: origins[0] ?? 'live',
             text: r.profile_body,
+            recallPath: 'semantic',
+          })
+        } else if (t.ownerKind === 'turn') {
+          const r = turnById.get(t.ownerId)
+          if (r === undefined) continue
+          semanticHits.push({
+            kind: 'turn',
+            id: r.turn_id,
+            score: 1 + RECENCY_WEIGHT * (r.occurred_at_ms === null ? 0.5 : recency(r.occurred_at_ms, nowMs)),
+            origin: r.origin,
+            sessionId: r.session_id,
+            turnIndex: r.turn_index,
+            ...(r.external_id === null ? {} : { externalId: r.external_id }),
+            occurredAtMs: r.occurred_at_ms,
+            ...(r.occurred_raw === null ? {} : { occurredRaw: r.occurred_raw }),
+            text: r.body ?? '',
             recallPath: 'semantic',
           })
         }
@@ -1181,7 +1234,7 @@ export class MemoryStore {
    * 中间态，而检索会静默跳过维度不符的那一半——症状只是「变差」，不报错。
    */
   putVectors(
-    entries: Array<{ ownerKind: 'fact' | 'profile'; ownerId: string; vector: ArrayLike<number> }>,
+    entries: Array<{ ownerKind: VectorOwnerKind; ownerId: string; vector: ArrayLike<number> }>,
     model: string,
   ): number {
     if (entries.length === 0) return 0
@@ -1218,11 +1271,11 @@ export class MemoryStore {
   async embedPending(opts: {
     embedder: Embedder
     limit?: number
-    kinds?: Array<'fact' | 'profile'>
+    kinds?: VectorOwnerKind[]
   }): Promise<{ embedded: number; failed: number }> {
     const limit = opts.limit ?? 200
     const kinds = opts.kinds ?? ['fact', 'profile']
-    const pending: Array<{ ownerKind: 'fact' | 'profile'; ownerId: string; text: string }> = []
+    const pending: Array<{ ownerKind: VectorOwnerKind; ownerId: string; text: string }> = []
 
     if (kinds.includes('fact')) {
       const rows = this.db.prepare(
@@ -1249,6 +1302,26 @@ export class MemoryStore {
           LIMIT ?`,
       ).all(opts.embedder.model, room) as unknown as Array<{ id: string; text: string }>
       for (const r of rows) pending.push({ ownerKind: 'profile', ownerId: r.id, text: r.text })
+    }
+
+    // turn（2026-11-02 新增）：24.6 万级主检索对象。默认不含：全量向量化约 44 分钟，
+    // 不能因为类型允许就让例行补齐突然跑满一小时。要 turn 必须显式传 `kinds: ['turn']`。
+    // 文本口径 = body，与 `mem_fts_turns` 索引的列完全一致（fold.ts:150 写的也是 body）——
+    // 口径不一致会让 bm25 与向量比较两段不同文本，融合结果无法归因（裁过三次）。
+    // 排序用 rowid：24.6 万条时走主键顺序，且与批量向量化脚本的断点续跑顺序一致。
+    const roomTurn = limit - pending.length
+    if (kinds.includes('turn') && roomTurn > 0) {
+      const rows = this.db.prepare(
+        `SELECT t.turn_id AS id, b.body AS text
+           FROM mem_turns t
+           LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref
+           LEFT JOIN mem_vectors v ON v.owner_kind = 'turn' AND v.owner_id = t.turn_id
+          WHERE t.deleted_at_ms IS NULL AND b.body IS NOT NULL
+            AND (v.owner_id IS NULL OR v.model != ?)
+          ORDER BY t.rowid
+          LIMIT ?`,
+      ).all(opts.embedder.model, roomTurn) as unknown as Array<{ id: string; text: string }>
+      for (const r of rows) pending.push({ ownerKind: 'turn', ownerId: r.id, text: r.text })
     }
 
     if (pending.length === 0) return { embedded: 0, failed: 0 }

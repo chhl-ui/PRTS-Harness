@@ -195,6 +195,19 @@ export type MemoryEventKind =
   | 'memory.deleted'
   | 'deletion.derivative-done'
 
+/**
+ * 可持有向量的记忆种类。
+ *
+ * `turn` 在 2026-11-02 之前是**禁止**的：`putVectors` 的类型只写 `'fact' | 'profile'`，
+ * schema 注释也明写「只对派生项建，不对 turn 建」，理由是「turn 的瓶颈在粒度不在语义」。
+ * 该判断被 turn 级三路召回实测推翻（bm25 31.8% / 向量 30.5% / 混合 34.7%，见
+ * `docs/memory-recall-2026-11-02.md`），所以 turn 纳入。
+ *
+ * 但默认值仍**不含** turn：它是 24.6 万级，全量向量化约 44 分钟，不能因为「类型允许了」
+ * 就让既有调用方在某次例行补齐里突然跑满一小时。要 turn 必须显式传 `kinds: ['turn']`。
+ */
+export type VectorOwnerKind = 'fact' | 'profile' | 'turn'
+
 export interface MemoryEventRow {
   seq: number
   event_id: string
