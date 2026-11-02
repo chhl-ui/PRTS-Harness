@@ -5,8 +5,9 @@
  * 顺序理由：先在 K4 记 `deletion.requested`，再动记忆库。中途崩溃 → K4 里留下
  * 未完成的删除，可见、可重跑；反过来「已删但无记录」无法事后追责。
  *
- * P0-2b 未做：会话日志删除（DSH 无删除与在用判定的公开接口，见 design doc）。
- * 本轮以 K4 未完成删除项如实记账——`session-log` derivative 保持未完成。
+ * P0-2b 会话日志删除在 `session-purge.ts`：按 DSH 写租约协议拿锁判定「未在使用」，
+ * 整目录删除后为挂着的 `session-log` derivative 补 K4 完成。这里是两条命令而非
+ * 级联——删整个会话的代价远高于删记忆条目，必须由所有者显式发起。
  */
 import { randomUUID } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
@@ -141,7 +142,7 @@ K4 删除记录 ${deletionIds.join(', ')} 已登记但未执行（目标已不�
   return {
     ok: true, plan: result.plan, sessionHits,
     message: `已删除：${planText}\n`
-      + (sessionHits.length > 0 ? `会话日志仍含原文（deletion 未完成，P0-2b 才清）：${stillThere}\n` : '')
+      + (sessionHits.length > 0 ? `会话日志仍含原文（对应 deletion 未完成）：${stillThere}——用 /forget-session <sessionId> 清除\n` : '')
       + '当前对话上下文里已出现的内容不会因此消失。',
   }
 }

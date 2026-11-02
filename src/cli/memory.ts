@@ -16,6 +16,7 @@
  */
 import { join } from 'node:path'
 import { MemoryStore, findForOwner, forgetFlow, correctFlow, type VectorOwnerKind } from '../memory/index.ts'
+import { probeSessions, purgeSessions } from '../memory/session-purge.ts'
 import { AuditLog } from '../audit/audit.ts'
 import { OllamaEmbedder } from '../memory/embedding.ts'
 import { OllamaGenerator } from '../memory/generate.ts'
@@ -27,6 +28,7 @@ const USAGE = `usage:
   prts memory restore <factId...> [--db <path>]
   prts memory find --query <text> [--db <path>]
   prts memory forget --id <id,...> [--yes] [--db <path>]
+  prts memory forget-session --id <sessionId,...> [--yes]
   prts memory correct --fact <id> --object <text> [--db <path>]
   prts memory extract-facts [--db <path>] [--limit N] [--batch N] [--model M] [--ollama URL] --apply
   prts memory embed        [--db <path>] [--kinds turn,fact,profile] [--limit N] [--model M] [--ollama URL] --apply`
@@ -211,6 +213,7 @@ export function memoryCommand(args: string[]): number {
       case 'restore': return restore(store, args)
       case 'find': return find(store, args)
       case 'forget': return forget(store, args)
+      case 'forget-session': return forgetSessionCmd(args)
       case 'correct': return correct(store, args)
       default:
         console.error(`prts memory: 未知子命令 ${sub}`)
@@ -308,6 +311,37 @@ function forget(store: MemoryStore, args: string[]): number {
     })
     console.log(r.message)
     return r.ok ? (yes ? 0 : 2) : 2
+  } finally { audit?.close() }
+}
+
+/**
+ * 所有者会话日志删除（P0-2b）：整目录删除 + K4 session-log derivative 补完成。
+ * 不依赖记忆库——会话目录在 dsh-home 下；但按命令族惯例走同一 db 解析入口。
+ */
+function forgetSessionCmd(args: string[]): number {
+  const raw = arg(args, '--id')
+  if (raw === undefined) { console.error('prts memory forget-session: 需要 --id <sessionId,...>'); return 2 }
+  const ids = raw.split(',').map(s => s.trim()).filter(s => s !== '')
+  const dataRoot = process.env.PRTS_DATA_ROOT
+  if (dataRoot === undefined) {
+    console.error('prts memory forget-session: 需要 PRTS_DATA_ROOT（定位会话目录与 core.sqlite）')
+    return 2
+  }
+  const sessionsRoot = join(dataRoot, 'dsh-home', 'sessions')
+  const yes = args.includes('--yes')
+  if (!yes) {
+    for (const p of probeSessions(sessionsRoot, ids)) {
+      console.log(`${p.sessionId}\t${p.state}\t${p.jsonlBytes}B\t${p.dir === '' ? '（无目录）' : p.dir}`)
+    }
+    console.log('加 --yes 执行：删除的是整个会话目录，不只是被删内容的部分；在用会话会被自动拒删。')
+    return 2
+  }
+  let audit: AuditLog | undefined
+  try {
+    audit = AuditLog.open(process.env.PRTS_DB ?? join(dataRoot, 'core.sqlite'))
+    const r = purgeSessions({ sessionsRoot, sessionIds: ids, audit })
+    console.log(r.message)
+    return r.ok ? 0 : 2
   } finally { audit?.close() }
 }
 

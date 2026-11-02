@@ -20,6 +20,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Ledger } from '../ledger/index.ts'
 import type { MemoryStore } from '../memory/index.ts'
 import { findForOwner, forgetFlow, correctFlow } from '../memory/forget-flow.ts'
+import { probeSessions, purgeSessions } from '../memory/session-purge.ts'
 import { AuditLog } from '../audit/audit.ts'
 import type { Authority } from '../authority/index.ts'
 import type { ApprovalBridge } from '../runtime/start.ts'
@@ -396,6 +397,30 @@ async function runForget(deps: ChatDeps, arg: string): Promise<void> {
   } finally { audit?.close() }
 }
 
+async function runForgetSession(deps: ChatDeps, arg: string): Promise<void> {
+  const yes = arg.endsWith('--yes') || arg.includes(' --yes')
+  const ids = arg.replace(/--yes/g, '').split(',').map(x => x.trim()).filter(x => x !== '')
+  if (ids.length === 0) { deps.out('[prts] 用法：/forget-session <sessionId,...> [--yes]\n'); return }
+  const sessionsRoot = join(deps.dataRoot, 'dsh-home', 'sessions')
+  if (!yes) {
+    const probes = probeSessions(sessionsRoot, ids)
+    const lines = ['删除计划（未执行）：']
+    for (const p of probes) {
+      lines.push(`  ${p.sessionId}  ${p.state}  ${p.jsonlBytes}B  ${p.dir === '' ? '（无目录）' : p.dir}`)
+    }
+    lines.push('注意：执行后**整个会话目录**（session.v4.jsonl 及附属文件）将被删除，不只是被删内容的部分。')
+    lines.push('当前会话处于在用状态，会被自动拒删。加 --yes 执行。')
+    deps.out(lines.join('\n') + '\n')
+    return
+  }
+  let audit: AuditLog | undefined
+  try {
+    if (deps.dbPath !== undefined) audit = AuditLog.open(deps.dbPath)
+    const r = purgeSessions({ sessionsRoot, sessionIds: ids, audit })
+    deps.out(r.message + '\n')
+  } finally { audit?.close() }
+}
+
 async function runCorrect(deps: ChatDeps, arg: string): Promise<void> {
   if (deps.memory === undefined) { deps.out('[prts] 未配置记忆库，/correct 不可用\n'); return }
   const i = arg.indexOf(' ')
@@ -545,6 +570,10 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
       // ---- P0-2a 所有者记忆命令：不触发模型回合 ----
       if (line === '/memory' || line.startsWith('/memory ')) {
         await runMemoryFind(deps, line.slice('/memory'.length).trim())
+        continue
+      }
+      if (line === '/forget-session' || line.startsWith('/forget-session ')) {
+        await runForgetSession(deps, line.slice('/forget-session'.length).trim())
         continue
       }
       if (line === '/forget' || line.startsWith('/forget ')) {
