@@ -16,6 +16,7 @@ import { createIntentTools } from './intent-tools.ts'
 import { createSkillTools } from './skill-tools.ts'
 import { attachIntentTrigger } from './intent-trigger.ts'
 import { attachMemoryInjection } from './memory-inject.ts'
+import { attachSkillInjection } from './skill-inject.ts'
 import { attachSessionRecall } from './session-recall.ts'
 import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachToolLoopAudit } from './tool-loop-audit.ts'
@@ -665,6 +666,16 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 一律不注册——技能是能力扩张，采用与否是博士的决策（与账本「只能建 draft」同构）。
   const skillTools = skills === undefined ? undefined : createSkillTools(tools, { store: skills })
 
+  // V1-09 第二半：已采用的技能按当前问题推进上下文。只注入 `active`——
+  // `candidate` 是博士没批准的做法，注入它等于让模型执行未获批准的经验。
+  // 与记忆/提醒/开场重建各自独立注册，一条链挂了不牵连其余三条。
+  const skillInjection = skills === undefined ? undefined : attachSkillInjection(
+    ctx as unknown as {
+      on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
+    },
+    { store: skills },
+  )
+
   // V1-14 触发（方案 B）：到期时进程在则准点，不在则下次交互补发并如实告知延迟。
   // 挂在 pre-step 而不是定时器上——提醒必须有会话可投递，定时器到点时没有对话，
   // 注入无处可去；而 pre-step 天然覆盖「重启后补发」。
@@ -789,6 +800,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       memoryScheduler?.dispose()
       memoryTools?.dispose()
       skillTools?.dispose()
+      skillInjection?.dispose()
       skills?.close()
       intentTools?.dispose()
       intentTrigger?.dispose()
