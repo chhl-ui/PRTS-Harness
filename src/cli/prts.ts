@@ -11,6 +11,7 @@ import { initCoreDb } from '../core/init.ts'
 import { startupCheck } from '../core/startup-check.ts'
 import { AuditLog } from '../audit/index.ts'
 import { memoryCommand, memoryEmbedVectors, memoryExtractFacts } from './memory.ts'
+import { exportArchive, importArchive } from './archive.ts'
 
 function arg(args: string[], name: string): string | undefined {
   const i = args.indexOf(name)
@@ -106,6 +107,36 @@ function upgrade(args: string[]): number {
   return 0
 }
 
+/** V1-12 导出/导入：`prts archive <export|import> --data-root <d> ...`。 */
+function archiveCommand(args: string[]): number {
+  const sub = args[0]
+  const dataRoot = arg(args, '--data-root')
+  const force = args.includes('--force')
+  if (dataRoot === undefined) {
+    console.error('usage: prts archive export --data-root <d> --out <dir> [--force]')
+    console.error('       prts archive import --data-root <d> --archive <dir> [--force]')
+    return 2
+  }
+  if (sub === 'export') {
+    const out = arg(args, '--out')
+    if (out === undefined) { console.error('usage: prts archive export --data-root <d> --out <dir> [--force]'); return 2 }
+    const r = exportArchive({ dataRoot, outDir: out, force })
+    console.log(`exported to ${r.outDir}`)
+    for (const [k, v] of Object.entries(r.counts)) console.log(`  ${k}\t${v}`)
+    return 0
+  }
+  if (sub === 'import') {
+    const from = arg(args, '--archive')
+    if (from === undefined) { console.error('usage: prts archive import --data-root <d> --archive <dir> [--force]'); return 2 }
+    const r = importArchive({ archiveDir: from, dataRoot, force })
+    console.log(`imported into ${r.dataRoot}（条数与事件链已逐项核对）`)
+    for (const [k, v] of Object.entries(r.counts)) console.log(`  ${k}\t${v}`)
+    return 0
+  }
+  console.error('usage: prts archive <export|import> --data-root <d> ...')
+  return 2
+}
+
 const args = process.argv.slice(2)
 try {
   // 子命令分发：每个子命令返回退出码，process.exit 只在这一处调用。
@@ -121,8 +152,9 @@ try {
         ? await memoryEmbedVectors(args.slice(1))
         : memoryCommand(args.slice(1))
   }
+  else if (args[0] === 'archive') code = archiveCommand(args.slice(1))
   else {
-    console.error('usage: prts upgrade ... | prts memory <stats|consolidate|retire|restore> ...')
+    console.error('usage: prts upgrade ... | prts memory <stats|consolidate|retire|restore> ... | prts archive <export|import> ...')
     code = 2
   }
   process.exit(code)
