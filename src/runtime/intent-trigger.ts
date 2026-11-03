@@ -26,6 +26,13 @@ export interface IntentTriggerDeps {
    * 用户需要知道它不是准点发生的，否则会误以为系统一直在盯着表。
    */
   lateThresholdMs?: number
+  /**
+   * 一次最多展开几条到期提醒，默认 3。
+   *
+   * 全部展开会把 5 条到期拼成一堵墙，读的人得先在墙里找到最要紧的那条。
+   * 折叠**只改显示**：被折叠的同样 markFired，不会下次再来一遍。
+   */
+  maxVisible?: number
 }
 
 export interface IntentTrigger {
@@ -47,6 +54,8 @@ export function attachIntentTrigger(
   deps: IntentTriggerDeps,
 ): IntentTrigger {
   const lateThreshold = deps.lateThresholdMs ?? 60_000
+  const rawMax = deps.maxVisible ?? 3
+  const maxVisible = Number.isFinite(rawMax) && rawMax >= 1 ? Math.floor(rawMax) : 3
   const now = deps.now ?? Date.now
   /** 防同一 step 重放重复注入（waterfall 重试会对同一步触发多次）。 */
   const fired = new Set<string>()
@@ -55,7 +64,10 @@ export function attachIntentTrigger(
     const at = now()
     const due = deps.store.dueIntents(at).filter((r) => !fired.has(r.intentId))
     if (due.length === 0) return []
-    const lines = due.map((r) => {
+    // 折叠只影响**显示**：lines 用 visible，markFired 用全部 due。
+    // 反过来（只标记 visible）会让被折叠的提醒下次再来一遍，用户看到重复。
+    const visible = due.slice(0, maxVisible)
+    const lines = visible.map((r) => {
       const planned = new Date(r.fireAtMs).toISOString()
       const late = at - r.fireAtMs
       const head = late > lateThreshold
@@ -63,6 +75,10 @@ export function attachIntentTrigger(
         : `[提醒] ${planned}`
       return `${head}：${r.action}（你当时说的是「${r.conditionRaw}」）`
     })
+    const hidden = due.length - visible.length
+    if (hidden > 0) {
+      lines.push(`另有 ${hidden} 条到期提醒未展开（用 /intent 查看）`)
+    }
     // 先标记再注入：重复提醒比漏提醒更烦人，而漏提醒用户可以再问一次。
     // 状态写入失败只记日志——提醒本身不能因为记账失败而发不出去。
     for (const r of due) {
