@@ -32,8 +32,9 @@ import { parseTime } from './time.ts'
 import { tokenize } from './tokenize.ts'
 import { looksLikeCorrection, normalizeSlotKey } from './correction.ts'
 import type {
-  ActorKind, AssertFactInput, CreateIntentInput, FactMeta, ImportStats, IntentRow, IntentStatus,
-  MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath, RecordTurnInput,
+  ActorKind, AssertFactInput, CreateIntentInput, FactMeta, ImportStats, InjectionRecord, IntentRow,
+  IntentStatus, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath,
+  RecordInjectionInput, RecordTurnInput,
   ForgetPlan, ForgetResult,
   TurnEntityMention, VectorOwnerKind,
 } from './types.ts'
@@ -2233,6 +2234,85 @@ export class MemoryStore {
       this.db.exec('ROLLBACK')
       throw e
     }
+  }
+
+  /**
+   * 记录一次记忆注入的清单（工作区装配 ⑧ 的第一刀，`docs/context-assembly-status.md` 三-S2）。
+   *
+   * **只观测，不决策**：写一条事件，不改任何投影行（`fold.ts` 里是显式 no-op）。
+   * 不记录正文——这条链只追加不可改，正文写进去就删不掉；要内容按 `hit_ids` 回投影取。
+   *
+   * 代价（评审时称量过，不是没想过）：
+   * - `memory_events` 每轮多一条，与 `turn.recorded` 同量级，不是数量级变化；
+   * - 链断即记忆面 fail-closed 的暴露面不会因多一种 kind 扩大——同一写入路径、同一哈希链；
+   * - `rebuildProjections` 重放要多扫过这些行，所以它们必须能被 fold 安全跳过（已接住）。
+   *
+   * 收益：将来标定注入预算时有真实分布可用（`usedChars`），而不是拍一个常量。
+   */
+  recordInjection(input: RecordInjectionInput): void {
+    const now = Date.now()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.appendEvent({
+        kind: 'injection.recorded',
+        // actor 固定 system：这是宿主自己的观测，不是主人或模型的发言。
+        actor: 'system',
+        recordedAtMs: now,
+        payload: {
+          session_id: input.sessionId,
+          turn: input.turn,
+          step: input.step,
+          injected: input.injected,
+          hit_ids: [...input.hitIds],
+          kinds: { ...input.kinds },
+          used_chars: input.usedChars,
+          limit: input.limit,
+        },
+      })
+      this.db.exec('COMMIT')
+    } catch (e) {
+      this.db.exec('ROLLBACK')
+      throw e
+    }
+  }
+
+  /**
+   * 读回注入清单，用于事后解释「她当时为什么这么说」与将来的预算标定。
+   *
+   * 走 `json_extract` 而不是新表：清单的**唯一事实来源是事件链**，投影只由 `fold.ts` 更新，
+   * 而这里明确不为它建投影——另建一张表就等于把同一事实存两份。
+   */
+  injectionRecords(opts: { sessionId?: string; limit?: number } = {}): InjectionRecord[] {
+    const limit = opts.limit ?? 100
+    const base = `SELECT payload_json AS p, recorded_at_ms AS t FROM memory_events
+                   WHERE kind = 'injection.recorded'`
+    const rows = (opts.sessionId === undefined
+      ? this.db.prepare(`${base} ORDER BY seq DESC LIMIT ?`).all(limit)
+      : this.db.prepare(`${base} AND json_extract(payload_json, '$.session_id') = ? ORDER BY seq DESC LIMIT ?`)
+        .all(opts.sessionId, limit)) as unknown as Array<{ p: string; t: number }>
+    return rows.map((row) => {
+      const p = JSON.parse(row.p) as {
+        session_id: string
+        turn: number
+        step: number
+        injected: number
+        hit_ids: string[]
+        kinds: Record<string, number>
+        used_chars: number
+        limit: number
+      }
+      return {
+        sessionId: p.session_id,
+        turn: p.turn,
+        step: p.step,
+        injected: p.injected,
+        hitIds: p.hit_ids,
+        kinds: p.kinds,
+        usedChars: p.used_chars,
+        limit: p.limit,
+        recordedAtMs: row.t,
+      }
+    })
   }
 
   /** 链校验。投影是事件序列的纯函数，链断则投影不可信。 */

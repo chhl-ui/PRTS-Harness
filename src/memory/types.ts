@@ -219,6 +219,11 @@ export interface MemoryHit {
  * `fact.retired` / `fact.restored` 是生命周期（Wave 5）的状态跃迁：退役默认不进检索，
  * 两者都可逆（`retired_at_ms` 置位 / 清空）。**衰减本身不是事件**——它是纯函数，
  * 见 `lifecycle.ts` 的头部说明。
+ *
+ * `injection.recorded` 是**纯观测**：记录本轮注入装配了什么（条数、命中 id、用量），
+ * 不产生任何投影行（`fold.ts` 里是显式 no-op）。它进这条链的理由是语义——它描述的确实
+ * 是记忆域的一次动作（库被读了哪些条目），而不是上下文装配的全部（system prompt 与
+ * 工具 schema 不在此列，见 `docs/context-assembly-status.md` 三-S1/S2）。
  */
 export type MemoryEventKind =
   | 'fact.asserted'
@@ -233,6 +238,45 @@ export type MemoryEventKind =
   | 'intent.created'
   | 'intent.fired'
   | 'intent.cancelled'
+  | 'injection.recorded'
+
+/**
+ * 记忆注入清单：一轮里实际装进上下文的是什么。
+ *
+ * 判据口径（别改，改了历史数据就不可比）：
+ * - `usedChars` 是 `renderInjection` 产出的**完整正文长度，含自报来源的 header**——
+ *   将来要拿它标定预算，预算必须与同一口径比较。
+ * - `hitIds` 只含**真正进正文**的命中；被过滤或被丢弃的不得混入（否则事后解释会指错）。
+ * - 不含正文：这条记录落在哈希链上，写进去就删不掉。
+ */
+export interface InjectionRecord {
+  sessionId: string
+  turn: number
+  step: number
+  injected: number
+  hitIds: string[]
+  /** 命中种类分布（`turn` / `fact` / `summary` / `profile`）。 */
+  kinds: Record<string, number>
+  usedChars: number
+  /** 本轮生效的条数上限（`PRTS_MEMORY_INJECT_LIMIT`），事后解释「为什么只有这几条」要看它。 */
+  limit: number
+  recordedAtMs: number
+}
+
+/**
+ * 写一次注入清单的入参。`hitIds` 收 readonly：调用方传的是命中投影的 id 快照，
+ * 这里只读不改，没必要逼调用方先复制一份。
+ */
+export interface RecordInjectionInput {
+  sessionId: string
+  turn: number
+  step: number
+  injected: number
+  hitIds: readonly string[]
+  kinds: Record<string, number>
+  usedChars: number
+  limit: number
+}
 
 /** V1-14 前瞻记忆：意图状态。`fired` 与 `cancelled` 是终态，不可互转。 */
 export type IntentStatus = 'pending' | 'fired' | 'cancelled'

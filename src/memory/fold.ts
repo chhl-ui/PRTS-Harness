@@ -308,6 +308,13 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       ).run(p.cancelled_at_ms, p.intent_id)
       break
     }
+    case 'injection.recorded':
+      // **显式 no-op，不是漏实现。** 注入清单是纯观测：它要说明「这一轮装了什么」，
+      // 而这件事由事件本身回答，没有需要维护的投影行——清单就是查询 `memory_events`。
+      // 之所以要在这里写一个空分支，是因为下面的 default 是「未实现的事件种类不静默忽略」
+      // 的守卫：不接住它，`recordInjection()` 会在同一事务里抛错回滚，注入清单全部写不进去。
+      // 「显式声明无需投影」与「忘了写投影」在类型上等价，在意图上相反——这段注释就是那层区分。
+      break
     // 其余事件种类（fact.corrected / turn.recorded / summary.generated）
     // 尚未实现——第一版只做 fact.asserted 与删除这一条纵切。
     // **未实现的分支不静默忽略**：

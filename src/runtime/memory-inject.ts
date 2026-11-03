@@ -104,6 +104,13 @@ function normalizeText(s: string): string {
   return s.replace(/\s+/g, '').replace(/[，。？！；：、,.?!;:]/g, '').toLowerCase()
 }
 
+/** 命中种类分布，写进注入清单（`InjectionRecord.kinds`）。 */
+function countKinds(hits: readonly MemoryHit[]): Record<string, number> {
+  const kinds: Record<string, number> = {}
+  for (const h of hits) kinds[h.kind] = (kinds[h.kind] ?? 0) + 1
+  return kinds
+}
+
 /**
  * 注入正文。必须自报来源，否则模型会把它当成用户这一轮说的话。
  *
@@ -216,11 +223,35 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
           ...(turnIds.length > 0 ? { turnEntities: deps.store.turnEntities(turnIds) } : {}),
         }
       } catch { /* 元数据补查失败退回平铺注入 */ }
+      const text = renderInjection(hits, reading)
       const injected = {
         id: `mem-${randomUUID()}`,
         role: 'user',
-        content: [{ type: 'text', text: renderInjection(hits, reading) }],
+        content: [{ type: 'text', text }],
         source: { kind: 'user' },
+      }
+      // 装配清单（⑧，见 `docs/context-assembly-status.md` 三-S2）：**只观测，不做裁剪**。
+      //
+      // 位置在 seen 登记之后、返回之前——此刻 hits 就是正文里的那几条，所以清单与正文
+      // 天然同源。将来若加预算裁剪，必须先把裁剪做在 hits 上、再登记 seen；反过来做的话，
+      // 被裁掉的条目已经进了 injectedHitIds，该会话从此不再提它，而且不报错（静默失忆）。
+      //
+      // 单独 try/catch：写清单失败不能连带丢掉已经算好的注入——外层那个 catch 会 `return decision`，
+      // 注入会连同异常一起消失。观测不得成为新的失败面。
+      try {
+        deps.store.recordInjection({
+          sessionId,
+          turn,
+          step,
+          injected: hits.length,
+          hitIds: hits.map((h) => h.id),
+          kinds: countKinds(hits),
+          // 与将来预算标定的口径同源：渲染后的完整正文，含自报来源的 header。
+          usedChars: text.length,
+          limit,
+        })
+      } catch (error) {
+        console.error(`[prts] injection record failed: ${error instanceof Error ? error.message : String(error)}`)
       }
       return { ...decision, messages: [...decision.messages, injected] }
     } catch (error) {
