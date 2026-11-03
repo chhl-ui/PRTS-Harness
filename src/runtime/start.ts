@@ -13,6 +13,7 @@ import { DEFAULT_READ_ONLY_SUBPATHS } from '../authority/index.ts'
 import { createStepAllocator, createTaskTools, isLedgerTool } from './task-tools.ts'
 import { createMemoryTools } from './memory-tools.ts'
 import { createIntentTools } from './intent-tools.ts'
+import { attachIntentTrigger } from './intent-trigger.ts'
 import { attachMemoryInjection } from './memory-inject.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
 import { Authority, classify } from '../authority/index.ts'
@@ -599,6 +600,16 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     ...(reranker === undefined ? {} : { reranker }),
   })
 
+  // V1-14 触发（方案 B）：到期时进程在则准点，不在则下次交互补发并如实告知延迟。
+  // 挂在 pre-step 而不是定时器上——提醒必须有会话可投递，定时器到点时没有对话，
+  // 注入无处可去；而 pre-step 天然覆盖「重启后补发」。
+  const intentTrigger = memory === undefined ? undefined : attachIntentTrigger(
+    ctx as unknown as {
+      on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
+    },
+    { store: memory },
+  )
+
   // 每轮自动注入：挂在 `agent/pre-step` waterfall 上，在模型看到本轮消息之前
   // 追加一条记忆摘要。库打不开时整体缺席——没有库就没有可注入的内容。
   //
@@ -698,6 +709,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       memoryScheduler?.dispose()
       memoryTools?.dispose()
       intentTools?.dispose()
+      intentTrigger?.dispose()
       // 精排器是常驻 Python 子进程，必须显式收掉，否则退出后残留。
       reranker?.close()
       memory?.close()
