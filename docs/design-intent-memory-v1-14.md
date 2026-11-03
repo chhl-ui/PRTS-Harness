@@ -208,3 +208,39 @@ register(definition) {
 若合规 dummy 不引发失败，就说明问题在定义内容而非注册动作。
 
 后续新增工具一律用 `outSchema`，不要手写 `output`。
+
+---
+
+## 九、K2b 第一刀：net 守卫（2026-11-03）
+
+做「联网搜索」前的必要前置。原状态：`start.ts` 的 `tools.guard` 里有一行显式过滤——
+
+```ts
+const capabilities = classify(exec.name, exec.arguments)
+  .filter((c) => c.startsWith('fs.read:') || c.startsWith('fs.write:') || c.startsWith('fs.delete:'))
+if (capabilities.length === 0) return undefined   // 非 fs 一律放行
+```
+
+也就是 `net` 虽然在 `Authority.evalCap` 里有分支（无 grant 即 ask），**实际永远不会被调用到**：
+`classify` 从不产生 `net` 能力，任何未知工具都落到 `tool` 分支。
+
+改动两处：
+
+1. `classify`：工具名命中 `web|search|fetch|http|crawl|browser|net|api` 时归 `net`，
+   并从 `url|href|uri|endpoint` 里尽力取 hostname（端口不参与比较）。判据是
+   **宁可误判成 net，不可漏判**——误判的代价是多重一次审批，漏判的代价是一次 fetch
+   把记忆里的对话带出去且无人知晓。
+2. `start.ts` 的 filter 加 `net:`，**exec / system / tool 仍排除**。原因不变：
+   pwsh 进 ask 会让 runtime R2 必红，且命令体内的写删识别不了，整体拒绝不是真边界。
+
+为什么 net 能单独纳入而 exec 不能：net 的默认策略是 **ask（按 host 授权才 allow）**，
+不像整体拒绝 exec 那样一刀切掉现有能力；而它保护的正是最要紧的一类动作——数据出境。
+
+验证：`test/authority/net-guard.test.ts` 4 例（分类与 host 提取 / 非网络工具分类不变 /
+无 grant 即 ask 且授权按 host 生效 / net+t 受保护路径混合时整体拒绝）；
+authority + runtime(R2) + guard-wiring 43 pass；全量 334 pass / 0 fail；tsc exit 0。
+
+**未覆盖**：`start.ts` 的 filter 改动没有端到端用例——当前 config 里没有 net 工具，
+注册一个假的再经 agent 调用需要额外搭台。它的行为目前由 `Authority` 层单测
++ fs 路径的回归间接保证。真的装上联网工具时，必须补一条「模型调 web_search → 弹审批」
+的端到端检查。

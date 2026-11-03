@@ -256,13 +256,16 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       readonly agent?: { session?: { id?: string } }
     }
     try {
-      // 目前只判文件系统能力。exec / net / system / tool 暂不判：
+      // K2a + K2b(net)：目前判文件系统与联网能力。exec / system / tool 仍不判：
       // K2a 对 pwsh 只能整体放行或整体拒绝（命令体内的写/删识别不了，见
       // src/authority/index.ts 头注释），整体拒绝会让 test/runtime/runtime.test.ts
       // 的 R2（pwsh 写区内文件并断言存在）必红，而且那不是真正的安全边界。
-      // 这部分归 K2b 沙箱。此处显式过滤而非静默跳过。
+      // K2b 的 net 之所以能单独纳入：它是**数据出境**动作，一次 fetch 就能把记忆里的
+      // 对话带走，而 `Authority.evalCap` 对 net 的默认策略是 ask（按 host 授权才 allow），
+      // 不会像整体拒绝 exec 那样一刀切掉现有能力。此处显式过滤而非静默跳过。
       const capabilities = classify(exec.name, exec.arguments)
-        .filter((c) => c.startsWith('fs.read:') || c.startsWith('fs.write:') || c.startsWith('fs.delete:'))
+        .filter((c) => c.startsWith('fs.read:') || c.startsWith('fs.write:')
+          || c.startsWith('fs.delete:') || c.startsWith('net:'))
       if (capabilities.length === 0) return undefined
       return authority.guard({
         sessionId: exec.agent?.session?.id ?? '',
