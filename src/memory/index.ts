@@ -37,6 +37,7 @@ export type {
   Origin,
   Provenance,
   RecallPath,
+  RecentTurn,
   RetentionClass,
   TurnEntityMention,
   CreateIntentInput,

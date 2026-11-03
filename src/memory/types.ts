@@ -91,6 +91,25 @@ export interface ImportStats {  sessions: number
   unparsedTime: number
 }
 
+/**
+ * 一条「近期情景」切片（`MemoryStore.recentTurns`，⑦ 跨会话连续 S4）。
+ *
+ * 与 `MemoryHit` 的区别：那个是**相关性**检索结果（带 score / recallPath），
+ * 这个是**纯时间**切片——「上次聊到哪里」问的是先后，不是相关度；没有查询词时
+ * 把最近对话塞给 BM25，只会得到按字面重叠排序的结果。
+ *
+ * `occurredAtMs` 为 null 表示原始时间串缺失或解析失败：这类行排序时排最后，
+ * 但仍会被返回——时间说不准的旧内容，比没有内容有用。
+ */
+export interface RecentTurn {
+  turnId: string
+  sessionId: string
+  turnIndex: number
+  speaker: string
+  text: string
+  occurredAtMs: number | null
+}
+
 export interface MemoryQuery {
   text: string
   limit?: number

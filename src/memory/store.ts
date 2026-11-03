@@ -34,7 +34,7 @@ import { looksLikeCorrection, normalizeSlotKey } from './correction.ts'
 import type {
   ActorKind, AssertFactInput, CreateIntentInput, FactMeta, ImportStats, InjectionRecord, IntentRow,
   IntentStatus, MemoryEventKind, MemoryEventRow, MemoryHit, MemoryQuery, Origin, RecallPath,
-  RecordInjectionInput, RecordTurnInput,
+  RecordInjectionInput, RecordTurnInput, RecentTurn,
   ForgetPlan, ForgetResult,
   TurnEntityMention, VectorOwnerKind,
 } from './types.ts'
@@ -749,7 +749,10 @@ export class MemoryStore {
    */
   recentCorrections(opts: { sinceMs?: number; limit?: number; excludeSessionId?: string } = {}): MemoryHit[] {
     const sinceMs = opts.sinceMs ?? Date.now() - 30 * 86_400_000
-    const limit = Math.max(1, opts.limit ?? 5)
+    // `Math.max(1, NaN)` 仍是 NaN，会被原样带进 SQL 绑定层。同一缺陷模式
+    // （`recentTurns` 已按规格回落）：非有限数落回默认值，0/负数的既有语义（→1）不动。
+    const rawLimit = opts.limit ?? 5
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.floor(rawLimit)) : 5
     // 多取 10 倍给标记过滤留损耗——更正句是稀疏信号，窗口内绝大多数 turn 会被滤掉。
     const rows = this.db.prepare(
       `SELECT t.turn_id AS id, t.session_id AS sessionId,
@@ -775,6 +778,73 @@ export class MemoryStore {
       if (out.length >= limit) break
     }
     return out
+  }
+
+  /**
+   * 近期情景：跨会话按**发生时刻**倒序的 turn 切片（⑦ 跨会话连续 S4 的数据基础）。
+   *
+   * 为什么不走 `search()`：那是相关性检索——没有查询词时「最近」是纯时间语义，
+   * 硬塞给 BM25 只会得到按字面重叠排序的结果。这里不筛内容，由调用方决定渲染谁。
+   *
+   * 过滤口径：
+   * - 只 `live`：基准数据的 turn 不进注入/验收路径（设计稿 §6.4）
+   * - 已删除、正文为空的跳过：注进去只有壳没有内容
+   * - `occurred_at_ms` 为 NULL 的排最后（`COALESCE(..., 0) DESC`）——时间缺失
+   *   不等于「很早」，但更不等于「刚刚」，排最后是唯一不撒谎的位置
+   */
+  recentTurns(opts: {
+    limit?: number
+    sinceMs?: number
+    excludeSessionId?: string
+    speaker?: string
+  } = {}): RecentTurn[] {
+    // 非法 limit 回落 1 而不是 0：0 条与「库里没有数据」不可区分，调用方会误读成空库。
+    const rawLimit = opts.limit ?? 5
+    const limit = Number.isFinite(rawLimit) && rawLimit >= 1 ? Math.floor(rawLimit) : 1
+    const where: string[] = [
+      't.scope = ?',
+      "t.origin = 'live'",
+      't.deleted_at_ms IS NULL',
+      'b.body IS NOT NULL',
+      "b.body <> ''",
+    ]
+    const params: Array<string | number> = [SCOPE]
+    if (opts.sinceMs !== undefined && Number.isFinite(opts.sinceMs)) {
+      // 非有限数不当窗口用：`>= NaN` 在 SQLite 里恒假，会静默返回空数组。
+      where.push('t.occurred_at_ms >= ?')
+      params.push(opts.sinceMs)
+    }
+    if (opts.excludeSessionId !== undefined) {
+      where.push('t.session_id <> ?')
+      params.push(opts.excludeSessionId)
+    }
+    if (opts.speaker !== undefined) {
+      where.push('t.speaker = ?')
+      params.push(opts.speaker)
+    }
+    const rows = this.db.prepare(
+      `SELECT t.turn_id AS turnId, t.session_id AS sessionId, t.turn_index AS turnIndex,
+              t.speaker AS speaker, t.occurred_at_ms AS occurredAtMs, b.body AS text
+         FROM mem_turns t JOIN mem_bodies b ON b.body_ref = t.body_ref
+        WHERE ${where.join(' AND ')}
+        ORDER BY COALESCE(t.occurred_at_ms, 0) DESC, t.turn_id
+        LIMIT ?`,
+    ).all(...params, limit) as Array<{
+      turnId: string
+      sessionId: string
+      turnIndex: number
+      speaker: string
+      occurredAtMs: number | null
+      text: string
+    }>
+    return rows.map((r) => ({
+      turnId: r.turnId,
+      sessionId: r.sessionId,
+      turnIndex: r.turnIndex,
+      speaker: r.speaker,
+      text: r.text,
+      occurredAtMs: r.occurredAtMs,
+    }))
   }
 
   /**

@@ -15,6 +15,7 @@ import { createMemoryTools } from './memory-tools.ts'
 import { createIntentTools } from './intent-tools.ts'
 import { attachIntentTrigger } from './intent-trigger.ts'
 import { attachMemoryInjection } from './memory-inject.ts'
+import { attachSessionRecall } from './session-recall.ts'
 import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachToolLoopAudit } from './tool-loop-audit.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
@@ -675,6 +676,19 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     },
   )
 
+  // ⑦ 跨会话连续（S4）：新会话开场，从任务账本 + 意图库 + 近期情景重建
+  // 「上次聊到哪里」，不整体塞上一段聊天（架构需求 §5.3 ⑦）。
+  //
+  // 与 memory-inject / intent-trigger 各自独立注册 handler：三者都往 pre-step 追加
+  // user 消息，但失败面各不相同（检索库 / 提醒状态 / 账本），合并会让一条挂掉
+  // 连带吞掉另外两条。注册顺序决定消息顺序，这里是最后一条。
+  const sessionRecall = memory === undefined ? undefined : attachSessionRecall(
+    ctx as unknown as {
+      on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
+    },
+    { store: memory, ledger },
+  )
+
   // P1-3 后台巩固调度：空闲时把 live turn 巩固成实体图与事实。
   // `PRTS_CONSOLIDATE=off` 整体关闭。
   //
@@ -749,6 +763,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       offMemoryAssistantStream?.()
       offMemoryTurnStop?.()
       memoryInjection?.dispose()
+      sessionRecall?.dispose()
       memoryScheduler?.dispose()
       memoryTools?.dispose()
       intentTools?.dispose()

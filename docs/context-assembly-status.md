@@ -4,7 +4,7 @@
 「工作区装配（上下文）」七条原文（0.6 版，`diff --strip-trailing-cr` 与仓外正本一致）。
 
 结论先写：**七条里做了两条半**。⑤工具结果卸载完成，④压缩借用 DSH，①宿主装配有一半。
-缺的是 ②排序 ③预算 ⑥子任务 ⑦跨会话连续 ⑧上下文清单。
+缺的是 ②排序 ③预算 ⑥子任务。⑦ 与 ⑧ 已补（2026-11-03，见下表与第三节）。
 
 ---
 
@@ -18,7 +18,7 @@
 | ④ | **压缩**：先移低相关材料与可回读原文，再压旧对话；保留指向原文的引用，不反复摘要 | `compaction-basic`（`config/prts.yml:52-53`）与 `compaction-image-offload`（`:55-56`）已加载，均无 config（走默认阈值）。「保留引用、不反复摘要」是否符合未验 | ✅ 借用，语义待验 |
 | ⑤ | **工具结果卸载**：大结果存对象存储，工作区只放引用、摘要与关键片段，需要时分页读取 | `src/spill/`（encode / policy / retention / store / types / wiring），`start.ts:25` 引入 `attachSpill` / `resolveSpillRoot`，`:166-176` 有容器授权接线的注释。设计见 `docs/design-tool-output-spill.md` | ✅ 完成 |
 | ⑥ | **子任务上下文**：长任务子步骤在干净上下文执行，只交回结论与产物引用 | 无。机制层已实测可用（`test/acceptance/subagent-session.test.ts`），工具层没有。见 `docs/design-superagent-fusion.md` W2 | ❌ 缺 |
-| ⑦ | **跨会话连续**：新会话从任务账本、意图库、近期情景记忆与关系记忆重建「上次聊到哪里」，不整体塞上一段聊天 | 无。新会话只有 DSH 的 session resume 与记忆检索注入，没有「上次聊到哪里」的重建 | ❌ 缺 |
+| ⑦ | **跨会话连续**：新会话从任务账本、意图库、近期情景记忆与关系记忆重建「上次聊到哪里」，不整体塞上一段聊天 | `src/runtime/session-recall.ts`（`attachSessionRecall`），接在 `start.ts` 的 pre-step 链末位。三源：未结任务（draft/active/paused/blocked/verifying，按 `updatedAt` 倒序，下一步取 `resume.next`，为空退回末条 step 名）、待触发意图（`listIntents({status:'pending'})`）、近期情景（新增 `store.recentTurns`，跨会话按发生时刻倒序，排除当前会话）。每会话只开一次场；三段各自 try/catch，全空则不注入。**关系记忆未做**——它属 V1-05（`docs/design-memory-v1.md:58` 已定「不做」），只留接口位 | ✅ 三源已完成，第四源待 V1-05 |
 | ⑧ | **上下文清单**：每轮记录装入的材料、版本与预算用量，用于事后解释「她当时为什么这么说」 | 无。`agent/assistant-stream` 与 `agent/inbox/claimed` 有会话事件，但没有装配清单 | ❌ 缺 |
 
 ---
@@ -75,7 +75,7 @@ system-prompt/assemble（waterfall，可改装配结果）
 | S1 | **预算层**：在 `memory-inject` 外面包一层 token 预算（`limit` 之外再加字符/token 上限），窗口未知时不按无限处理 | 单测：预算收紧时注入条数下降且不超限；窗口未知时走保守默认 |
 | S2 | **装配清单**：每轮把「装了什么、多少预算、来自哪个版本」写一条事件（不是新表，先落在既有事件流） | 单测：一轮对话后能读出该轮清单；重启后仍在 |
 | S3 | ~~② 的可行性实测~~ **已完成**（见第五节） | 机制定位到代码行；「打开后生效」仍未验 |
-| S4 | **⑦ 跨会话连续**：新会话开头从账本 + 意图库 + 近期情景重建一段「上次聊到哪里」 | 单测：跨两次启动后新会话能看到未完成任务的标题与最后一步 |
+| S4 | ~~**⑦ 跨会话连续**~~ **已完成**（2026-11-03，`src/runtime/session-recall.ts` + `MemoryStore.recentTurns`） | 单测 SR1–SR13 + 运行时级 `session-recall-live.test.ts`：跨两次真实启动后新会话能看到上个会话的话；接线移除则该测试转红（已实测回滚） |
 | S5 | **⑥ 子任务上下文**：`prts_subtask`（依赖 `design-superagent-fusion.md` 的三道约束先说清） | 见该文档 W2 |
 
 S1 与 S2 不依赖任何未决设计，可以先做。S3 是②的前置——**在它出结果前，不要把「挪到最后」写成方案**。
@@ -161,4 +161,4 @@ flowchart TB
 
 - **V1-16**（装配 P95 ≤ 1s、后台巩固不阻塞、费用分开计量）依赖 S1 + S2 存在，否则无法测「装配」。
 - **V1-18**（宿主装配 vs 模型自管对比）依赖 S1 + S2 + ②的通道选型。
-- **V1-08**（长对话 3 倍窗口后仍答得出开头 5 个约束）现在只有 compaction 一条路，跨会话那条（⑦）未做。
+- **V1-08**（长对话 3 倍窗口后仍答得出开头 5 个约束）现在有两条路：compaction 与跨会话重建（⑦）。⑦ 只带任务/意图/近期对话的**索引**，不带原始约束原文——「3 倍窗口后仍答得出」仍需 compaction 那条路负责。
