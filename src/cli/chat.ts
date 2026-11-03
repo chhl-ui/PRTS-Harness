@@ -421,6 +421,44 @@ async function runForgetSession(deps: ChatDeps, arg: string): Promise<void> {
   } finally { audit?.close() }
 }
 
+// ---- V1-14 前瞻记忆：所有者意图命令。取消是破坏性动作，模型面不注册（见 intent-tools.ts）。 ----
+async function runIntent(deps: ChatDeps, arg: string): Promise<void> {
+  if (deps.memory === undefined) { deps.out('[prts] 未配置记忆库，/intent 不可用\n'); return }
+  const parts = arg.split(/\s+/).filter((x) => x !== '')
+  // 裸 `--all` 等同 `list --all`：别让用户为了一个开关重打一次子命令。
+  const sub = parts[0] === undefined || parts[0].startsWith('--') ? 'list' : parts[0]
+
+  if (sub === 'cancel') {
+    const keys = (parts[1] ?? '').split(',').map((x) => x.trim()).filter((x) => x !== '')
+    if (keys.length === 0) { deps.out('[prts] 用法：/intent cancel <intentId 或前缀,...>\n'); return }
+    const all = deps.memory.listIntents()
+    for (const key of keys) {
+      const hit = all.find((r) => r.intentId === key) ?? all.find((r) => r.intentId.startsWith(key))
+      if (hit === undefined) { deps.out(`[prts] 未找到意图 ${key}\n`); continue }
+      try {
+        deps.memory.cancelIntent({ actor: 'owner', intentId: hit.intentId })
+        deps.out(`[prts] 已取消 ${hit.intentId}：${hit.action}\n`)
+      } catch (error) {
+        deps.out(`[prts] 取消失败 ${hit.intentId}：${error instanceof Error ? error.message : String(error)}\n`)
+      }
+    }
+    return
+  }
+
+  if (sub !== 'list') { deps.out('[prts] 用法：/intent [list [--all] | cancel <id,...>]\n'); return }
+  const all = parts.includes('--all')
+  const rows = all ? deps.memory.listIntents() : deps.memory.listIntents({ status: 'pending' })
+  if (rows.length === 0) {
+    deps.out(`[prts] 没有${all ? '' : '未触发的'}意图\n`)
+    return
+  }
+  deps.out(rows.map((r) => {
+    const planned = new Date(r.fireAtMs).toISOString()
+    const fired = r.firedAtMs === null ? '' : `\t实触发 ${new Date(r.firedAtMs).toISOString()}`
+    return `${r.intentId}\t${r.status}\t${planned}\t${r.action}\t「${r.conditionRaw}」${fired}`
+  }).join('\n') + '\n')
+}
+
 async function runCorrect(deps: ChatDeps, arg: string): Promise<void> {
   if (deps.memory === undefined) { deps.out('[prts] 未配置记忆库，/correct 不可用\n'); return }
   const i = arg.indexOf(' ')
@@ -582,6 +620,10 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
       }
       if (line === '/correct' || line.startsWith('/correct ')) {
         await runCorrect(deps, line.slice('/correct'.length).trim())
+        continue
+      }
+      if (line === '/intent' || line.startsWith('/intent ')) {
+        await runIntent(deps, line.slice('/intent'.length).trim())
         continue
       }
       // 所有者裁决命令：全部走 owner 通道，不经模型工具层。
