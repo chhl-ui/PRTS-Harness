@@ -15,7 +15,7 @@
  */
 import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { MemoryStore } from '../memory/index.ts'
 
@@ -26,23 +26,43 @@ const ARCHIVE_FORMAT = 1
 const MEMORY_TABLES = ['mem_turns', 'mem_facts', 'mem_intents', 'mem_profiles', 'mem_summaries', 'mem_vectors']
 const CORE_TABLES = ['ledger_events', 'audit_events', 'tasks']
 
+/**
+ * 人格设定的快照。
+ *
+ * 为什么是整份 profile 文件而不是只抽 persona.prefix：人设嵌在 DSH profile 的
+ * `agent-preset` 插件配置里（一段多行 YAML 块），抽出来需要 YAML 解析 + 回写，
+ * 而回写一旦格式漂移就会让人设失效。整份复制 + 哈希比对，把「有没有变」变成可判定的，
+ * 再由人决定要不要采用。
+ */
+export interface PersonaSnapshot {
+  /** 归档内的相对路径，固定为 `persona/cordis.patch.yml`。 */
+  file: string
+  sha256: string
+  bytes: number
+  /** 导出时的来源路径，导入时作为默认落点。 */
+  sourcePath: string
+}
+
 export interface ArchiveManifest {
   format: number
   exportedAtMs: number
   counts: Record<string, number>
   sha256: Record<string, string>
   chain: { memory: { ok: boolean; brokenAtSeq?: number }; core: { ok: boolean } }
+  persona: PersonaSnapshot | null
 }
 
 export interface ExportResult {
   outDir: string
   counts: Record<string, number>
   sha256: Record<string, string>
+  persona: PersonaSnapshot | null
 }
 
 export interface ImportResult {
   dataRoot: string
   counts: Record<string, number>
+  persona: { written: boolean; path: string } | null
 }
 
 const sha256File = (p: string): string => createHash('sha256').update(readFileSync(p)).digest('hex')
@@ -73,7 +93,13 @@ const vacuumInto = (srcPath: string, destPath: string): void => {
 
 const isDirEmpty = (p: string): boolean => !existsSync(p) || readdirSync(p).length === 0
 
-export function exportArchive(input: { dataRoot: string; outDir: string; force?: boolean }): ExportResult {
+export function exportArchive(input: {
+  dataRoot: string
+  outDir: string
+  force?: boolean
+  /** 人格设定来源（DSH profile 的 cordis.patch.yml）。不传或文件不存在则不导出人格。 */
+  personaPath?: string
+}): ExportResult {
   const memorySrc = join(input.dataRoot, 'memory.sqlite')
   const coreSrc = join(input.dataRoot, 'core.sqlite')
   if (!existsSync(memorySrc) && !existsSync(coreSrc)) {
@@ -114,18 +140,43 @@ export function exportArchive(input: { dataRoot: string; outDir: string; force?:
     for (const t of CORE_TABLES) counts[t] = countIn(dest, t)
   }
 
+  // 人格快照：整份 profile 文件复制进归档。人设嵌在其中的 agent-preset.persona 里，
+  // 单独抽出来需要 YAML 解析 + 回写，格式一漂移人设就失效；整份存 + 哈希比对更稳。
+  let persona: PersonaSnapshot | null = null
+  if (input.personaPath !== undefined && existsSync(input.personaPath)) {
+    const destDir = join(input.outDir, 'persona')
+    mkdirSync(destDir, { recursive: true })
+    const dest = join(destDir, 'cordis.patch.yml')
+    copyFileSync(input.personaPath, dest)
+    persona = {
+      file: 'persona/cordis.patch.yml',
+      sha256: sha256File(dest),
+      bytes: readFileSync(dest).length,
+      sourcePath: input.personaPath,
+    }
+  }
+
   const manifest: ArchiveManifest = {
     format: ARCHIVE_FORMAT,
     exportedAtMs: Date.now(),
     counts,
     sha256,
     chain: { memory: memoryChain, core: { ok: true } },
+    persona,
   }
   writeFileSync(join(input.outDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8')
-  return { outDir: input.outDir, counts, sha256 }
+  return { outDir: input.outDir, counts, sha256, persona }
 }
 
-export function importArchive(input: { archiveDir: string; dataRoot: string; force?: boolean }): ImportResult {
+export function importArchive(input: {
+  archiveDir: string
+  dataRoot: string
+  force?: boolean
+  /** 人格落点；不传则用 manifest 记录的 sourcePath。 */
+  personaPath?: string
+  /** 目标人格已存在且内容不同时，是否允许覆盖。默认拒绝。 */
+  forcePersona?: boolean
+}): ImportResult {
   const manifestPath = join(input.archiveDir, 'manifest.json')
   if (!existsSync(manifestPath)) throw new Error(`导入失败：${manifestPath} 不存在`)
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as ArchiveManifest
@@ -189,5 +240,32 @@ export function importArchive(input: { archiveDir: string; dataRoot: string; for
       }
     }
   }
-  return { dataRoot: input.dataRoot, counts }
+  // 人格：全新安装（目标不存在）才写；已存在且内容不同则拒绝，除非显式 forcePersona。
+  // 这里刻意不做「合并」——YAML 合并的语义复杂，改错了人设会静默变形。
+  let personaResult: { written: boolean; path: string } | null = null
+  const snap = manifest.persona
+  if (snap !== null) {
+    const src = join(input.archiveDir, snap.file)
+    if (!existsSync(src)) throw new Error(`导入失败：归档缺少人格文件 ${snap.file}`)
+    if (sha256File(src) !== snap.sha256) {
+      throw new Error('导入失败：人格文件的 sha256 校验不通过（归档已损坏或被改动）')
+    }
+    const target = input.personaPath ?? snap.sourcePath
+    if (existsSync(target)) {
+      if (sha256File(target) === snap.sha256) {
+        personaResult = { written: false, path: target }
+      } else if (input.forcePersona === true) {
+        copyFileSync(src, target)
+        personaResult = { written: true, path: target }
+      } else {
+        throw new Error(`导入失败：人格文件已存在且内容不同 ${target}（用 --force-persona 覆盖）`)
+      }
+    } else {
+      mkdirSync(dirname(target), { recursive: true })
+      copyFileSync(src, target)
+      personaResult = { written: true, path: target }
+    }
+  }
+
+  return { dataRoot: input.dataRoot, counts, persona: personaResult }
 }

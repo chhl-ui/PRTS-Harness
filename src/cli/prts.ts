@@ -117,20 +117,33 @@ function archiveCommand(args: string[]): number {
     console.error('       prts archive import --data-root <d> --archive <dir> [--force]')
     return 2
   }
+  // 人格来源：显式 --persona-path 优先，其次 PRTS_PERSONA_PATH；都没有则不导出人格。
+  // 不猜 ~/.dsh 的位置——导错别人的人格比不导更糟。
+  const personaPath = arg(args, '--persona-path') ?? process.env.PRTS_PERSONA_PATH
+  const personaArg = personaPath === undefined ? {} : { personaPath }
   if (sub === 'export') {
     const out = arg(args, '--out')
-    if (out === undefined) { console.error('usage: prts archive export --data-root <d> --out <dir> [--force]'); return 2 }
-    const r = exportArchive({ dataRoot, outDir: out, force })
+    if (out === undefined) { console.error('usage: prts archive export --data-root <d> --out <dir> [--force] [--persona-path <f>]'); return 2 }
+    const r = exportArchive({ dataRoot, outDir: out, force, ...personaArg })
     console.log(`exported to ${r.outDir}`)
     for (const [k, v] of Object.entries(r.counts)) console.log(`  ${k}\t${v}`)
+    console.log(r.persona === null
+      ? '  persona\t未导出（没给 --persona-path 或 PRTS_PERSONA_PATH）'
+      : `  persona\t${r.persona.bytes} bytes\t${r.persona.sourcePath}`)
     return 0
   }
   if (sub === 'import') {
     const from = arg(args, '--archive')
-    if (from === undefined) { console.error('usage: prts archive import --data-root <d> --archive <dir> [--force]'); return 2 }
-    const r = importArchive({ archiveDir: from, dataRoot, force })
+    if (from === undefined) { console.error('usage: prts archive import --data-root <d> --archive <dir> [--force] [--persona-path <f>] [--force-persona]'); return 2 }
+    const r = importArchive({
+      archiveDir: from, dataRoot, force, ...personaArg,
+      ...(args.includes('--force-persona') ? { forcePersona: true } : {}),
+    })
     console.log(`imported into ${r.dataRoot}（条数与事件链已逐项核对）`)
     for (const [k, v] of Object.entries(r.counts)) console.log(`  ${k}\t${v}`)
+    console.log(r.persona === null
+      ? '  persona\t归档里没有人格快照'
+      : `  persona\t${r.persona.written ? '已写入' : '已存在且一致，未改动'}\t${r.persona.path}`)
     return 0
   }
   console.error('usage: prts archive <export|import> --data-root <d> ...')

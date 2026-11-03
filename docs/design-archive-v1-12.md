@@ -62,7 +62,7 @@ SQLite 会在这时把 WAL checkpoint 回主库；早算一步就会得到一个
 |---|---|
 | 记忆（turn/fact/profile/summary/intent/向量） | ✅ 全部随库搬走 |
 | 任务历史（ledger + audit） | ✅ 两个库都在 core.sqlite |
-| **人格设定** | ⚠️ **不在导出范围**——人格的权威源是 DSH 的 `~/.dsh/profiles/desktop/cordis.patch.yml`，属于 harness 侧配置，不在本仓。V1-12 要完整通过，需要另做一个「人格设定导出」步骤，或把它纳入归档 |
+| **人格设定** | ✅ 已覆盖（`--persona-path` / `PRTS_PERSONA_PATH`）。见下节 |
 | 会话日志（`dsh-home/sessions/`） | ⚠️ 不导出。它属于 DSH 侧，且体积远大于记忆库；V1-12 原文只要求记忆/人格/任务历史 |
 | 密钥 | ✅ 不导出（`secrets/*.key` 不入档） |
 
@@ -73,3 +73,38 @@ A3 目标已有库时拒绝 / A4 manifest 被篡改时拒绝 / A5 导出到非�
 
 真实往返冒烟：`C:/prts-data`（11-01 结构，缺 mem_intents）→ 导出 → 导入空目录 →
 再导出，条数逐项一致。
+
+## 人格设定（2026-11-03 补）
+
+人格不是独立文件——它嵌在 DSH profile 的 `cordis.patch.yml` 里：`agent-preset` 插件配置的
+`persona.prefix`（一段多行 YAML 块）。2026-10-30 之前的 `dsh-system-prompt.personaPrefix`
+已被删除（同文件第 33-40 行记了原因：preset 里的 `dsh-persona` 用同名 section 注册，
+agent scope 会遮蔽部署级配置，写在那里对 standard preset 完全不生效）。
+
+**做法：整份 profile 文件入档，不抽 persona.prefix。**
+
+```bash
+prts archive export --data-root <d> --out <dir> --persona-path <cordis.patch.yml>
+prts archive import --data-root <d> --archive <dir> [--persona-path <落点>] [--force-persona]
+```
+
+为什么整份而不是只抽那一段：
+
+- 抽出来要 YAML 解析 + 回写，**回写一旦格式漂移人设就静默失效**——这类失败没有任何报错，
+  只表现为「它说话不像它了」。
+- 整份复制 + sha256 比对，把「有没有变」变成可判定的；差异交给用户用 diff 看，
+  而不是让程序替人决定哪些配置该合并。
+
+为什么不像其他配置那样写默认路径：猜错位置会把别人的 profile 覆盖掉。所以
+`--persona-path` 与 `PRTS_PERSONA_PATH` 二者都没有时，**不导出人格**，并在输出里明说。
+
+导入策略：
+
+| 目标状态 | 行为 |
+|---|---|
+| 不存在（全新安装） | 写入 —— 这是 V1-12「导入全新安装后人设一致」的实现路径 |
+| 已存在且哈希相同 | 不动作，报告「已存在且一致」 |
+| 已存在且不同 | **拒绝**，除非 `--force-persona`。不做 YAML 合并 |
+
+实测（2026-11-03）：真实 profile `cordis.patch.yml`（15,239 bytes）→ 导出 → 导入到新落点 →
+`diff` 逐字节一致。

@@ -137,3 +137,77 @@ test('A5 导出到非空目录时拒绝（避免覆盖别人的归档）', () =>
     assert.throws(() => exportArchive({ dataRoot: src, outDir }), /非空|已存在/)
   } finally { t.cleanup() }
 })
+
+// ---- 人格设定（V1-12 的第三个「逐项一致」）----
+// 人格嵌在 DSH profile 的 cordis.patch.yml 里（agent-preset 插件的 persona.prefix），
+// 不是独立文件。这里用 --persona-path 指向临时文件，绝不碰真实的 ~/.dsh。
+
+test('P1 导出把人格文件一并入档并在 manifest 记录哈希', () => {
+  const t = makeTmp('prts-arch-')
+  try {
+    const dataRoot = join(t.dir, 'data')
+    seedDataRoot(dataRoot)
+    const persona = join(t.dir, 'cordis.patch.yml')
+    writeFileSync(persona, 'persona:\n  prefix: 你是大肥鱼\n', 'utf8')
+
+    const outDir = join(t.dir, 'out')
+    const r = exportArchive({ dataRoot, outDir, personaPath: persona })
+    assert.ok(existsSync(join(outDir, 'persona', 'cordis.patch.yml')), '人格副本必须在归档里')
+    assert.equal(r.persona?.bytes, Buffer.byteLength('persona:\n  prefix: 你是大肥鱼\n'))
+    const m = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')) as {
+      persona: { file: string; sha256: string } | null
+    }
+    assert.equal(m.persona?.file, 'persona/cordis.patch.yml')
+    assert.match(m.persona?.sha256 ?? '', /^[0-9a-f]{64}$/)
+  } finally { t.cleanup() }
+})
+
+test('P2 导入到无人格文件的位置时写回（全新安装的恢复路径）', () => {
+  const t = makeTmp('prts-arch-')
+  try {
+    const dataRoot = join(t.dir, 'data')
+    seedDataRoot(dataRoot)
+    const persona = join(t.dir, 'cordis.patch.yml')
+    writeFileSync(persona, 'prefix: 大肥鱼\n', 'utf8')
+    const outDir = join(t.dir, 'out')
+    exportArchive({ dataRoot, outDir, personaPath: persona })
+
+    const dst = join(t.dir, 'fresh')
+    const target = join(t.dir, 'fresh-persona.yml')
+    const r = importArchive({ archiveDir: outDir, dataRoot: dst, personaPath: target })
+    assert.equal(r.persona?.written, true, '全新安装必须把人设恢复出来，否则 V1-12 不算通过')
+    assert.equal(readFileSync(target, 'utf8'), 'prefix: 大肥鱼\n')
+  } finally { t.cleanup() }
+})
+
+test('P3 目标人格已存在且内容不同时拒绝覆盖', () => {
+  const t = makeTmp('prts-arch-')
+  try {
+    const dataRoot = join(t.dir, 'data')
+    seedDataRoot(dataRoot)
+    const persona = join(t.dir, 'cordis.patch.yml')
+    writeFileSync(persona, 'prefix: 大肥鱼\n', 'utf8')
+    const outDir = join(t.dir, 'out')
+    exportArchive({ dataRoot, outDir, personaPath: persona })
+
+    const target = join(t.dir, 'existing-persona.yml')
+    writeFileSync(target, 'prefix: 另一个人格\n', 'utf8')
+    assert.throws(
+      () => importArchive({ archiveDir: outDir, dataRoot: join(t.dir, 'fresh3'), personaPath: target }),
+      /人格|已存在|覆盖/,
+    )
+    assert.equal(readFileSync(target, 'utf8'), 'prefix: 另一个人格\n', '拒绝时原文件不能被动过')
+  } finally { t.cleanup() }
+})
+
+test('P4 源没有指定人格文件时导出仍成功（persona 为 null）', () => {
+  const t = makeTmp('prts-arch-')
+  try {
+    const dataRoot = join(t.dir, 'data')
+    seedDataRoot(dataRoot)
+    const outDir = join(t.dir, 'out')
+    const r = exportArchive({ dataRoot, outDir, personaPath: join(t.dir, 'no-such.yml') })
+    assert.equal(r.persona, null)
+    assert.ok(existsSync(join(outDir, 'manifest.json')))
+  } finally { t.cleanup() }
+})
