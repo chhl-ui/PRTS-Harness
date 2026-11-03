@@ -260,6 +260,15 @@ export interface InjectionRecord {
   usedChars: number
   /** 本轮生效的条数上限（`PRTS_MEMORY_INJECT_LIMIT`），事后解释「为什么只有这几条」要看它。 */
   limit: number
+  /**
+   * 这一轮装配的结果。`skipped` 是「真的要装配但没装成」，
+   * 由 `reason` 说明是哪一种（`query-too-short` / `no-hit`）。
+   *
+   * 历史事件没有这个字段（2026-11-04 之前的注入记录），读取侧按 `'injected'` 处理——
+   * 那时候只记成功路径，所以缺失等价于注入成功。不做数据迁移。
+   */
+  outcome: 'injected' | 'skipped'
+  reason?: string
   recordedAtMs: number
 }
 
@@ -276,6 +285,9 @@ export interface RecordInjectionInput {
   kinds: Record<string, number>
   usedChars: number
   limit: number
+  /** `injected` = 真的装进了上下文；`skipped` = 该装但没装成，配 `reason`。 */
+  outcome: 'injected' | 'skipped'
+  reason?: string
 }
 
 /** V1-14 前瞻记忆：意图状态。`fired` 与 `cancelled` 是终态，不可互转。 */

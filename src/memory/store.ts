@@ -2267,6 +2267,8 @@ export class MemoryStore {
           kinds: { ...input.kinds },
           used_chars: input.usedChars,
           limit: input.limit,
+          outcome: input.outcome,
+          ...(input.reason === undefined ? {} : { reason: input.reason }),
         },
       })
       this.db.exec('COMMIT')
@@ -2282,14 +2284,26 @@ export class MemoryStore {
    * 走 `json_extract` 而不是新表：清单的**唯一事实来源是事件链**，投影只由 `fold.ts` 更新，
    * 而这里明确不为它建投影——另建一张表就等于把同一事实存两份。
    */
-  injectionRecords(opts: { sessionId?: string; limit?: number } = {}): InjectionRecord[] {
+  injectionRecords(opts: { sessionId?: string; outcome?: 'injected' | 'skipped'; limit?: number } = {}): InjectionRecord[] {
     const limit = opts.limit ?? 100
-    const base = `SELECT payload_json AS p, recorded_at_ms AS t FROM memory_events
-                   WHERE kind = 'injection.recorded'`
-    const rows = (opts.sessionId === undefined
-      ? this.db.prepare(`${base} ORDER BY seq DESC LIMIT ?`).all(limit)
-      : this.db.prepare(`${base} AND json_extract(payload_json, '$.session_id') = ? ORDER BY seq DESC LIMIT ?`)
-        .all(opts.sessionId, limit)) as unknown as Array<{ p: string; t: number }>
+    const clauses: string[] = []
+    const params: string[] = []
+    if (opts.sessionId !== undefined) {
+      clauses.push(`json_extract(payload_json, '$.session_id') = ?`)
+      params.push(opts.sessionId)
+    }
+    if (opts.outcome === 'skipped') {
+      clauses.push(`json_extract(payload_json, '$.outcome') = 'skipped'`)
+    } else if (opts.outcome === 'injected') {
+      // 2026-11-04 之前的事件没有 outcome 字段——那时只记成功路径，缺失即注入。
+      // 不做数据迁移：链是只追加的，改写历史比读时兼容危险得多。
+      clauses.push(`(json_extract(payload_json, '$.outcome') IS NULL OR json_extract(payload_json, '$.outcome') = 'injected')`)
+    }
+    const where = clauses.length === 0 ? '' : ` AND ${clauses.join(' AND ')}`
+    const rows = this.db.prepare(
+      `SELECT payload_json AS p, recorded_at_ms AS t FROM memory_events
+        WHERE kind = 'injection.recorded'${where} ORDER BY seq DESC LIMIT ?`,
+    ).all(...params, limit) as unknown as Array<{ p: string; t: number }>
     return rows.map((row) => {
       const p = JSON.parse(row.p) as {
         session_id: string
@@ -2300,6 +2314,8 @@ export class MemoryStore {
         kinds: Record<string, number>
         used_chars: number
         limit: number
+        outcome?: 'injected' | 'skipped'
+        reason?: string
       }
       return {
         sessionId: p.session_id,
@@ -2310,6 +2326,8 @@ export class MemoryStore {
         kinds: p.kinds,
         usedChars: p.used_chars,
         limit: p.limit,
+        outcome: p.outcome === 'skipped' ? 'skipped' : 'injected',
+        ...(p.reason === undefined ? {} : { reason: p.reason }),
         recordedAtMs: row.t,
       }
     })

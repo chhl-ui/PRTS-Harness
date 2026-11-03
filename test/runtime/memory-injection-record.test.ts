@@ -129,7 +129,7 @@ test('INJ2 清单跨重启可读（不是进程内缓存）', async () => {
   }
 })
 
-test('INJ3 没有命中时不写清单（避免把「没注入」记成「装入了 0 条」）', async () => {
+test('INJ3 没有命中时不产生「注入」记录（避免把「没装」记成「装入了 0 条」）', async () => {
   const tmp = makeTmp('prts-injrec-miss-')
   const store = MemoryStore.open(tmp.db())
   try {
@@ -139,7 +139,15 @@ test('INJ3 没有命中时不写清单（避免把「没注入」记成「装入
       const payload = payloadOf('完全无关的新话题，库里没有对应记忆')
       const out = await fake.fire(payload, async () => enter([...payload.messages]))
       assert.equal((out as { messages: unknown[] }).messages.length, payload.messages.length, '不该注入')
-      assert.equal(store.injectionRecords().length, 0, '没注入就没有可解释的装配，不留空记录')
+      // 2026-11-04 起零命中会留一条 `skipped` 记录（`memory-injection-skip.test.ts` SK2）：
+      // 它是「诊断样本」，不是「装入了 0 条」。两种口径用 outcome 分开，别混着数。
+      assert.equal(
+        store.injectionRecords({ outcome: 'injected' }).length, 0,
+        '没注入就不能出现在注入集合里',
+      )
+      const skipped = store.injectionRecords({ outcome: 'skipped' })
+      assert.equal(skipped.length, 1, '跳过要留痕')
+      assert.equal(skipped[0]!.reason, 'no-hit')
     } finally {
       att.dispose()
     }

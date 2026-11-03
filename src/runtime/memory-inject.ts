@@ -144,6 +144,26 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
   // 重复注入只是占上下文，没有新信息。进程内状态，重启丢——重启后可能重复注入一次，
   // 可接受。
   const injectedHitIds = new Map<string, Set<string>>()
+  // 已写过装配记录的 step。注入与跳过共用这一个去重集合：`injectedSteps` 只在
+  // 注入成功时登记，跳过路径没有它，waterfall 重放会对同一步重复留痕。
+  const recordedSteps = new Set<string>()
+
+  /**
+   * 写一条装配记录。
+   *
+   * **单独的 try/catch**：外层那个 catch 会 `return decision`，记录失败若落进它，
+   * 已经算好的注入也会跟着消失——观测不得成为新的失败面。
+   * 先登记再写：写失败不重试，避免链写不进去时每轮刷屏。
+   */
+  const recordOnce = (stepKey: string, input: Parameters<MemoryStore['recordInjection']>[0]): void => {
+    if (recordedSteps.has(stepKey)) return
+    recordedSteps.add(stepKey)
+    try {
+      deps.store.recordInjection(input)
+    } catch (error) {
+      console.error(`[prts] injection record failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 
   const off = hookCtx.on('agent/pre-step', async (payload, next) => {
     // next() 在 try 外：它自己的失败是真故障，不能被这里的兜底吞掉。
@@ -161,7 +181,15 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
       const messages = p.messages ?? []
       if (messages.length === 0) return decision
       const query = textOf(messages[messages.length - 1])
-      if (query.length < minQueryChars) return decision
+      if (query.length < minQueryChars) {
+        // 这一轮本该装配、但查询太短没检索。记下来，否则将来标定预算的样本
+        // 只会留下「装了东西」的轮次，系统性偏向「记忆总是够用」。
+        recordOnce(stepKey, {
+          sessionId, turn, step, injected: 0, hitIds: [], kinds: {}, usedChars: 0, limit,
+          outcome: 'skipped', reason: 'query-too-short',
+        })
+        return decision
+      }
 
       // 本轮问题自己也在库里：`agent/inbox/claimed` 在 pre-step 之前就把这条 user
       // 消息落成了 turn，检索会把它当「历史记录」带回来——既占名额又对模型零信息。
@@ -207,7 +235,13 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
         .filter((h) => !seen.has(h.id))
       const pinnedIds = new Set(pinned.map((h) => h.id))
       const hits = [...pinned, ...ordered.filter((h) => !pinnedIds.has(h.id))].slice(0, limit)
-      if (hits.length === 0) return decision
+      if (hits.length === 0) {
+        recordOnce(stepKey, {
+          sessionId, turn, step, injected: 0, hitIds: [], kinds: {}, usedChars: 0, limit,
+          outcome: 'skipped', reason: 'no-hit',
+        })
+        return decision
+      }
 
       injectedSteps.add(stepKey)
       for (const h of hits) seen.add(h.id)
@@ -230,29 +264,20 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
         content: [{ type: 'text', text }],
         source: { kind: 'user' },
       }
-      // 装配清单（⑧，见 `docs/context-assembly-status.md` 三-S2）：**只观测，不做裁剪**。
-      //
-      // 位置在 seen 登记之后、返回之前——此刻 hits 就是正文里的那几条，所以清单与正文
-      // 天然同源。将来若加预算裁剪，必须先把裁剪做在 hits 上、再登记 seen；反过来做的话，
-      // 被裁掉的条目已经进了 injectedHitIds，该会话从此不再提它，而且不报错（静默失忆）。
-      //
-      // 单独 try/catch：写清单失败不能连带丢掉已经算好的注入——外层那个 catch 会 `return decision`，
-      // 注入会连同异常一起消失。观测不得成为新的失败面。
-      try {
-        deps.store.recordInjection({
-          sessionId,
-          turn,
-          step,
-          injected: hits.length,
-          hitIds: hits.map((h) => h.id),
-          kinds: countKinds(hits),
-          // 与将来预算标定的口径同源：渲染后的完整正文，含自报来源的 header。
-          usedChars: text.length,
-          limit,
-        })
-      } catch (error) {
-        console.error(`[prts] injection record failed: ${error instanceof Error ? error.message : String(error)}`)
-      }
+      // 装配清单（⑧）：只观测，不做裁剪。位置在 seen 登记之后、返回之前——
+      // 此刻 hits 就是正文里的那几条，所以清单与正文天然同源。
+      recordOnce(stepKey, {
+        sessionId,
+        turn,
+        step,
+        injected: hits.length,
+        hitIds: hits.map((h) => h.id),
+        kinds: countKinds(hits),
+        // 与将来预算标定的口径同源：渲染后的完整正文，含自报来源的 header。
+        usedChars: text.length,
+        limit,
+        outcome: 'injected',
+      })
       return { ...decision, messages: [...decision.messages, injected] }
     } catch (error) {
       console.error(`[prts] memory inject failed: ${error instanceof Error ? error.message : String(error)}`)
