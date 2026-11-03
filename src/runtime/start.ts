@@ -17,6 +17,7 @@ import { createSkillTools } from './skill-tools.ts'
 import { attachIntentTrigger } from './intent-trigger.ts'
 import { attachMemoryInjection } from './memory-inject.ts'
 import { attachSkillInjection } from './skill-inject.ts'
+import { attachEmotionInjection } from './emotion-inject.ts'
 import { attachSessionRecall } from './session-recall.ts'
 import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachToolLoopAudit } from './tool-loop-audit.ts'
@@ -28,6 +29,7 @@ import { initCoreDb } from '../core/init.ts'
 import { MemoryStore, OllamaEmbedder, OllamaGenerator } from '../memory/index.ts'
 import { SkillStore } from '../skills/index.ts'
 import { PersonaStore } from '../persona/index.ts'
+import { EmotionStore } from '../emotion/index.ts'
 import { PythonReranker } from '../memory/rerank.ts'
 import { attachSpill, resolveSpillRoot } from '../spill/wiring.ts'
 
@@ -297,6 +299,21 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     }
   } catch (error) {
     console.error(`[prts] skills store unavailable: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  // V1-05 情感状态：与 persona / skills 同构的独立库 + 独立链。链断同样 fail-closed
+  // —— 情绪历史被改过时，按被篡改的值决定「该用什么语气说话」比不注入更糟。
+  let emotion: EmotionStore | undefined
+  try {
+    emotion = EmotionStore.open(process.env.PRTS_EMOTION_DB ?? join(o.dataRoot, 'emotion.sqlite'))
+    const chain = emotion.verifyChain()
+    if (!chain.ok) {
+      console.error(`[prts] emotion chain broken at seq ${chain.brokenAtSeq} — 情感面停用`)
+      emotion.close()
+      emotion = undefined
+    }
+  } catch (error) {
+    console.error(`[prts] emotion store unavailable: ${error instanceof Error ? error.message : String(error)}`)
   }
   // 工具结果卸载的存储根：默认与 dataRoot 平级，**不嵌在受保护根里**——
   // 嵌进去会被 `fs.read` 的 protectedRoots 判定拒掉，卸载的内容模型就永远读不回来
@@ -725,6 +742,16 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     { store: skills },
   )
 
+  // V1-05 表达层：当前情绪作为一句提示推进上下文。注入正文里写死了
+  // 「不得改变任何事实性回答」——机制层已保证一半（情感库不参与检索），
+  // 另一半只能靠模型侧这条显式约束。
+  const emotionInjection = emotion === undefined ? undefined : attachEmotionInjection(
+    ctx as unknown as {
+      on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
+    },
+    { store: emotion },
+  )
+
   // V1-14 触发（方案 B）：到期时进程在则准点，不在则下次交互补发并如实告知延迟。
   // 挂在 pre-step 而不是定时器上——提醒必须有会话可投递，定时器到点时没有对话，
   // 注入无处可去；而 pre-step 天然覆盖「重启后补发」。
@@ -851,6 +878,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       skillTools?.dispose()
       skillInjection?.dispose()
       skills?.close()
+      emotionInjection?.dispose()
+      emotion?.close()
       persona?.close()
       intentTools?.dispose()
       intentTrigger?.dispose()
