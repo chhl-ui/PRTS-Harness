@@ -13,7 +13,7 @@
 | # | §5.3 要求 | 现状 | 判定 |
 |---|---|---|---|
 | ① | **宿主装配为主，模型自管为辅**。每轮由宿主按规则确定性装配；模型深挖时调主动回忆工具；不采用完全由模型换页 | 宿主注入在：`src/runtime/memory-inject.ts`（每轮检索 5 条 + 精排 + 更正钉住 + 向量路）；主动回忆工具在：`prts_memory_recall`（`src/runtime/memory-tools.ts`）。**但没有「装配器」**：没有代码按规则决定这一轮装哪些材料 | ⚠️ 半 |
-| ② | **装配顺序按稳定程度排列**：人格、主题目录等稳定内容在前，对话与检索结果在后，以提高提示缓存命中率 | 现状相反：检索结果被塞进 `role:'user'` 的消息流（`memory-inject.ts:21` 说明了理由——system prompt 由 DSH 的 system-prompt 服务独占，自造会丢掉它的 context 投影）。每轮内容不同，注入点之后的前缀全部失效 | ❌ 缺，**且与现状冲突** |
+| ② | **装配顺序按稳定程度排列**：人格、主题目录等稳定内容在前，对话与检索结果在后，以提高提示缓存命中率 | 现状相反：检索结果被塞进 `role:'user'` 的消息流（`memory-inject.ts:21`）。**但 DSH 原生有正确形状**：动态上下文追加在消息末尾（`dsh-agent-loop/lib/index.js:913-918`），只是被 `config/prts.yml:103` 关着；「打开后生效」未验，见第五节 | ❌ 缺，机制已定位、生效未验证 |
 | ③ | **预算** = min(配置上限, 模型窗口 − 输出预留 − 安全余量)；未知窗口不按无限处理 | 只有条数上限 `limit: 5`（`memory-inject.ts:127`）。窗口：`config/prts.yml:20` `defaultContextWindow: 1000000`（可由 `DSH_CONTEXT_WINDOW` 覆盖）。没有 token 预算层 | ❌ 缺 |
 | ④ | **压缩**：先移低相关材料与可回读原文，再压旧对话；保留指向原文的引用，不反复摘要 | `compaction-basic`（`config/prts.yml:52-53`）与 `compaction-image-offload`（`:55-56`）已加载，均无 config（走默认阈值）。「保留引用、不反复摘要」是否符合未验 | ✅ 借用，语义待验 |
 | ⑤ | **工具结果卸载**：大结果存对象存储，工作区只放引用、摘要与关键片段，需要时分页读取 | `src/spill/`（encode / policy / retention / store / types / wiring），`start.ts:25` 引入 `attachSpill` / `resolveSpillRoot`，`:166-176` 有容器授权接线的注释。设计见 `docs/design-tool-output-spill.md` | ✅ 完成 |
@@ -46,7 +46,7 @@
 |---|---|---|
 | S1 | **预算层**：在 `memory-inject` 外面包一层 token 预算（`limit` 之外再加字符/token 上限），窗口未知时不按无限处理 | 单测：预算收紧时注入条数下降且不超限；窗口未知时走保守默认 |
 | S2 | **装配清单**：每轮把「装了什么、多少预算、来自哪个版本」写一条事件（不是新表，先落在既有事件流） | 单测：一轮对话后能读出该轮清单；重启后仍在 |
-| S3 | **② 的可行性实测**：写探针确认 `SystemPrompt.context()` 注册的动态内容是否落在对话之后、是否影响前缀缓存 | 探针输出实际消息序列顺序（不是读文档） |
+| S3 | ~~② 的可行性实测~~ **已完成**（见第五节） | 机制定位到代码行；「打开后生效」仍未验 |
 | S4 | **⑦ 跨会话连续**：新会话开头从账本 + 意图库 + 近期情景重建一段「上次聊到哪里」 | 单测：跨两次启动后新会话能看到未完成任务的标题与最后一步 |
 | S5 | **⑥ 子任务上下文**：`prts_subtask`（依赖 `design-superagent-fusion.md` 的三道约束先说清） | 见该文档 W2 |
 
@@ -64,7 +64,27 @@ S1 与 S2 不依赖任何未决设计，可以先做。S3 是②的前置——*
 
 ---
 
-## 五、与验收的关系
+## 五、S3 实测结论（② 的可行性，2026-11-03）
+
+探针 `.rivet/scratch/probe-systemprompt-context.mjs`（**未固化**，不在 CI 里，按 scratch 惯例）。
+
+| 层 | 证据 | 强度 |
+|---|---|---|
+| DSH 把动态上下文追加在消息**末尾** | `dsh-agent-loop/lib/index.js:913-918`：`messages: context === void 0 ? claimed : [...claimed, context]` | 代码行确认 |
+| 该能力当前被关闭 | `config/prts.yml:103` `includeRuntimeContext: false` | 配置确认 |
+| 非 `required:true` 的 context 会被过滤 | `dsh-system-prompt/lib/index.js:391` 的 `runtimeContextSuppressed`；探针加 `required:true` 后 `A_registered: true` | 探针实测 |
+| 记忆注入不会吞掉它 | `memory-inject.ts:232` 返回 `{...decision, messages: [...decision.messages, injected]}` | 代码行确认 |
+| **打开开关后模型是否真的看到** | 探针在 `agent/pre-step` 的 messages 里**未观察到** marker（`markerIndex: -1`，两轮均如此） | **未验证** |
+
+**未解释项**：`app.ctx.on('agent/pre-step')` 与 agent 实际 dispatch 可能不在同一条链（`memory-inject` 用的是 `hookCtx` 而非 root ctx）。在弄清这一点前，**不得**声称「打开 `includeRuntimeContext` 就能让动态上下文进入消息序列」。
+
+**对 ② 的判断**：机制在、形状对（末尾追加）、当前关着、生效未验。状态从「缺」改为「机制已定位，生效未验证」。
+
+**若最终生效，顺序会是**：`claimed 历史 → DSH runtime context → 记忆注入`——两类动态内容都在末尾，不破坏它们之前的前缀。这是 ② 能达到的最好形状。
+
+**未验证的取舍**：记忆注入现在用 `role:'user'`，header 明写「不是用户本轮发言」，靠角色语义帮模型区分历史与本轮（`memory-inject.ts:120-122`）。迁到 system prompt 的 section/context 会丢掉这个区分，模型行为变化未测。**在 A/B 结果出来前不做迁移。**
+
+## 六、与验收的关系
 
 - **V1-16**（装配 P95 ≤ 1s、后台巩固不阻塞、费用分开计量）依赖 S1 + S2 存在，否则无法测「装配」。
 - **V1-18**（宿主装配 vs 模型自管对比）依赖 S1 + S2 + ②的通道选型。
