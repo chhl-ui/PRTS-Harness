@@ -36,10 +36,19 @@ interface AgentsSvc {
 function findSessionFiles(root: string): string[] {
   const out: string[] = []
   const walk = (d: string): void => {
-    for (const e of readdirSync(d)) {
+    let entries: string[]
+    try {
+      entries = readdirSync(d)
+    } catch {
+      // 会话目录在首条 session 事件落盘前不存在；遍历间隙也可能被原子替换。
+      return
+    }
+    for (const e of entries) {
       const p = join(d, e)
-      if (statSync(p).isDirectory()) walk(p)
-      else if (e === 'session.v4.jsonl') out.push(p)
+      try {
+        if (statSync(p).isDirectory()) walk(p)
+        else if (e === 'session.v4.jsonl') out.push(p)
+      } catch { /* 条目在遍历间隙被移走 */ }
     }
   }
   walk(root)
@@ -94,22 +103,36 @@ test('subagent 会话机制：创建 / 并存 / 血缘落盘 / 独立回收', { 
       content: [{ type: 'text', text: '干活' }],
       source: { kind: 'user' },
     }))
-    const t0 = Date.now()
-    while (Date.now() - t0 < 20000) {
+    // C：血缘落盘。
+    // 等的是断言对象本身——含 subSid 的 session 文件出现且 header 可解析——不是固定时长。
+    // 两个原因：turn 结束后 DSH 还有 200ms 的批量写 debounce
+    // （dsh-session-persistence-jsonl/lib/index.js:190）；且 `agent.status` 在任务结算前
+    // 就可能停在 idle（dsh-agent runtime-types.d.ts:168「public status stays idle」），
+    // 拿它当完成信号等于「固定等 300ms」，与落盘延迟贴线。
+    // 2026-11-03 全量跑实测：本测试在 300ms 检查点竞速失败（628/629），同场景探针 252ms 才落盘。
+    const sessionsRoot = join(dataRoot, 'dsh-home', 'sessions')
+    const deadline = Date.now() + 20000
+    let files: string[] = []
+    let subFile: string | undefined
+    let header: Record<string, unknown> | undefined
+    while (Date.now() < deadline) {
+      files = findSessionFiles(sessionsRoot)
+      subFile = files.find((f) => f.includes(subSid))
+      if (subFile !== undefined) {
+        try {
+          header = JSON.parse(readFileSync(subFile, 'utf8').split('\n')[0]) as Record<string, unknown>
+          break
+        } catch { header = undefined /* 文件正在写，下一轮再读 */ }
+      }
       await new Promise((r) => setTimeout(r, 100))
-      if (sub.agent.status === 'idle' && Date.now() - t0 > 300) break
     }
-
-    // C：血缘落盘
-    const files = findSessionFiles(join(dataRoot, 'dsh-home', 'sessions'))
     assert.ok(files.length > 0, 'C：至少落一个 session 文件')
-    const subFile = files.find((f) => f.includes(subSid))
     assert.ok(subFile !== undefined, 'C：子会话的 session 文件必须存在')
-    const header = JSON.parse(readFileSync(subFile!, 'utf8').split('\n')[0]) as Record<string, unknown>
-    assert.equal(header.parentSession, rootSid, 'C：父子血缘必须落盘')
-    assert.equal(header.origin, 'subagent', 'C：origin 必须落盘')
-    assert.equal(header.delegationDepth, 1, 'C：委派深度必须落盘')
-    assert.equal(header.agentPreset, 'worker', 'C：agent preset 必须落盘')
+    assert.ok(header !== undefined, 'C：子会话的 session 头必须可解析')
+    assert.equal(header!.parentSession, rootSid, 'C：父子血缘必须落盘')
+    assert.equal(header!.origin, 'subagent', 'C：origin 必须落盘')
+    assert.equal(header!.delegationDepth, 1, 'C：委派深度必须落盘')
+    assert.equal(header!.agentPreset, 'worker', 'C：agent preset 必须落盘')
 
     // D：独立回收
     await sub.dispose()
