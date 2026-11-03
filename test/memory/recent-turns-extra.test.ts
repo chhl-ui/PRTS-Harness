@@ -51,3 +51,17 @@ test('RTX3 RecentTurn 从模块入口导出（类型契约）', () => {
   }
   assert.equal(row.turnId, 'turn-1')
 })
+
+test('RTX4 recentCorrections 的 limit 非有限数回落 5，不把 NaN 带进 SQL 绑定', () => {
+  const t = makeTmp('prts-recent-extra-')
+  const store = MemoryStore.open(t.db())
+  try {
+    store.recordTurn({
+      actor: 'owner', sessionId: 's1', turnIndex: 0, speaker: 'user',
+      text: '我最近改喝拿铁了', occurredAtMs: Date.now() - 60_000,
+    })
+    // 修复前 `Math.max(1, NaN) === NaN`，NaN 被原样绑进 LIMIT 与 `limit * 10`。
+    assert.equal(store.recentCorrections({ limit: Number.NaN }).length, 1, '更正句仍应取到（回落默认 5）')
+    assert.equal(store.recentCorrections({ limit: 0 }).length, 1, '0 的既有语义仍是 →1')
+  } finally { t.cleanup(store) }
+})
