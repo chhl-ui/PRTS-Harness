@@ -15,6 +15,7 @@ import { createMemoryTools } from './memory-tools.ts'
 import { createIntentTools } from './intent-tools.ts'
 import { attachIntentTrigger } from './intent-trigger.ts'
 import { attachMemoryInjection } from './memory-inject.ts'
+import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { Ledger } from '../ledger/index.ts'
@@ -416,12 +417,36 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   })
 
   // U4：endStep 仍挂 tools/result（emit 型），但只收尾本进程 begin 过的调用。
+  //
+  // 同一处接工具循环检测（Super-agent 模块 5 缺的那一半）：`supervisor` 只答
+  // 「进程活着吗」，这里答「这活是不是在原地打转」。**只标记、不自动停**——
+  // `stop('S1')` 会 cancelAllTurns，一次误报就杀掉整轮对话，而「模型因为第一次超时
+  // 重试同一条命令」是设计文档里自己列出的预测误报模式（design-superagent-fusion.md 七-2）。
+  // 停机权留在上层，等有真实误报率数据再说。
+  const toolLoopGuard = new ToolLoopGuard()
   const offToolResult = events?.on('tools/result', ((execution: unknown, result: unknown) => {
     try {
       const exec = execution as {
         readonly callId: unknown
+        readonly name: unknown
+        readonly arguments: unknown
         readonly agent?: { session?: { id?: string } }
       }
+      // 检测放独立 try：它失败不该连带丢掉 endStep 的记账。
+      try {
+        const loopSessionId = exec.agent?.session?.id ?? ''
+        if (typeof exec.name === 'string' && loopSessionId !== '') {
+          const verdict = toolLoopGuard.observe({
+            sessionId: loopSessionId, toolName: exec.name, args: exec.arguments,
+          })
+          if (verdict.kind === 'suspect') {
+            console.error(
+              `[prts] tool loop suspected: ${exec.name} 连续 ${verdict.count} 次相同参数`
+              + `（session ${loopSessionId}，指纹 ${verdict.fingerprint}）`,
+            )
+          }
+        }
+      } catch { /* 循环检测是观测，失败静默 */ }
       const key = String(exec.callId)
       const started = startedSteps.get(key)
       if (started === undefined) return
