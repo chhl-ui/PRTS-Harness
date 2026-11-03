@@ -4,7 +4,7 @@
 
 只定**写进数据结构就难改**的条目。检索权重、装配策略等参数留到有实测数据时再定。
 
-**规范依据在仓内**：文中 §5.3 / §5.4 / §10 / §11、V1-16 / V1-17 / V1-18 均出自 `docs/reference/PRTS-ARCHITECTURE-REQUIREMENTS-2026-10-29.md`（版本 0.5，实际定稿 2026-10-30，sha256 记在该文件头部）。仓外正本是 `C:\Users\Administrator\Desktop\设计和计划\PRTS-ARCHITECTURE-REQUIREMENTS-2026-10-29.md`——那边编辑，仓内副本逐字同步，同步后更新副本头部的 sha256，不就地编辑。
+**规范依据在仓内**：文中 §5.3 / §5.4 / §10 / §11、V1-16 / V1-17 / V1-18 均出自 `docs/reference/PRTS-ARCHITECTURE-REQUIREMENTS-2026-10-29.md`（版本 0.6，0.5 定稿于 2026-10-30、0.6 修订于 2026-11-03，sha256 记在该文件头部）。仓外正本是 `C:\Users\Administrator\Desktop\设计和计划\PRTS-ARCHITECTURE-REQUIREMENTS-2026-10-29.md`——那边编辑，仓内副本逐字同步，同步后更新副本头部的 sha256，不就地编辑。
 
 ---
 
