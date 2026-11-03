@@ -27,6 +27,7 @@ import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
 import { MemoryStore, OllamaEmbedder, OllamaGenerator } from '../memory/index.ts'
 import { SkillStore } from '../skills/index.ts'
+import { PersonaStore } from '../persona/index.ts'
 import { PythonReranker } from '../memory/rerank.ts'
 import { attachSpill, resolveSpillRoot } from '../spill/wiring.ts'
 
@@ -151,7 +152,39 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     if (backend === 'local') await aclOps.protectLocal(o.workspace, sub)
     else await aclOps.protectAC(o.workspace, sub, deriveAppContainerSid(PRTS_APPCONTAINER_PROFILE))
   }
+  // 人格（V1-03/04/05/09 的底座）：启动时从 persona 库读当前预设，覆盖 DSH 的
+  // personaPrefix。库不存在或没有任何预设时**不动 config**——沿用 config/prts.yml
+  // 里那一段，不凭空捏一个人格出来。
+  //
+  // ⚠️ patches 是**顶层键整体覆盖**，不是深合并（`dsh-app-boot/lib/index.js:96`
+  // 的 `target[key] = value`）。只给 `config.personaPrefix` 会把
+  // `includeHarnessIdentity` / `includeRuntimeContext` 一起抹掉——所以三个字段写全。
+  let persona: PersonaStore | undefined
+  let personaPrefix = ''
+  try {
+    mkdirSync(o.dataRoot, { recursive: true })
+    persona = PersonaStore.open(process.env.PRTS_PERSONA_DB ?? join(o.dataRoot, 'persona.sqlite'))
+    const chain = persona.verifyChain()
+    if (!chain.ok) {
+      // 链断 = 人格历史被改过。此时渲染「当前人格」等于把可能被篡改的底线装进
+      // system prompt，所以回落配置值并留痕。
+      console.error(`[prts] persona chain broken at seq ${chain.brokenAtSeq} — 回落到 config 的 personaPrefix`)
+      persona.close()
+      persona = undefined
+    } else {
+      personaPrefix = persona.renderPrefix()
+    }
+  } catch (error) {
+    console.error(`[prts] persona store unavailable: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
   const bootPatches = [...(o.patches ?? [])]
+  if (personaPrefix !== '') {
+    bootPatches.push({
+      id: 'system-prompt',
+      config: { includeHarnessIdentity: false, includeRuntimeContext: false, personaPrefix },
+    })
+  }
   if (backend === 'appcontainer') bootPatches.push({ id: 'sandbox', disabled: true })
   process.env.DSH_HOME = join(o.dataRoot, 'dsh-home')
   process.env.PRTS_WORKSPACE = o.workspace
@@ -802,6 +835,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       skillTools?.dispose()
       skillInjection?.dispose()
       skills?.close()
+      persona?.close()
       intentTools?.dispose()
       intentTrigger?.dispose()
       // 精排器是常驻 Python 子进程，必须显式收掉，否则退出后残留。
