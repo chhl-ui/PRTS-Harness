@@ -13,6 +13,7 @@ import { DEFAULT_READ_ONLY_SUBPATHS } from '../authority/index.ts'
 import { createStepAllocator, createTaskTools, isLedgerTool } from './task-tools.ts'
 import { createMemoryTools } from './memory-tools.ts'
 import { createIntentTools } from './intent-tools.ts'
+import { createSkillTools } from './skill-tools.ts'
 import { attachIntentTrigger } from './intent-trigger.ts'
 import { attachMemoryInjection } from './memory-inject.ts'
 import { attachSessionRecall } from './session-recall.ts'
@@ -24,6 +25,7 @@ import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
 import { MemoryStore, OllamaEmbedder, OllamaGenerator } from '../memory/index.ts'
+import { SkillStore } from '../skills/index.ts'
 import { PythonReranker } from '../memory/rerank.ts'
 import { attachSpill, resolveSpillRoot } from '../spill/wiring.ts'
 
@@ -229,6 +231,22 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     }
   } catch (error) {
     console.error(`[prts] memory store unavailable: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  // V1-09 技能库：独立 DB、独立链。与记忆面互不牵连——记忆挂了不该连带让
+  // 「上次学到的做法」也消失，反之亦然。链断与记忆同一取舍：fail-closed 停用
+  // 技能面（对话仍可进行），并在 stderr 留下痕迹，不静默。
+  let skills: SkillStore | undefined
+  try {
+    skills = SkillStore.open(process.env.PRTS_SKILLS_DB ?? join(o.dataRoot, 'skills.sqlite'))
+    const chain = skills.verifyChain()
+    if (!chain.ok) {
+      console.error(`[prts] skills chain broken at seq ${chain.brokenAtSeq} — skills disabled for this run`)
+      skills.close()
+      skills = undefined
+    }
+  } catch (error) {
+    console.error(`[prts] skills store unavailable: ${error instanceof Error ? error.message : String(error)}`)
   }
   // 工具结果卸载的存储根：默认与 dataRoot 平级，**不嵌在受保护根里**——
   // 嵌进去会被 `fs.read` 的 protectedRoots 判定拒掉，卸载的内容模型就永远读不回来
@@ -643,6 +661,10 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     ...(reranker === undefined ? {} : { reranker }),
   })
 
+  // V1-09：模型侧只有 propose / list。evaluate / adopt / retire / restore
+  // 一律不注册——技能是能力扩张，采用与否是博士的决策（与账本「只能建 draft」同构）。
+  const skillTools = skills === undefined ? undefined : createSkillTools(tools, { store: skills })
+
   // V1-14 触发（方案 B）：到期时进程在则准点，不在则下次交互补发并如实告知延迟。
   // 挂在 pre-step 而不是定时器上——提醒必须有会话可投递，定时器到点时没有对话，
   // 注入无处可去；而 pre-step 天然覆盖「重启后补发」。
@@ -766,6 +788,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       sessionRecall?.dispose()
       memoryScheduler?.dispose()
       memoryTools?.dispose()
+      skillTools?.dispose()
+      skills?.close()
       intentTools?.dispose()
       intentTrigger?.dispose()
       // 精排器是常驻 Python 子进程，必须显式收掉，否则退出后残留。
