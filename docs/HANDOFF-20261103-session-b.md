@@ -12,7 +12,7 @@
 
 | 项 | 值 | 证据 |
 |---|---|---|
-| HEAD | `a894caf` | `git log --oneline -1` |
+| HEAD | 写本文时 `a894caf`；本文自身提交后为 `486908b`（核对时以 `git log --oneline -1` 为准） | `git log --oneline -1` |
 | 分支 | `main` | — |
 | 工作树 | tracked 干净；未跟踪项只有 `.rivet/scratch` 探针与一个 `nul` | `git status --porcelain` |
 | 全量测试 | **494 pass / 0 fail**，40.1s，exit 0 | `node --disable-warning=ExperimentalWarning --test "test/**/*.test.ts"` |
