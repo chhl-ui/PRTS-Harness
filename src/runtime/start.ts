@@ -6,7 +6,7 @@ import { boot } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import type { Context } from '@deepseek-ai/cordis'
 import { attachErrorReporter } from './error-report.ts'
-import { AppContainerSandboxProvider, PRTS_APPCONTAINER_PROFILE } from '../sandbox/provider.ts'
+import { AppContainerSandboxProvider, appContainerProfileName } from '../sandbox/provider.ts'
 import { ensureWorkspaceWriteOwner, protectSubpathLocal, protectSubpathAppContainer } from '../sandbox/workspace-acl.ts'
 import { deriveAppContainerSid } from '../sandbox/appcontainer.ts'
 import { DEFAULT_READ_ONLY_SUBPATHS } from '../authority/index.ts'
@@ -123,6 +123,11 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 时必须先禁用配置里的 `sandbox` 条目——两者都注册成 ctx.sandbox，会同名冲突。
   // 用开关而不是直接替换，是为了出问题能一行改回去。
   const backend = process.env.PRTS_SANDBOX_BACKEND === 'appcontainer' ? 'appcontainer' : 'local'
+  // AppContainer profile 名只解析一次：ACL 授权的容器 SID 与 provider 实际用的
+  // profile 必须是同一个名字。两处不同步会出现「ACL 授给 A 容器、进程却跑在 B
+  // 容器里」——权限判定静默错位，比并发冲突更严重的形态。
+  // 生产（没有覆盖、没有 NODE_TEST_CONTEXT）解析结果仍是 `PRTS.Sandbox`。
+  const appContainerProfile = appContainerProfileName()
   // local 是默认后端；C:\ 下 workspace 的 shell 故障根因是 WRITE_OWNER（实测：
   // grantWrite 设 Low 标签需要 WO，UAC 未提权下 C:\ 自建目录只有继承 ACL）。
   // 启动时自动授 WO——失败不 throw（shell 不可用是功能降级，不是安全问题），
@@ -148,9 +153,20 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // local 用显式 DENY，appcontainer 用断继承+去写+授 RX（容器 SID 的 DENY
   // 被内核忽略，allow-only 模型）。protect 失败必须 throw：保护不上意味着
   // 模型可以改写 git 历史，fail-closed 拒绝启动。
+  // 规范名（`PRTS.Sandbox`）的容器 SID 一并授只读：profile 名可以跨启动漂移
+  // （显式覆盖、测试上下文按 pid 隔离），旧 ACE 会留在 `.git` 上，而「保护落在
+  // 一个再也不会用到的 SID 上」正是这条修复最容易留下的形态。两个 SID 都**只授
+  // RX、不加任何写允许**，属于收紧而不是放宽；生产下两个名字相同，去重后只调用
+  // 一次，与今天完全一致。派生是 Win32 调用，只在 appcontainer 后端做。
+  // 只授「本次真正会用的那个 profile」的 SID。曾经为迁就按规范名断言的旧测试，
+  // 这里把规范名也一并授了 RX——那会让测试失去「ACL 与 provider 不同源」的检测能力，
+  // 还会在 `.git` 上留下一条没有进程使用的 ACE。正确做法是让测试跟着同源。
+  const aclContainerSids = backend === 'appcontainer'
+    ? [deriveAppContainerSid(appContainerProfile)]
+    : []
   for (const sub of DEFAULT_READ_ONLY_SUBPATHS) {
     if (backend === 'local') await aclOps.protectLocal(o.workspace, sub)
-    else await aclOps.protectAC(o.workspace, sub, deriveAppContainerSid(PRTS_APPCONTAINER_PROFILE))
+    else for (const sid of aclContainerSids) await aclOps.protectAC(o.workspace, sub, sid)
   }
   // 人格（V1-03/04/05/09 的底座）：启动时从 persona 库读当前预设，覆盖 DSH 的
   // personaPrefix。库不存在或没有任何预设时**不动 config**——沿用 config/prts.yml
@@ -210,7 +226,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     } catch { /* 交给 spill 写入时报错 */ }
     if (backend === 'appcontainer') {
       void new AppContainerSandboxProvider(hostCtx, {
-        profile: PRTS_APPCONTAINER_PROFILE,
+        profile: appContainerProfile,
         runnerPath: fileURLToPath(new URL('../sandbox/runner.ts', import.meta.url)),
         // spill 根要给沙箱读权限：不给的话卸载的文件在 shell 里 `Test-Path`
         // 返回 Access is denied（真机实测），卸载了却读不回来。

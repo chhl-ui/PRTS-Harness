@@ -28,6 +28,38 @@ import { confineArgv } from './confine.ts'
 /** AppContainer 沙箱 profile 名：provider、workspace-acl 修法的容器 SID 派生共用此名。 */
 export const PRTS_APPCONTAINER_PROFILE = 'PRTS.Sandbox'
 
+/**
+ * 解析「本次进程该用的 AppContainer profile 名」。
+ *
+ * ## 为什么不能只是一个常量
+ *
+ * `deriveAppContainerSid(name)` 把名字派生成一个 Windows **用户级全局** SID。
+ * 同一台机器上两个进程用同一个 profile 同时创建容器进程就会互踩——实测：并发
+ * 跑两个 `node --test`，其中一个必然报
+ * `CreateProcessW(AppContainer) 失败：C:\Windows\System32\cmd.exe`。生产是单进程，
+ * 不受影响；暴露问题的是并发测试，所以隔离只在测试上下文里开启。
+ *
+ * 解析顺序：
+ * 1. `PRTS_APPCONTAINER_PROFILE_NAME` 非空白 → 用它的 trim 结果（给运维与特殊
+ *    场景留的口子）；空白等于没给，回落下一档，免得「设了个空格就静默换掉
+ *    profile 名」；
+ * 2. 否则 `NODE_TEST_CONTEXT` 非空（`node --test` 子进程里由 runner 设置）→
+ *    `PRTS.Sandbox.Test-<pid>`：每个测试文件是一个独立子进程，pid 天然唯一，
+ *    两个并发 runner 的 pid 必然不同，不需要改造生产行为、也不需要测试手动设
+ *    环境变量；
+ * 3. 否则仍是 `PRTS.Sandbox`——生产默认一字未改。
+ *
+ * 缺省参数读 `process.env`。**ACL 授权与 provider 构造必须调用它取同一个值**，
+ * 否则 ACL 授给 A 容器的 SID、进程却跑在 B 容器里，权限判定会静默错位——比并发
+ * 冲突更严重的形态。
+ */
+export function appContainerProfileName(env: Record<string, string | undefined> = process.env): string {
+  const override = env.PRTS_APPCONTAINER_PROFILE_NAME?.trim()
+  if (override) return override
+  if (env.NODE_TEST_CONTEXT?.trim()) return `${PRTS_APPCONTAINER_PROFILE}.Test-${process.pid}`
+  return PRTS_APPCONTAINER_PROFILE
+}
+
 export interface AppContainerProviderOptions {
   /** AppContainer profile 名。同名复用；建议按部署固定。 */
   profile: string

@@ -19,11 +19,13 @@ import {
   ensureWorkspaceWriteOwner, protectSubpathLocal, protectSubpathAppContainer, readAcl,
   type AclOutcome,
 } from '../../src/sandbox/workspace-acl.ts'
-import { PRTS_APPCONTAINER_PROFILE } from '../../src/sandbox/provider.ts'
+import { appContainerProfileName } from '../../src/sandbox/provider.ts'
 import type { Context } from '@deepseek-ai/cordis'
 
 const USER_SID = execSync('C:/Windows/System32/whoami.exe /user /fo csv /nh', { encoding: 'utf8' }).split(',')[1].replace(/"/g, '').trim()
-const CSID = deriveAppContainerSid(PRTS_APPCONTAINER_PROFILE)
+// 与生产同源：用 appContainerProfileName() 而不是硬编码的规范名。
+// 这样 T3 断言的就是「启动时真正授出去的那个 SID」——两处不同源的形态才抓得住。
+const CSID = deriveAppContainerSid(appContainerProfileName())
 const prtsYml = fileURLToPath(new URL('../../config/prts.yml', import.meta.url))
 const created: string[] = []
 const hex = () => randomBytes(3).toString('hex')
