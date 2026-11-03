@@ -9,6 +9,11 @@ export interface TmpDir {
   cleanup(...closables: { close(): void }[]): void
 }
 
+/** 同步睡眠（cleanup 是同步接口，不能改 async）。 */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
 export function makeTmp(prefix = 'prts-'): TmpDir {
   const dir = mkdtempSync(join(tmpdir(), prefix))
   return {
@@ -20,12 +25,23 @@ export function makeTmp(prefix = 'prts-'): TmpDir {
       for (const c of closables) {
         try { c.close() } catch { /* 已关闭则忽略 */ }
       }
-      // Windows 上被强杀的子进程（runtime.test.ts 的 R4 会 shutdown 一个真实
-      // main.ts）释放文件句柄比父进程的 rmSync 慢。10×50ms=500ms 在库数量增加后
-      // 不够用了——实测 PRTS 打开 core/memory/skills/persona/emotion 五个 sqlite 后，
-      // R4 的清理开始间歇性 EPERM。放到 30×100ms=3s：正常情况第一次就成功，
-      // 只有真泄漏才会耗满，且**仍然会失败**，不掩盖问题。
-      rmSync(dir, { recursive: true, force: true, maxRetries: 30, retryDelay: 100 })
+      // Windows 上被 node:sqlite 打开的库文件不允许删除，而 rmSync 的
+      // maxRetries 只对目录相关错误生效——文件级 EPERM 会 0ms 直接抛出，
+      // 重试参数完全没进去（.rivet 探针实测：rmSync(..., maxRetries:30) 在
+      // 打开的 core.sqlite 上 elapsed=0ms 就 EPERM）。真正需要的是「等它释放」：
+      // R4 失败后的残留目录实测 1s 后可删（3/3 命中均在 1s）。
+      // 所以这里自己做同步重试，100ms 一次、最多 10s；正常情况第一次就成功，
+      // 真泄漏（永久占用）仍会失败，不掩盖问题。
+      const deadline = Date.now() + 10_000
+      for (;;) {
+        try {
+          rmSync(dir, { recursive: true, force: true })
+          return
+        } catch (e) {
+          if (Date.now() >= deadline) throw e
+          sleepSync(100)
+        }
+      }
     },
   }
 }
