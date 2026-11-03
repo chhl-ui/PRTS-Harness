@@ -43,9 +43,11 @@ function outSchema(schema: Record<string, unknown>): Record<string, unknown> {
 export function createIntentTools(tools: ToolRegistry, deps: IntentToolDeps): IntentTools {
   const offs: Array<() => void> = []
   const names: string[] = []
-  const register = (definition: { name: string }): void => {
+  // 签名照 memory-tools.ts:75——`Record<string, unknown>` 而不是 `{ name: string }`：
+  // 字面量传参时窄类型会触发「多余属性」检查，把 description/parameters 判成错误。
+  const register = (definition: Record<string, unknown>): void => {
     offs.push(tools.register(definition))
-    names.push(definition.name)
+    names.push(String(definition.name))
   }
 
   register({
