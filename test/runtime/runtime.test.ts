@@ -155,11 +155,15 @@ test('R4: Supervisor+integrity+真实 main.ts 经认证连上、状态正常、s
         .map(n => ({ name: `src/${n}`, path: `src/${n}` })),
     }
     writeFileSync(join(t.dir, 'spec.json'), JSON.stringify(spec))
+    // timeout 是防御：这是本文件唯一的无超时同步等待。它一旦卡住，整个测试
+    // 进程同步阻塞，连 --test 的 120s timeout 都不会触发（2026-11-03 挂起排查：
+    // 卡在 runtime.test.ts 的子进程存活 112s、日志完全静默——只有同步阻塞会这样）。
+    // 正常路径 <5s，60s 上限不会误杀。
     execFileSync(process.execPath, [
       fileURLToPath(new URL('../../src/cli/prts.ts', import.meta.url)), 'upgrade',
       '--install-root', installRoot, '--manifest', join(t.dir, 'manifest.json'),
       '--db', dbPath, '--spec', join(t.dir, 'spec.json'), '--init', '--yes',
-    ], { stdio: 'pipe' })
+    ], { stdio: 'pipe', timeout: 60_000 })
 
     const mainTs = fileURLToPath(new URL('../../src/runtime/main.ts', import.meta.url))
     const auditPre = AuditLog.open(dbPath); auditPre.close()
@@ -273,7 +277,8 @@ test('R6: credentials resolve 真形——假端点收到 x-api-key/test-key-123
     assert.equal(process.env.DEEPSEEK_API_KEY, undefined, 'key 泄漏进 env')
   } finally {
     srv.close()
-    if (app) await app.dispose()
+    // 与 R5 同一兜底：dispose 挂起不得把测试进程拖成永久等待。
+    if (app) await Promise.race([app.dispose(), new Promise((r) => setTimeout(r, 15000))])
     t.cleanup()
   }
 })
