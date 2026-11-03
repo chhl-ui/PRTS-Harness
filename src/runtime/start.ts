@@ -12,6 +12,7 @@ import { deriveAppContainerSid } from '../sandbox/appcontainer.ts'
 import { DEFAULT_READ_ONLY_SUBPATHS } from '../authority/index.ts'
 import { createStepAllocator, createTaskTools, isLedgerTool } from './task-tools.ts'
 import { createMemoryTools } from './memory-tools.ts'
+import { createIntentTools } from './intent-tools.ts'
 import { attachMemoryInjection } from './memory-inject.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
 import { Authority, classify } from '../authority/index.ts'
@@ -606,6 +607,10 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 非法值（NaN / ≤0 / 非数字）回落到 5，不静默变成 0——0 等于关掉注入。
   const injectLimitRaw = Number(process.env.PRTS_MEMORY_INJECT_LIMIT ?? '5')
   const injectLimit = Number.isFinite(injectLimitRaw) && injectLimitRaw > 0 ? Math.floor(injectLimitRaw) : 5
+  // V1-14 前瞻记忆的模型侧工具：只注册 create / list。取消是所有者动作，
+  // 与记忆的 forget/correct 同一纪律（模型面零破坏性工具）。
+  const intentTools = memory === undefined ? undefined : createIntentTools(tools, { store: memory })
+
   const memoryInjection = memory === undefined ? undefined : attachMemoryInjection(
     ctx as unknown as {
       on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
@@ -675,7 +680,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     /** Authority/Ledger 共用的 core.sqlite 路径——chat 的 forgetFlow 用它在同库记 K4 删除。 */
     dbPath,
     /** 本次实际注册的 prts_task_* / prts_memory_* 工具名（来自注册回执，不是手写常量）。 */
-    toolNames: [...taskTools.names, ...(memoryTools?.names ?? [])],
+    toolNames: [...taskTools.names, ...(memoryTools?.names ?? []), ...(intentTools?.names ?? [])],
     /** 本会话最近一次模型创建的 draft；进程内易失提示，不是账本事实。 */
     draftTaskForSession: (sessionId: string) => taskTools.draftTaskForSession(sessionId),
     /** 后台巩固调度器（未启用时为 undefined）：诊断可读 stats()，测试可 runOnce()。 */
@@ -692,6 +697,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       memoryInjection?.dispose()
       memoryScheduler?.dispose()
       memoryTools?.dispose()
+      intentTools?.dispose()
       // 精排器是常驻 Python 子进程，必须显式收掉，否则退出后残留。
       reranker?.close()
       memory?.close()

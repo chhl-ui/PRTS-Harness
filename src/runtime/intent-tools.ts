@@ -21,6 +21,25 @@ export interface IntentTools {
   dispose(): void
 }
 
+/** 终端渲染：与 task-tools 的 textRender 同形，message 优先、否则整段 JSON。 */
+function renderOut(value: unknown): { type: 'text'; text: string }[] {
+  const v = value as { message?: unknown }
+  return [{ type: 'text', text: typeof v?.message === 'string' ? v.message : JSON.stringify(value) }]
+}
+
+/**
+ * 工具 output 的统一形状。
+ *
+ * `dsh-tools` 的 `register` 会校验 `output.render` 必须是函数：
+ *   `if (typeof output.render !== "function") throw new TypeError(...)`
+ * 只给 schema 会在注册时抛错，而 effect 层会把它咽下去——症状不是启动失败，
+ * 而是 dispose 时 sqlite 句柄不释放（session-purge SP5 清理 EPERM）。
+ * 这条踩过一次，见 `docs/design-intent-memory-v1-14.md` 第八节。
+ */
+function outSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  return { schema, render: (_args: unknown, value: unknown) => renderOut(value) }
+}
+
 export function createIntentTools(tools: ToolRegistry, deps: IntentToolDeps): IntentTools {
   const offs: Array<() => void> = []
   const names: string[] = []
@@ -50,17 +69,15 @@ export function createIntentTools(tools: ToolRegistry, deps: IntentToolDeps): In
       required: ['action', 'fire_at_iso', 'condition_raw'],
       additionalProperties: false,
     },
-    output: {
-      schema: {
-        type: 'object',
-        properties: {
-          message: { type: 'string' },
-          intentId: { type: 'string' },
-          fireAtIso: { type: 'string' },
-        },
-        required: ['message', 'intentId', 'fireAtIso'],
+    output: outSchema({
+      type: 'object',
+      properties: {
+        message: { type: 'string' },
+        intentId: { type: 'string' },
+        fireAtIso: { type: 'string' },
       },
-    } as unknown as Record<string, unknown>,
+      required: ['message', 'intentId', 'fireAtIso'],
+    }),
     execute: async (args: unknown, exec: unknown): Promise<unknown> => {
       const a = (args ?? {}) as Record<string, unknown>
       const action = String(a.action ?? '').trim()
@@ -106,16 +123,14 @@ export function createIntentTools(tools: ToolRegistry, deps: IntentToolDeps): In
       },
       additionalProperties: false,
     },
-    output: {
-      schema: {
-        type: 'object',
-        properties: {
-          count: { type: 'number' },
-          intents: { type: 'array' },
-        },
-        required: ['count', 'intents'],
+    output: outSchema({
+      type: 'object',
+      properties: {
+        count: { type: 'number' },
+        intents: { type: 'array' },
       },
-    } as unknown as Record<string, unknown>,
+      required: ['count', 'intents'],
+    }),
     execute: async (args: unknown): Promise<unknown> => {
       const a = (args ?? {}) as Record<string, unknown>
       const status = a.status === 'fired' || a.status === 'cancelled' ? a.status : 'pending'

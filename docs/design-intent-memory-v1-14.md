@@ -174,30 +174,37 @@ W1–W3 是纯代码，W4 依赖真实使用——和记忆模块一样，最后
 
 ---
 
-## 八、W2 接线阻塞（2026-11-03 实测，未解决）
+## 八、W2 接线踩到的坑：`output.render`（已解决，2026-11-03）
 
-**现象**：把 `createIntentTools` 接进 `startRuntime` 后，`test/memory/session-purge.test.ts`
-的 SP5（端到端：活动会话 busy / dispose 后可删）在 `t.cleanup()` 处报
-`EPERM: Permission denied`，残留 `data/core.sqlite` 与 `data/memory.sqlite` 两个文件。
+**现象**：把 `createIntentTools` 接进 `startRuntime` 后，`session-purge` 的 SP5 在
+`t.cleanup()` 报 `EPERM`，残留 `data/core.sqlite` 与 `data/memory.sqlite`。
 
-**已排除**：
-- 不是 intent 模块特有 —— 在 `createMemoryTools` 里加一个 `prts_dummy_probe` 空工具，
-  同样复现（改 3 行、与 intent 无关）。
-- 不是 dispose 顺序或注销抛错 —— 跳过 `off()` 调用仍复现；把创建位置移到 `memoryTools`
-  之前/之后都复现。
-- 不是清理重试窗口 —— `maxRetries` 从 10×50ms 提到 60×100ms（6 秒）仍失败。
-- 去掉这处接线即恢复 269 pass / 0 fail。
+**根因**（读 `node_modules/@deepseek-ai/dsh-tools/lib/index.js:2974` 得到）：
 
-**结论**：**注册额外工具这一动作**本身会让运行时关闭后 sqlite 句柄不释放，
-是测试基础设施与 DSH 工具注册之间的既有脆弱性，被本波改动暴露出来。
+```js
+register(definition) {
+  const output = definition.output;
+  if (output === void 0 || typeof output !== "object" || typeof output.render !== "function" ...)
+    throw new TypeError(`tool "${name}" must declare output { schema, render, presentationMeta? }`);
+  ...
+  return this.layers.effect(this.ctx, (layer) => layer.tools.insert(name, definition), ...)
+}
+```
 
-**影响**：W2 的工具模块与单测已交付，但**未接线到 `startRuntime`**——
-接上会让仓库变红。W3（调度器）同样需要接线，因此**W3 在此之前无法开始**。
+工具 `output` **必须带 `render` 函数**。只给 `schema` 时 `register` 抛 TypeError，
+而它外面包着 `layers.effect(...)`——异常被 effect 层咽下，**启动不报错**，
+但那个 effect 停在不完整状态，`ctx.fiber.dispose()` 时清理链断掉，
+排在其后的 `memory.close()` / `ledger.close()` / `authority.close()` 不执行，
+两个 sqlite 句柄留到临时目录清理阶段 → EPERM。
 
-**下一步（按成本序）**：
-1. 在 DSH 侧确认 `tools.register` 是否持有与 ctx 生命周期不一致的资源
-   （`dsh-agent` 的 tool registry 实现）；
-2. 若确认是上游行为，考虑在 `dispose` 里延后 `ctx.fiber.dispose()` 之前显式
-   `globalThis.gc?.()` + 等待，或把两个 sqlite 的 `close()` 提到所有工具注销之前；
-3. 兜底：SP5 改为「dispose 后探测 free 成功即算通过，目录清理失败降级为 warn」——
-   但这会掩盖真实泄漏，只在确认无泄漏后才可接受。
+**修法**：`intent-tools.ts` 补 `outSchema(schema)` = `{ schema, render }`，
+与 `task-tools.ts:173` 的 `outSchema` 同形（`message` 优先渲染，否则整段 JSON）。
+修完 SP5 立即 5/5 通过，全量 269 pass。
+
+**这一轮走过弯路的教训**（值得记）：第一版判定为「注册额外工具本身导致 DSH 脆弱」，
+依据是在 `memory-tools` 里加了一个 `prts_dummy_probe` 空工具也复现。但那个 dummy 的
+`output` 同样只有 `schema`、同样缺 `render`——**对照不干净，等于用同一个 bug 复制了一次
+现象**，而不是隔离变量。正确做法是让 dummy 用 `outSchema(...)`（合规定义）再测一次：
+若合规 dummy 不引发失败，就说明问题在定义内容而非注册动作。
+
+后续新增工具一律用 `outSchema`，不要手写 `output`。
