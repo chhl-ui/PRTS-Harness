@@ -16,6 +16,7 @@ import { createIntentTools } from './intent-tools.ts'
 import { attachIntentTrigger } from './intent-trigger.ts'
 import { attachMemoryInjection } from './memory-inject.ts'
 import { ToolLoopGuard } from './tool-loop-guard.ts'
+import { attachToolLoopAudit } from './tool-loop-audit.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { Ledger } from '../ledger/index.ts'
@@ -424,6 +425,10 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 重试同一条命令」是设计文档里自己列出的预测误报模式（design-superagent-fusion.md 七-2）。
   // 停机权留在上层，等有真实误报率数据再说。
   const toolLoopGuard = new ToolLoopGuard()
+  // 疑似循环落审计链：日志会滚掉，而「误报率是多少」是决定要不要把它接进
+  // StopController 的唯一依据（design-superagent-fusion.md 三-①）。复用 Authority
+  // 那条写连接，不另开——同一 DB 多一条写连接只会增加 WAL 写锁竞争。
+  const detachToolLoopAudit = attachToolLoopAudit(toolLoopGuard, authority.auditLog)
   const offToolResult = events?.on('tools/result', ((execution: unknown, result: unknown) => {
     try {
       const exec = execution as {
@@ -739,6 +744,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       offPreExecute()
       offToolExecute()
       offToolResult?.()
+      detachToolLoopAudit()
       offMemoryTurn?.()
       offMemoryAssistantStream?.()
       offMemoryTurnStop?.()

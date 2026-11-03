@@ -13,6 +13,8 @@ export type AuditEvent =
   | { kind: 'grant.issued'; grantId: string; subject: string; capability: Capability; expiresAt: number | null }
   | { kind: 'grant.revoked'; grantId: string; reason: string }
   | { kind: 'tool.denied'; sessionId: string; tool: string; reason: string }
+  /** 工具循环检测：同一会话连续 N 次同工具同参。落链是为了攒误报率样本。 */
+  | { kind: 'tool.loop.suspected'; sessionId: string; tool: string; count: number; fingerprint: string }
   | { kind: 'approval.decided'; sessionId: string; callId: string; tool: string; capabilities: string[]; outcome: 'allowed-once' | 'allowed-always' | 'denied' | 'cancelled' | 'unavailable'; grantId?: string }
   | { kind: 'approval.consumed'; callId: string }
   | { kind: 'stop.requested'; level: 'S0' | 'S1' | 'S2' | 'S3' }

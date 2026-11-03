@@ -105,6 +105,12 @@ function validateEvent(e: AuditEvent): void {
       return
     case 'approval.consumed':
       nonEmpty(e.callId, 'callId'); return
+    case 'tool.loop.suspected':
+      nonEmpty(e.sessionId, 'sessionId')
+      nonEmpty(e.tool, 'tool')
+      num(e.count, 'count')
+      nonEmpty(e.fingerprint, 'fingerprint')
+      return
     case 'stop.requested':
       if (!LEVELS.has(e.level)) raise('INVALID_INPUT', `bad level ${String(e.level)}`); return
     case 'stop.completed':

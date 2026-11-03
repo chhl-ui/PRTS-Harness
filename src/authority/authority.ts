@@ -34,6 +34,14 @@ export class Authority {
   private readonly netAllowHosts: string[]
   private readonly now: () => number
 
+  /**
+   * 审计链句柄，给运行时的非授权类事件用（如工具循环检测的 `tool.loop.suspected`）。
+   *
+   * 暴露而不是让调用方自己 `AuditLog.open` 同一路径：core.sqlite 已经有 Authority
+   * 一条写连接，再开一条只会增加 WAL 写锁竞争，而事故现场恰恰是最不想锁冲突的时刻。
+   */
+  get auditLog(): AuditLog { return this.audit }
+
   private constructor(audit: AuditLog, config: AuthorityConfig, now: () => number) {
     this.audit = audit
     // 与 evalCap 里的 realpathBestEffort 同一规范化域：两侧都取真实路径再比
