@@ -171,3 +171,33 @@ W1–W3 是纯代码，W4 依赖真实使用——和记忆模块一样，最后
 
 按 `AGENTS.md`：确定采用后归档到 `C:\Users\Administrator\Desktop\参考库\`，记录固定 commit，
 归档目录只读、不当依赖 import。
+
+---
+
+## 八、W2 接线阻塞（2026-11-03 实测，未解决）
+
+**现象**：把 `createIntentTools` 接进 `startRuntime` 后，`test/memory/session-purge.test.ts`
+的 SP5（端到端：活动会话 busy / dispose 后可删）在 `t.cleanup()` 处报
+`EPERM: Permission denied`，残留 `data/core.sqlite` 与 `data/memory.sqlite` 两个文件。
+
+**已排除**：
+- 不是 intent 模块特有 —— 在 `createMemoryTools` 里加一个 `prts_dummy_probe` 空工具，
+  同样复现（改 3 行、与 intent 无关）。
+- 不是 dispose 顺序或注销抛错 —— 跳过 `off()` 调用仍复现；把创建位置移到 `memoryTools`
+  之前/之后都复现。
+- 不是清理重试窗口 —— `maxRetries` 从 10×50ms 提到 60×100ms（6 秒）仍失败。
+- 去掉这处接线即恢复 269 pass / 0 fail。
+
+**结论**：**注册额外工具这一动作**本身会让运行时关闭后 sqlite 句柄不释放，
+是测试基础设施与 DSH 工具注册之间的既有脆弱性，被本波改动暴露出来。
+
+**影响**：W2 的工具模块与单测已交付，但**未接线到 `startRuntime`**——
+接上会让仓库变红。W3（调度器）同样需要接线，因此**W3 在此之前无法开始**。
+
+**下一步（按成本序）**：
+1. 在 DSH 侧确认 `tools.register` 是否持有与 ctx 生命周期不一致的资源
+   （`dsh-agent` 的 tool registry 实现）；
+2. 若确认是上游行为，考虑在 `dispose` 里延后 `ctx.fiber.dispose()` 之前显式
+   `globalThis.gc?.()` + 等待，或把两个 sqlite 的 `close()` 提到所有工具注销之前；
+3. 兜底：SP5 改为「dispose 后探测 free 成功即算通过，目录清理失败降级为 warn」——
+   但这会掩盖真实泄漏，只在确认无泄漏后才可接受。
