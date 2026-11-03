@@ -24,6 +24,14 @@ export interface AuthorityConfig {
    * 只影响 `fs.write` / `fs.delete`；读取不受限。缺省 `['.git']`，传 `[]` 关闭。
    */
   readOnlySubpaths?: string[]
+  /**
+   * 联网白名单：命中即 allow，不再逐次审批。
+   *
+   * 支持精确 host（`api.deepseek.com`）与子域通配（`*.githubusercontent.com`，
+   * 匹配任意级子域但**不匹配裸域**）。空/缺省 = 所有联网动作都要人点头（改动前行为）。
+   * 只影响 `net` 能力，对 fs / exec 无影响。
+   */
+  netAllowHosts?: string[]
 }
 
 export interface ToolCall {

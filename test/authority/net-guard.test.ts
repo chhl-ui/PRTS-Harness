@@ -62,3 +62,42 @@ test('K4 net 与 fs 混合能力时，任一被拒即整体拒绝（不因多能
     assert.equal(typeof d, 'string', '受保护路径被拒时，即使 net 也没法把整次调用带过去')
   } finally { a.close(); t.cleanup() }
 })
+
+// ---- 白名单：把「每次都问」换成「常用域名一次配置」----
+
+const callNet = (host: string) => ({ sessionId: 's1', callId: 'c1', tool: 'fetch', capabilities: [cap.net(host)] })
+
+test('K5 白名单内的 host 直接 allow，不再逐次打断', () => {
+  const t = makeTmp('prts-k2b-')
+  const a = Authority.open(t.db(), {
+    workspaceRoots: [t.dir], protectedRoots: [],
+    netAllowHosts: ['api.deepseek.com', '*.githubusercontent.com'],
+  })
+  try {
+    assert.equal(a.decide(callNet('api.deepseek.com')).kind, 'allow', '白名单精确命中')
+    assert.equal(a.decide(callNet('raw.githubusercontent.com')).kind, 'allow', '通配符匹配子域')
+    assert.equal(a.decide(callNet('a.b.githubusercontent.com')).kind, 'allow', '通配符匹配多级子域')
+  } finally { a.close(); t.cleanup() }
+})
+
+test('K6 白名单外仍然 ask；通配符不能越界匹配', () => {
+  const t = makeTmp('prts-k2b-')
+  const a = Authority.open(t.db(), {
+    workspaceRoots: [t.dir], protectedRoots: [],
+    netAllowHosts: ['*.githubusercontent.com'],
+  })
+  try {
+    assert.equal(a.decide(callNet('example.com')).kind, 'ask', '白名单外必须问人')
+    assert.equal(a.decide(callNet('githubusercontent.com')).kind, 'ask', '裸域不等于 *.子域')
+    assert.equal(a.decide(callNet('evilgithubusercontent.com')).kind, 'ask', '后缀不能被子串蒙混')
+    assert.equal(a.decide(callNet('*')).kind, 'ask', '未知 host 仍走 ask')
+  } finally { a.close(); t.cleanup() }
+})
+
+test('K7 未配置白名单时行为与改动前一致（空数组 = 全部 ask）', () => {
+  const t = makeTmp('prts-k2b-')
+  const a = Authority.open(t.db(), { workspaceRoots: [t.dir], protectedRoots: [] })
+  try {
+    assert.equal(a.decide(callNet('api.deepseek.com')).kind, 'ask')
+  } finally { a.close(); t.cleanup() }
+})

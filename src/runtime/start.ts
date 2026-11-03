@@ -231,11 +231,20 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 嵌进去会被 `fs.read` 的 protectedRoots 判定拒掉，卸载的内容模型就永远读不回来
   // （见 docs/design-tool-output-spill.md §5.1 与议事会指出的 v1 硬伤）。
   const spillRoot = resolveSpillRoot(o.dataRoot)
+  // 联网白名单：`PRTS_NET_ALLOW=api.deepseek.com,*.githubusercontent.com`。
+  // 不配 = 所有联网动作都要人点头（与改动前一致）。支持 *.host 通配子域。
+  const netAllowHosts = (process.env.PRTS_NET_ALLOW ?? '')
+    .split(',').map((h) => h.trim()).filter((h) => h !== '')
+
   const authority = Authority.open(dbPath, {
     workspaceRoots: [o.workspace],
     protectedRoots: [o.dataRoot],
     spillRoots: [spillRoot],
+    ...(netAllowHosts.length === 0 ? {} : { netAllowHosts }),
   })
+  if (netAllowHosts.length > 0) {
+    console.error(`[prts] net 白名单已启用（${netAllowHosts.length} 项）：这些域名下的联网动作不再逐次审批`)
+  }
 
   const tools = ctx.get('tools') as
     | {

@@ -30,6 +30,8 @@ export class Authority {
   private readonly protectedRoots: string[]
   private readonly spillRoots: string[]
   private readonly readOnlySubpaths: string[]
+  /** 联网白名单（host 或 *.host），见 hostAllowed。 */
+  private readonly netAllowHosts: string[]
   private readonly now: () => number
 
   private constructor(audit: AuditLog, config: AuthorityConfig, now: () => number) {
@@ -40,7 +42,30 @@ export class Authority {
     this.spillRoots = (config.spillRoots ?? []).map(realpathBestEffort)
     // 只读子路径是相对名（如 '.git'），不做 realpath——它由 workspace 根现拼。
     this.readOnlySubpaths = config.readOnlySubpaths ?? [...DEFAULT_READ_ONLY_SUBPATHS]
+    // 联网白名单：把「每次调用都问人」换成「常用域名一次配置」。
+    // 只对 host 做小写归一，不做 URL 解析——白名单项本身就是 host 或 *.host 形式。
+    this.netAllowHosts = (config.netAllowHosts ?? []).map((h) => h.trim().toLowerCase()).filter((h) => h !== '')
     this.now = now
+  }
+
+  /**
+   * host 是否命中白名单。规则刻意写得窄：
+   * - 精确项：必须完全相等
+   * - `*.example.com`：匹配任意级子域，但**不匹配裸域**（裸域要单独列）
+   * - 不做后缀包含判断——`evilgithubusercontent.com` 不该被子串蒙混过关
+   */
+  private hostAllowed(host: string): boolean {
+    const h = host.trim().toLowerCase()
+    if (h === '' || h === '*') return false
+    for (const rule of this.netAllowHosts) {
+      if (rule.startsWith('*.')) {
+        const suffix = rule.slice(1) // '.example.com'
+        if (h.endsWith(suffix) && h.length > suffix.length) return true
+        continue
+      }
+      if (h === rule) return true
+    }
+    return false
   }
 
   /**
@@ -150,7 +175,14 @@ export class Authority {
       }
       case 'system':
         return { kind: 'ask', reason: `system:${p.arg} requires per-call approval` }
-      case 'net':
+      case 'net': {
+        // 白名单优先于 grant：常用域名不该每次弹审批。
+        // 白名单为空时行为与改动前完全一致（全部 ask）。
+        if (this.hostAllowed(p.arg)) return { kind: 'allow', via: 'policy' }
+        const g = grants.find((g) => g.capability === c)
+        if (g) return { kind: 'allow', via: 'grant', grantId: g.grantId }
+        return { kind: 'ask', reason: `no active grant for ${c}` }
+      }
       case 'exec':
       case 'tool': {
         const g = grants.find((g) => g.capability === c)
