@@ -112,7 +112,52 @@ S1 与 S2 不依赖任何未决设计，可以先做。S3 是②的前置——*
 
 **未验证的取舍**：记忆注入现在用 `role:'user'`，header 明写「不是用户本轮发言」，靠角色语义帮模型区分历史与本轮（`memory-inject.ts:120-122`）。迁到 system prompt 的 section/context 会丢掉这个区分，模型行为变化未测。**在 A/B 结果出来前不做迁移。**
 
-## 六、与验收的关系
+## 六、架构图的进度着色（2026-11-03）
+
+底色 = 实现进度，节点文字 = 现状要点。图本身取自架构需求 §5.2 的那张。
+
+```mermaid
+flowchart TB
+  P["感知<br/>对话 / 工具 / 时间 / 文件变化<br/>对话✅ 工具仅进账本⚠️ 时间与文件变化❌"]:::half
+  E["事件日志（只追加，不可变）<br/>ledger / audit / memory 三条独立链"]:::half
+  EP["情景记忆 mem_turns<br/>FTS + 向量"]:::done
+  LK["关联图 mem_links / mem_entities"]:::done
+  SF["语义事实 mem_facts（双时间）"]:::done
+  SK["技能 / 经验<br/>src 零命中"]:::miss
+  INT["意图库 mem_intents<br/>V1-14 W1–W3"]:::done
+  TOP["主题目录 mem_topics<br/>有数据，未接上下文"]:::half
+  WS["工作区（每轮渲染，有预算）<br/>只有 memory-inject，无装配器<br/>预算 ③ 与清单 ⑧ 均缺"]:::miss
+  M["模型"]:::done
+  REC["主动回忆工具 prts_memory_recall"]:::done
+  SUB["开子任务上下文<br/>机制已实测，无工具"]:::half
+
+  P --> E
+  E -->|实时写入| EP
+  E -->|空闲巩固| SF
+  EP <--> LK
+  LK <--> SF
+  SF --> SK
+  INT -.-> WS
+  TOP -.-> WS
+  EP --> WS
+  WS --> M
+  M -.-> REC
+  M -.-> SUB
+
+  classDef done fill:#d1f0d9,stroke:#1f7a3d,color:#0b3d1f
+  classDef half fill:#fdecc8,stroke:#a9761b,color:#4a3208
+  classDef miss fill:#f7d3d6,stroke:#a32531,color:#4a0f14
+```
+
+**读图**：下半（记忆存储与巩固）建成；右上（意图 / 主题）建了一半；**中间那层工作区是空的**，而它是图上所有箭头汇聚的地方。V1-18（宿主装配 vs 模型自管）做不了对比，正是因为要对比的两样里只有一样存在。
+
+三处结构性差异值得单独记：
+
+1. **图上的「事件日志」是一个框，实现是三条互不相干的链**（`ledger_events` / `audit_events` / `memory_events`）。不是缺陷——各链的不变量不同——但跨域联查（「这条记忆从哪个任务产生」）没有单一入口。
+2. **扩散激活默认关闭**（`spreadHops` 默认 0）：能力在，不用。依据是 roadmap 的实测结论——它是唯一「凭空增加候选」的路，放大噪声风险最高。
+3. **工具说明没有「按需」**：22 个工具 schema 全量常驻，与图上「工具说明（按需）」不同。
+
+## 七、与验收的关系
 
 - **V1-16**（装配 P95 ≤ 1s、后台巩固不阻塞、费用分开计量）依赖 S1 + S2 存在，否则无法测「装配」。
 - **V1-18**（宿主装配 vs 模型自管对比）依赖 S1 + S2 + ②的通道选型。
