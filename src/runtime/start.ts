@@ -28,6 +28,7 @@ import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from '
 import { Authority, classify } from '../authority/index.ts'
 import { openProactiveStore, type ProactiveStore } from '../proactive/index.ts'
 import { openReminderStore, type ReminderStore } from '../reminders/index.ts'
+import { openCostStore, priceFromEnv, priceOf, type CostStore } from '../cost/index.ts'
 import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
@@ -338,6 +339,15 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     reminders = openReminderStore(process.env.PRTS_REMINDER_DB ?? join(o.dataRoot, 'reminders.sqlite'))
   } catch (error) {
     console.error(`[prts] reminder store unavailable: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  // V1-16 费用计量：独立库，只记录不阻断（模型 vs 巩固分开计）。
+  // 单价从 `PRTS_PRICE_*_PER_M` 读，未配置时只记 token、金额记 0（不编造）。
+  let cost: CostStore | undefined
+  try {
+    cost = openCostStore(process.env.PRTS_COST_DB ?? join(o.dataRoot, 'cost.sqlite'))
+  } catch (error) {
+    console.error(`[prts] cost store unavailable: ${error instanceof Error ? error.message : String(error)}`)
   }
   // 工具结果卸载的存储根：默认与 dataRoot 平级，**不嵌在受保护根里**——
   // 嵌进去会被 `fs.read` 的 protectedRoots 判定拒掉，卸载的内容模型就永远读不回来
@@ -671,6 +681,41 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     }
   }) as never)
 
+  // V1-16 费用计量：模型调用的 usage 来自 `agent/assistant-stream` 的 usage chunk
+  // （`dsh-llm` 的 StreamChunk 变体，带 input/output/cache 四路 token）。
+  // 独立订阅而不是并进上面的 text-delta 处理：记账失败不该拖累记忆落盘，反之亦然。
+  const costPrice = priceFromEnv()
+  const offCostUsage = cost === undefined ? undefined : events?.on('agent/assistant-stream', ((payload: unknown) => {
+    try {
+      const p = payload as {
+        frame?: {
+          type?: string
+          chunk?: {
+            type?: string
+            usage?: {
+              inputTokens?: number
+              outputTokens?: number
+              cacheReadTokens?: number
+              cacheWriteTokens?: number
+            }
+          }
+        }
+      }
+      const chunk = p.frame?.chunk
+      if (p.frame?.type !== 'chunk' || chunk?.type !== 'usage' || chunk.usage === undefined) return
+      const u = chunk.usage
+      const usage = {
+        inputTokens: u.inputTokens ?? 0,
+        outputTokens: u.outputTokens ?? 0,
+        ...(u.cacheReadTokens === undefined ? {} : { cacheReadTokens: u.cacheReadTokens }),
+        ...(u.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: u.cacheWriteTokens }),
+      }
+      cost?.record({ kind: 'model', ...usage, usd: priceOf(usage, costPrice) })
+    } catch (error) {
+      console.error(`[prts] cost usage record failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }) as never)
+
   // W4b/D2：模型侧账本工具集。清单严格来自 MODEL_OPS（ledger.ts:122-125），
   // 固定 actor 通道（activate/cancel/setBudget/resumeFromStop/verify/ownerAccept/
   // ownerReject）不注册为工具。实现与路径域收敛见 src/runtime/task-tools.ts 头部。
@@ -941,6 +986,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       offMemoryTurn?.()
       offMemoryAssistantStream?.()
       offMemoryTurnStop?.()
+      offCostUsage?.()
+      cost?.close()
       memoryInjection?.dispose()
       sessionRecall?.dispose()
       proactiveRecall?.dispose()
