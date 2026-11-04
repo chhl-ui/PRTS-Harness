@@ -88,6 +88,12 @@ export interface PendingApproval {
 /** E3 审批桥：answerer 按 callId 取走 pre-execute 暂存的 capabilities。取走即删。 */
 export interface ApprovalBridge {
   take(callId: string): PendingApproval | undefined
+  /**
+   * 会话切换：丢弃属于该会话的待审批请求，返回丢弃条数。
+   * 切走后这些请求若仍留在桥里，会被**新会话的输入流**应答（终端是同一个），
+   * 等于把旧会话的越界动作记到错误的上下文里。其他会话的 pending 不受影响。
+   */
+  dropSession(sessionId: string): number
 }
 
 const createAppReady = () => {
@@ -429,6 +435,16 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       const p = pendingApprovals.get(callId)
       if (p !== undefined) pendingApprovals.delete(callId)
       return p
+    },
+    dropSession(sessionId) {
+      let dropped = 0
+      for (const [callId, p] of pendingApprovals) {
+        if (p.sessionId === sessionId) {
+          pendingApprovals.delete(callId)
+          dropped += 1
+        }
+      }
+      return dropped
     },
   }
   const offPreExecute = (ctx as unknown as {

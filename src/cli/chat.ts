@@ -492,16 +492,20 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
   const ctx = deps.ctx as any
   const agents = ctx.get('agents') as {
     create(o: unknown): Promise<{ agent: { status: string; followup(m: unknown): void } }>
+    /** `/switch` 用：返回 bare Agent（不可 dispose，见 dsh-agent/lib/types/index.d.ts:138）。 */
+    get?(id: string): { status: string; followup(m: unknown): void } | undefined
   }
   const events = ctx.events as { on(name: string, fn: (e: unknown) => void): () => void } | undefined
   // agent/error 已由 startRuntime 挂的 error-report 写 stderr，不重复订阅。
 
-  const sessionId = deps.sessionId ?? `prts-chat-${Date.now()}`
-  const { agent } = await agents.create({
+  let sessionId = deps.sessionId ?? `prts-chat-${Date.now()}`
+  // `/switch` 会替换目标：agent 与 sessionId 都必须是可重新赋值的绑定。
+  const { agent: createdAgent } = await agents.create({
     sessionId,
     meta: { cwd: deps.cwd },
     agentOptions: { provider: 'deepseek-official', model: 'deepseek-chat' },
   })
+  let agent = createdAgent
 
   /*
    * 会话身份：主会话必须在跑到第一个模型回合之前就注册好。
@@ -672,6 +676,49 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
         } else {
           for (const r of rows) deps.out(renderSessionLine(r) + '\n')
         }
+        deps.onIdle?.()
+        continue
+      }
+      // ---- Wave 3 第二步：会话切换（设计 docs/design-switch-session.md）----
+      // 只切到**已存在**的 live 会话；恢复历史会话是 resume，不走这条命令。
+      if (line === '/switch' || line.startsWith('/switch ')) {
+        const target = line.slice('/switch'.length).trim()
+        if (target === '') {
+          deps.out('[prts] 用法：/switch <sessionId>（/sessions 查看可用会话）\n')
+          deps.onIdle?.()
+          continue
+        }
+        if (target === sessionId) {
+          deps.out(`[prts] 已经在这个会话（${target}）\n`)
+          deps.onIdle?.()
+          continue
+        }
+        const next = agents.get?.(target)
+        if (next === undefined) {
+          deps.out(`[prts] 没有活跃会话 ${target}；/sessions 查看可用会话\n`)
+          deps.onIdle?.()
+          continue
+        }
+        // 先补身份再改状态：注册失败时保持原会话，不留下「已切换但无身份」的半截状态。
+        if (deps.authority !== undefined && !deps.authority.hasSessionScope(target)) {
+          try {
+            deps.authority.registerPrimarySession(target)
+          } catch (error) {
+            deps.out(`[prts] 会话身份注册失败，未切换：${error instanceof Error ? error.message : String(error)}\n`)
+            deps.onIdle?.()
+            continue
+          }
+        }
+        // 旧会话的待审批请求必须丢弃：终端是同一个，切走后读到的 [y/N] 会应答错会话。
+        deps.approvalBridge?.dropSession(sessionId)
+        agent = next
+        sessionId = target
+        // 上一条回复的中间态与旧日志 seq 都属于旧会话，不能带进新会话。
+        streamed = ''
+        attemptText = ''
+        attemptId = undefined
+        seenSeq = 0
+        deps.out(`[prts] 已切到 ${target}\n`)
         deps.onIdle?.()
         continue
       }

@@ -1,6 +1,17 @@
 # 会话切换（`/switch`）设计
 
-2026-11-04。**状态：设计稿，待实现。** 对应 Wave 3 第二步。
+2026-11-04。**状态：已实现（2026-11-05，`/switch`，`src/cli/chat.ts`）。** 对应 Wave 3 第二步。
+
+实现前核实的三条前提（2026-11-05）：
+
+1. `agents.get(id)` 返回的 bare `Agent` 可直接 `followup`——`AgentRegistry.get` 返回
+   `store.get(id)?.agent`（`dsh-agent/lib/index.js:596-598`），与 `create` 放进 store 的是同一对象；
+   Agent 接口含 `followup(message: UserMessage)`（`dsh-agent/lib/types/runtime-types.d.ts:192`）。
+2. 不 dispose 旧 agent——与现状一致（`runChat` 本就丢弃 `create` 的 dispose 句柄）；
+   代价是旧 agent 常驻内存，未做压力评估（照旧）。
+3. pending 清理钩子原先**不存在**：`ApprovalBridge` 只有 `take`。本次新增
+   `dropSession(sessionId)`（`src/runtime/start.ts`），切换时丢弃旧会话的待审批请求，
+   其他会话的 pending 不受影响。
 
 ## 一、为什么不能「只换个 agent 变量」
 
@@ -49,8 +60,8 @@
 - **不做多客户端并发**（`terminal-server.ts` 的单客户端约束不变）。
 - **不做历史会话恢复**（`agents.resume` 是另一条路，需要会话重放语义）。
 
-## 六、待验证
+## 六、前提核实（2026-11-05，已结）
 
-1. `agents.get(id)` 返回的 bare `Agent` 是否可直接 `followup`——类型上可以（`AgentRegistry.get` 返回 `Agent | undefined`），**运行时未实测**。
-2. 切换后旧 agent 是否应 `dispose`——本设计**不 dispose**（用户可能切回去）；代价是旧 agent 常驻内存，未做压力评估。
-3. pending 审批的清理钩子是否存在——`approvalBridge` 的公开面需要核实（`start.ts` 的 `PendingApproval` 是内部 Map）。
+1. `agents.get(id)` 返回的 bare `Agent` 可直接 `followup`（证据见开头 1）；真实 DSH agent 上未做端到端实测，验收测试用 fake agents 覆盖。
+2. 旧 agent **不 dispose**（用户可能切回去）；代价是旧 agent 常驻内存，未做压力评估。
+3. 清理钩子原先不存在，已新增 `ApprovalBridge.dropSession(sessionId)`（见开头 3）。
