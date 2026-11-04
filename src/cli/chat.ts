@@ -510,12 +510,17 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
   // agent/error 已由 startRuntime 挂的 error-report 写 stderr，不重复订阅。
 
   let sessionId = deps.sessionId ?? `prts-chat-${Date.now()}`
+  // 续接（重连或显式复用同一 sessionId）：已有 live agent 时直接接管，不重复 create——
+  // 同一 sessionId 再 create 会与 registry 里的旧条目冲突，新 agent 也接不上原会话上下文。
+  const existing = agents.get?.(sessionId)
   // `/switch` 会替换目标：agent 与 sessionId 都必须是可重新赋值的绑定。
-  const { agent: createdAgent } = await agents.create({
-    sessionId,
-    meta: { cwd: deps.cwd },
-    agentOptions: { provider: 'deepseek-official', model: 'deepseek-chat' },
-  })
+  const { agent: createdAgent } = existing === undefined
+    ? await agents.create({
+      sessionId,
+      meta: { cwd: deps.cwd },
+      agentOptions: { provider: 'deepseek-official', model: 'deepseek-chat' },
+    })
+    : { agent: existing }
   let agent = createdAgent
 
   /*
@@ -525,7 +530,11 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
    * 在没有身份记录的前提下照常对话，失败被藏到最后才暴露。
    */
   try {
-    deps.authority?.registerPrimarySession(sessionId)
+    // 未注册才注册：重复注册会往审计链写重复的 session.registered 事件
+    //（投影是幂等 upsert，事件不是）。重连续接同一会话时走的就是这条。
+    if (deps.authority !== undefined && !deps.authority.hasSessionScope(sessionId)) {
+      deps.authority.registerPrimarySession(sessionId)
+    }
   } catch (error) {
     deps.out(`[prts] 会话身份注册失败：${error instanceof Error ? error.message : String(error)}\n`)
     return { turns: 0, replies: [] }
@@ -539,7 +548,9 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
   /** 当前 attempt 累积到的完整文本；换 attempt 即重置（重试会从头重发 delta）。 */
   let attemptText = ''
   let attemptId: AssistantStreamFrame['attemptId'] | undefined
-  let seenSeq = 0
+  // 续接已有会话时，日志里已有历史 assistant 消息；seenSeq 必须从当前最大 seq 起，
+  // 否则重连后的第一轮会把旧回复当成新回复再打一遍。
+  let seenSeq = existing === undefined ? 0 : assistantAfterSeq(deps.dataRoot, sessionId, 0).seq
   // 增量直写终端：文本按 delta 到达即 out，不等回合收敛。
   // 已知限制：重试会起新 attempt 从头重发 delta，而已写入的终端内容撤不回来，
   // 此时终端上可能看到重复片段——本轮不做终端回滚。

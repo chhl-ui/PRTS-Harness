@@ -67,34 +67,47 @@ const app = await startRuntime({
   credentials,
 })
 
+// 服务端会话 id 固定：重连沿用同一个会话与 agent，而不是每次连上都开新会话。
+const serveSessionId = process.env.PRTS_SESSION_ID ?? `prts-serve-${process.pid}`
+// 进程信号才整体退出；客户端断开不是退出理由（客户端寿命与运行时寿命解耦）。
+process.on('SIGINT', () => term.close())
+process.on('SIGTERM', () => term.close())
+
 try {
   const hint = describeOpenTasks(app.ledger)
   if (hint !== '') term.pushHostOutput(hint + '\n')
-  term.pushHostOutput('prts — 已连接。输入消息开始对话；/exit 结束服务端。\n')
 
-  const result = await runChat({
-    ctx: app.ctx,
-    lines: term.lines,
-    out: (text) => term.pushHostOutput(text),
-    cwd: workspace,
-    dataRoot,
-    ledger: app.ledger,
-    authority: app.authority,
-    approvalBridge: app.approvalBridge,
-    draftTaskForSession: app.draftTaskForSession,
-    // Wave 3 分派器：/dispatch 用。worker 与主会话同一 provider/model（与
-    // start.ts 的 createSubtaskTool 取法一致），派生目录落在 workspace 下。
-    dispatch: {
-      workspace,
-      provider: 'deepseek-official',
-      model: 'deepseek-chat',
-    },
-    // 模型文本：与 out 互斥（A1 在 chat.ts 里做的分流），不会同时走两条。
-    onAssistantDelta: (text) => term.pushModelDelta(text),
-    approvalChannel: { ask: (info) => term.requestApproval(info) },
-    onTurnEnd: (info) => term.pushTurnEnd(info.text ?? ''),
-  })
-  console.error(`prts chat:serve — 会话结束，共 ${result.turns} 轮`)
+  for (;;) {
+    const lines = await term.accept()
+    if (lines === undefined) break
+    term.pushHostOutput('prts — 已连接。输入消息开始对话；/exit 断开连接（服务端继续运行）。\n')
+    const result = await runChat({
+      ctx: app.ctx,
+      lines,
+      out: (text) => term.pushHostOutput(text),
+      cwd: workspace,
+      dataRoot,
+      sessionId: serveSessionId,
+      ledger: app.ledger,
+      authority: app.authority,
+      approvalBridge: app.approvalBridge,
+      draftTaskForSession: app.draftTaskForSession,
+      // Wave 3 分派器：/dispatch 用。worker 与主会话同一 provider/model（与
+      // start.ts 的 createSubtaskTool 取法一致），派生目录落在 workspace 下。
+      dispatch: {
+        workspace,
+        provider: 'deepseek-official',
+        model: 'deepseek-chat',
+      },
+      // 模型文本：与 out 互斥（A1 在 chat.ts 里做的分流），不会同时走两条。
+      onAssistantDelta: (text) => term.pushModelDelta(text),
+      approvalChannel: { ask: (info) => term.requestApproval(info) },
+      onTurnEnd: (info) => term.pushTurnEnd(info.text ?? ''),
+    })
+    console.error(`prts chat:serve — 本代会话结束，共 ${result.turns} 轮；等待下一个客户端`)
+    // `/exit` 或客户端断开都只结束本代：断开当前连接（幂等），回到 accept。
+    term.endSession()
+  }
 } finally {
   // 3) 退出顺序与启动相反：先撤端点，再关管道。
   try { rmSync(endpointPath, { force: true }) } catch { /* 已被删 */ }

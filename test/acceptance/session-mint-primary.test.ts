@@ -101,6 +101,7 @@ test('主会话注册②：注册抛错时 fail-closed——报错并退出，�
       sessionId: 'main-mint-2',
       // 只读库的真实形态在这里用替身模拟：注册必定抛 READ_ONLY。
       authority: {
+        hasSessionScope(): boolean { return false },
         registerPrimarySession(): void {
           throw new Error('READ_ONLY')
         },

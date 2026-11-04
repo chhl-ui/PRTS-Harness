@@ -157,10 +157,16 @@ W2 做完 Router 的第一步就只剩「注册表 + 入口命令」。
   `get`（`:343`）、`list`（`:357`）、`AgentHandle.dispose`（`:145`）。
   生产调用点是 `src/cli/chat.ts:499`。
 
-**真正的缺口不是「谁管」，是「寿命绑在客户端上」**：`src/cli/chat-serve.ts:94-95` 在
+**寿命绑在客户端上的缺口（2026-11-05 已解）**：改造前 `src/cli/chat-serve.ts` 在
 `runChat` 返回后 `finally` 里 `term.close()` + `await app.dispose()`——终端断开 → 运行时销毁。
-Router 要常驻，必须解耦「运行时寿命」与「客户端连接寿命」（服务端进程常驻，客户端可断可连）。
-改动落在入口层，不在 `Supervisor`。
+现已解耦：`terminal-server.ts` 引入会话代际（`accept()` / `endSession()`，断开只结束本代；
+`close()` 才是终局），`chat-serve.ts` 改成 accept 循环 + 固定 `serveSessionId` +
+信号（SIGINT/SIGTERM）关闭，`chat.ts` 的 `runChat` 优先复用 `agents.get(sessionId)`
+（未注册才注册；续接时 `seenSeq` 对齐日志最大 seq，历史回复不重打）。
+验证：`test/runtime/terminal-reconnect.test.ts`（协议层 5 条）、
+`test/cli/resume-session.test.ts`（复用/注册/seenSeq 3 条）、
+`test/runtime/terminal-pipe.test.ts` ⑧（端到端重连、agent 复用）。
+改动落在入口层，不在 `Supervisor`——这条结论不变。
 
 **Q2 会话状态存哪？** 沿用 DSH session 库，不另建：
 
@@ -239,7 +245,8 @@ warm 日志符合预期。五分钟，不算使用，算体检。
 测试 `test/runtime/spawn-subtask.test.ts`）；R 的会话表、`/sessions`、`/switch`、分派器已完成
 （`src/runtime/session-table.ts`、`src/runtime/dispatcher.ts`、`src/cli/chat.ts` 的 `/dispatch`，
 测试 `test/runtime/dispatcher.test.ts` / `test/cli/dispatch-command.test.ts`）。
-**仍未做**：客户端寿命与运行时寿命解耦（`chat-serve.ts:94-95`）——常驻 Router 的前置。
+**已解**：客户端寿命与运行时寿命解耦（2026-11-05，见第四节 Q1 末段）——常驻 Router
+现在只剩「多入口并发 + Router 自身上下文预算」这些需要真实负载才能验收的部分（第二步）。
 
 ## 七、预测的失败模式（先写下来，复查时对照）
 

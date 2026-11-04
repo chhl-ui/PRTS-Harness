@@ -56,20 +56,26 @@ async function rig(dataRoot: string, ws: string, script: ScriptedStep[]): Promis
   const hint = describeOpenTasks(app.ledger)
   if (hint !== '') term.pushHostOutput(hint + '\n')
 
-  const done = runChat({
-    ctx: app.ctx,
-    lines: term.lines,
-    out: (text) => term.pushHostOutput(text),
-    cwd: ws,
-    dataRoot,
-    ledger: app.ledger,
-    authority: app.authority,
-    approvalBridge: app.approvalBridge,
-    draftTaskForSession: app.draftTaskForSession,
-    onAssistantDelta: (text) => term.pushModelDelta(text),
-    approvalChannel: { ask: (info) => term.requestApproval(info) },
-    onTurnEnd: (info) => term.pushTurnEnd(info.text ?? ''),
-  })
+  // 与改造后的 chat-serve 同构：先 accept 再跑 runChat（服务端等客户端，而不是先建流）。
+  const done = (async () => {
+    const lines = await term.accept()
+    if (lines === undefined) return { turns: 0, replies: [] as string[] }
+    return runChat({
+      ctx: app.ctx,
+      lines,
+      out: (text) => term.pushHostOutput(text),
+      cwd: ws,
+      dataRoot,
+      sessionId: 'pipe-test-session',
+      ledger: app.ledger,
+      authority: app.authority,
+      approvalBridge: app.approvalBridge,
+      draftTaskForSession: app.draftTaskForSession,
+      onAssistantDelta: (text) => term.pushModelDelta(text),
+      approvalChannel: { ask: (info) => term.requestApproval(info) },
+      onTurnEnd: (info) => term.pushTurnEnd(info.text ?? ''),
+    })
+  })()
 
   return {
     pipeName,
@@ -284,6 +290,92 @@ test('② 真实链路：模型调工作区外 write → pre-execute ask → 管
   } finally {
     c.end()
     await r.close()
+    t.cleanup()
+  }
+})
+
+test('⑧ 断开重连：同一 runtime 下第二个客户端继续对话，agent 复用', { timeout: 180000 }, async () => {
+  const t = makeTmp('pipe-reconnect-')
+  const dataRoot = join(t.dir, 'data')
+  const ws = join(t.dir, 'ws')
+  mkdirSync(dataRoot, { recursive: true })
+  mkdirSync(ws, { recursive: true })
+  const pipeName = ownerTermPipeName()
+  const term = createTerminalServer(pipeName)
+  const app = await startRuntime({
+    configPath: prtsYml,
+    dataRoot,
+    workspace: ws,
+    mode: 'normal',
+    patches: PATCHES,
+  })
+  scriptedLlmPlugin([{ text: '第一轮回复' }, { text: '第二轮回复' }]).apply(app.ctx as Context)
+
+  // 与 chat-serve 的 accept 循环同构：断开只结束本代，回到 accept 等下一个客户端。
+  const serve = (async (): Promise<number> => {
+    let turns = 0
+    for (;;) {
+      const lines = await term.accept()
+      if (lines === undefined) return turns
+      const r = await runChat({
+        ctx: app.ctx,
+        lines,
+        out: (text) => term.pushHostOutput(text),
+        cwd: ws,
+        dataRoot,
+        sessionId: 'e2e-reconnect',
+        ledger: app.ledger,
+        authority: app.authority,
+        approvalBridge: app.approvalBridge,
+        draftTaskForSession: app.draftTaskForSession,
+        onAssistantDelta: (text) => term.pushModelDelta(text),
+        approvalChannel: { ask: (info) => term.requestApproval(info) },
+        onTurnEnd: (info) => term.pushTurnEnd(info.text ?? ''),
+      })
+      turns += r.turns
+      term.endSession()
+    }
+  })()
+
+  try {
+    const c1 = await connect(pipeName)
+    await c1.waitFor((p) => p.type === 'status')
+    c1.send({ type: 'prompt', text: '你好' })
+    await c1.waitFor((p) => p.type === 'event' && p.kind === 'turn-end')
+    c1.end()
+
+    // 服务端处理断开是异步的：忙时重试，直到拿到 status。
+    let c2: Client | undefined
+    const started = Date.now()
+    while (c2 === undefined) {
+      const c = await connect(pipeName)
+      const first = await Promise.race([
+        c.waitFor((p) => p.type === 'status' || p.type === 'error', 2000).catch(() => undefined),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2000)),
+      ])
+      if (first !== undefined && first.type === 'status') {
+        c2 = c
+        break
+      }
+      c.end()
+      if (Date.now() - started > 8000) throw new Error('重连超时：服务端没有回到可接受状态')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+
+    c2.send({ type: 'prompt', text: '再来' })
+    await c2.waitFor((p) => p.type === 'event' && p.kind === 'turn-end')
+    const deltas = c2.pushes
+      .filter((p): p is Extract<OwnerPush, { type: 'event' }> => p.type === 'event' && p.kind === 'delta')
+      .map((p) => p.text)
+      .join('')
+    assert.equal(deltas, '第二轮回复', `重连后应拿到第二轮回复，实际 ${JSON.stringify(deltas)}`)
+    const live = (app.ctx.get('agents') as { list(): unknown[] }).list()
+    assert.equal(live.length, 1, '重连必须复用同一 agent，而不是新建')
+    c2.end()
+  } finally {
+    term.close()
+    await serve.catch(() => 0)
+    await app.dispose()
     t.cleanup()
   }
 })

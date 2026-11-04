@@ -187,10 +187,8 @@ test('SW4 切换重置 seenSeq：新会话日志兜底不串旧会话', async ()
     seedSession(dataRoot, 'sess-a', [{ seq: 7, text: '旧会话残留' }])
     seedSession(dataRoot, 'sess-b', [{ seq: 1, text: '新会话的回复' }])
     const record: Followup[] = []
-    const agents = new Map([
-      ['sess-a', makeAgent('sess-a', record)],
-      ['sess-b', makeAgent('sess-b', record)],
-    ])
+    // 只预置切换目标：sess-a 由 runChat 启动时 create（seenSeq 从 0 起，第一轮才会读旧日志）。
+    const agents = new Map([['sess-b', makeAgent('sess-b', record)]])
     const printed: string[] = []
     await runChat({
       ctx: fakeCtx({ agents, record }),
