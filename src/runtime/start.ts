@@ -20,12 +20,14 @@ import { attachSkillInjection } from './skill-inject.ts'
 import { attachEmotionInjection } from './emotion-inject.ts'
 import { attachSessionRecall } from './session-recall.ts'
 import { attachProactiveRecall } from './proactive-recall.ts'
+import { attachTaskReminder } from './task-reminder.ts'
 import { resolveTokenBudget } from './token-budget.ts'
 import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachToolLoopAudit } from './tool-loop-audit.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { openProactiveStore, type ProactiveStore } from '../proactive/index.ts'
+import { openReminderStore, type ReminderStore } from '../reminders/index.ts'
 import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
@@ -327,6 +329,15 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     proactiveMentions = openProactiveStore(process.env.PRTS_PROACTIVE_DB ?? join(o.dataRoot, 'proactive.sqlite'))
   } catch (error) {
     console.error(`[prts] proactive store unavailable: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  // W3 任务提醒的留痕库：独立库，与 proactive 同构（都是「主动行为留痕」）。
+  // 打不开时整条线缺席——没有留痕就无法保证「只提醒一次」，宁可不提。
+  let reminders: ReminderStore | undefined
+  try {
+    reminders = openReminderStore(process.env.PRTS_REMINDER_DB ?? join(o.dataRoot, 'reminders.sqlite'))
+  } catch (error) {
+    console.error(`[prts] reminder store unavailable: ${error instanceof Error ? error.message : String(error)}`)
   }
   // 工具结果卸载的存储根：默认与 dataRoot 平级，**不嵌在受保护根里**——
   // 嵌进去会被 `fs.read` 的 protectedRoots 判定拒掉，卸载的内容模型就永远读不回来
@@ -838,6 +849,25 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     },
   )
 
+  // W3 任务提醒：blocked / verifying 停太久时主动提一次。
+  // 阈值用 `PRTS_TASK_REMINDER_HOURS`（默认 2 小时）；`PRTS_TASK_REMINDER=off` 关闭。
+  // 排在所有注入 handler 最后：先回答、再交代旧事、最后才是「你还有东西卡着」。
+  const reminderHoursRaw = Number(process.env.PRTS_TASK_REMINDER_HOURS ?? '2')
+  const taskReminder = ledger === undefined || reminders === undefined || process.env.PRTS_TASK_REMINDER === 'off'
+    ? undefined
+    : attachTaskReminder(
+      ctx as unknown as {
+        on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
+      },
+      {
+        ledger: { list: () => ledger.list() },
+        store: reminders,
+        ...(Number.isFinite(reminderHoursRaw) && reminderHoursRaw >= 0
+          ? { staleAfterMs: reminderHoursRaw * 3_600_000 }
+          : {}),
+      },
+    )
+
   // P1-3 后台巩固调度：空闲时把 live turn 巩固成实体图与事实。
   // `PRTS_CONSOLIDATE=off` 整体关闭。
   //
@@ -915,6 +945,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       sessionRecall?.dispose()
       proactiveRecall?.dispose()
       proactiveMentions?.close()
+      taskReminder?.dispose()
+      reminders?.close()
       memoryScheduler?.dispose()
       memoryTools?.dispose()
       skillTools?.dispose()
