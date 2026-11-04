@@ -8,6 +8,10 @@
  * 2. **失败隔离**——一个 worker 失败不拖垮同批其他任务，结果按输入顺序回；
  * 3. **taskId 去重**——同一 taskId 会撞同一 sessionId，必须在分派前拒绝；
  * 4. **摘要归属**——每个结果只带自己会话的摘要，不串其他 worker 的文本。
+ *
+ * 并发用例用 **barrier** 而不是固定 sleep 窗口：fake `create` 挂起到测试显式释放，
+ * 两个 worker 必然同时在场。此前的 `holdMs=80` 依赖「两者在时间窗内重叠」，
+ * 全量并发下 CPU 争抢会让假设落空（本会话实测到 DP1/DP2 偶发单条失败）。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -22,11 +26,14 @@ interface Seen {
   disposed: number
   active: number
   maxActive: number
+  /** barrier 模式下 create 的挂起点；测试调用 releaseBarrier 释放。 */
+  gates: Array<() => void>
+  released: boolean
 }
 
 function fakeCtx(
   seen: Seen,
-  opts: { holdMs?: number; failTaskIds?: Set<string> } = {},
+  opts: { barrier?: boolean; failTaskIds?: Set<string> } = {},
 ) {
   return {
     get(name: string): unknown {
@@ -42,7 +49,9 @@ function fakeCtx(
           seen.created.push(o)
           seen.active += 1
           seen.maxActive = Math.max(seen.maxActive, seen.active)
-          if (opts.holdMs !== undefined) await new Promise((r) => setTimeout(r, opts.holdMs))
+          if (opts.barrier === true && !seen.released) {
+            await new Promise<void>((resolve) => { seen.gates.push(resolve) })
+          }
           return {
             agent: { status: 'idle', followup(): void { /* 假 agent：不驱动真实回合 */ } },
             dispose: async (): Promise<void> => {
@@ -53,6 +62,20 @@ function fakeCtx(
         },
       }
     },
+  }
+}
+
+/** 释放 barrier，并让后续 create 直接通过。 */
+function releaseBarrier(seen: Seen): void {
+  seen.released = true
+  for (const g of seen.gates.splice(0)) g()
+}
+
+/** 轮询等待条件成立（默认 5s）。 */
+async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
+  const t0 = Date.now()
+  while (Date.now() - t0 < ms && !cond()) {
+    await new Promise((r) => setTimeout(r, 10))
   }
 }
 
@@ -67,14 +90,14 @@ function seedLog(dataRoot: string, sessionId: string, text: string): void {
   }) + '\n')
 }
 
-function env(opts: { holdMs?: number; failTaskIds?: Set<string> } = {}) {
+function env(opts: { barrier?: boolean; failTaskIds?: Set<string> } = {}) {
   const t = makeTmp('prts-dispatch-')
   const ws = join(t.dir, 'ws')
   const data = join(t.dir, 'data')
   mkdirSync(ws, { recursive: true })
   mkdirSync(data, { recursive: true })
   const auth = Authority.open(t.db('core.sqlite'), { workspaceRoots: [ws], protectedRoots: [] })
-  const seen: Seen = { created: [], disposed: 0, active: 0, maxActive: 0 }
+  const seen: Seen = { created: [], disposed: 0, active: 0, maxActive: 0, gates: [], released: false }
   return {
     t, ws, data, auth, seen,
     deps: {
@@ -92,32 +115,50 @@ function env(opts: { holdMs?: number; failTaskIds?: Set<string> } = {}) {
 }
 
 test('DP1 并发上限：3 个任务、上限 2 → 同时存活 worker 不超过 2', async () => {
-  const e = env({ holdMs: 80 })
+  const e = env({ barrier: true })
   try {
-    const r = await dispatchTasks(e.deps, [
+    const p = dispatchTasks(e.deps, [
       { task: 'a', taskId: 'd1' },
       { task: 'b', taskId: 'd2' },
       { task: 'c', taskId: 'd3' },
     ], { concurrency: 2 })
+
+    // 两个 worker 都卡在 create（barrier）时，峰值必须恰好为 2——
+    // 上限若被突破，第三个 create 会进来把 maxActive 抬到 3。
+    await waitFor(() => e.seen.gates.length >= 2)
+    assert.equal(
+      e.seen.maxActive,
+      2,
+      `同时进入 create 的 worker 应为 2，实际 ${e.seen.maxActive}`,
+    )
+    releaseBarrier(e.seen)
+
+    const r = await p
     assert.equal(r.length, 3)
     assert.equal(
       r.every((x) => x.ok),
       true,
       `有 worker 失败：${r.map((x) => `${x.taskId}:${x.ok ? 'ok' : x.error ?? '?'}`).join('; ')}`,
     )
-    assert.equal(e.seen.maxActive, 2, `并发必须被限到 2，实际峰值 ${e.seen.maxActive}`)
+    assert.equal(e.seen.maxActive, 2, `并发峰值必须为 2，实际 ${e.seen.maxActive}`)
     assert.equal(e.seen.disposed, 3, '每个 worker 都必须被回收')
   } finally { e.cleanup() }
 })
 
 test('DP2 失败隔离：一个 worker 失败，其余照常完成且结果按输入顺序', async () => {
-  const e = env({ failTaskIds: new Set(['d2']) })
+  const e = env({ failTaskIds: new Set(['d2']), barrier: true })
   try {
-    const r = await dispatchTasks(e.deps, [
+    const p = dispatchTasks(e.deps, [
       { task: 'a', taskId: 'd1' },
       { task: 'b', taskId: 'd2' },
       { task: 'c', taskId: 'd3' },
     ], { concurrency: 3 })
+
+    // d2 的 create 同步抛错，不占 barrier；d1、d3 都挂起后释放，消除时序依赖。
+    await waitFor(() => e.seen.gates.length >= 2)
+    releaseBarrier(e.seen)
+
+    const r = await p
     assert.deepEqual(r.map((x) => x.taskId), ['d1', 'd2', 'd3'], '结果必须按输入顺序')
     assert.equal(r[0]!.ok, true, `d1 应成功：${r[0]!.error ?? ''}`)
     assert.equal(r[1]!.ok, false)
