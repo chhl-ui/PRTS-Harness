@@ -213,6 +213,9 @@ export class Authority {
   private decideSessionScoped(sessionId: string, rp: string): 'allow' | 'deny' | 'defer' {
     if (sessionId === '') return 'deny'
     const row = this.sessionRow(sessionId)
+    // 未注册 → defer（= 主会话）。翻牌实验（2026-11-04）实测打穿 11 条测试，
+    // 其中 4 条是 startRuntime 真实装配路径（主会话尚未在那里注册）——先补注册
+    // 覆盖面，再谈 deny。数据见 docs/design-session-identity.md §3.5。
     if (row === undefined) return 'defer'
     if (row.releasedAtMs !== null) return 'deny'
     if (row.kind === 'primary') return 'defer'

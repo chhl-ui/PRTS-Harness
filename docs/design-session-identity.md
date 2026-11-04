@@ -118,6 +118,15 @@ fs.delete 保持恒 ask，只在 ask 前加「子会话活跃 + roots 外 → de
 3. 跑一次全量，若把「未注册」分支从 defer 改为 deny 只打穿少数用例，本波就改该分支返回值（无需引入新配置项）；
 4. 若打穿面过大，保持 defer 并押后到 Wave 3。
 
+**翻牌实测（2026-11-04，已完成）**：把该分支改为 deny 后全量 **11 fail / 731 pass**（总数 742）。失败分布：
+
+| 类别 | 用例 |
+|---|---|
+| `test/authority` fixture（7 条） | `read-only-subpaths` 4 条（普通路径、`.github`、空数组、`.git`）、`authority.test.ts` 的路径别名与 workspace 回归、`subagent-authority` 用例③ |
+| **runtime / ledger 真实装配（4 条）** | `guard: 越界写被拒…工作区内写正常放行`、`R1: 脚本 write 工具写工作区文件`、`W3: 绑定会话的任务…step`、`负向⑤：手动 step_begin…` |
+
+**结论：本波不翻牌，保持 defer。** 关键不是 fixture 数量，而是那 4 条真实装配路径——`startRuntime` 不注册主会话，只有 `runChat` 注册；翻牌前必须先让所有装配入口注册（§3.4 的覆盖矩阵）。这修正了先前「爆炸半径小到中、本波可翻牌」的估计。
+
 残余风险（若退回 defer）：不经注册的 `agents.create` 会以主会话权限运行；缓解是 3.4 的覆盖测试 + 注册失败即拒绝。
 
 ## 四、与现有不变量的关系
