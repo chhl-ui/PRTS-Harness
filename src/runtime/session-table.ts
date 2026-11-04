@@ -23,8 +23,8 @@ export interface SessionEntry {
 }
 
 export interface SessionTableDeps {
-  /** 只用到 `list()`——`ctx.get('agents')` 的公开面。缺省表示没有 live 会话。 */
-  agents?: { list(): Array<{ session?: { id?: string } }> }
+  /** 只用到 `list()`——`ctx.get('agents')` 的公开面。缺省/无 list 表示没有 live 会话。 */
+  agents?: { list?(): Array<{ session?: { id?: string } }> }
   /** `<dataRoot>/dsh-home/sessions` 的绝对路径。 */
   sessionsRoot: string
 }
@@ -40,7 +40,7 @@ const SESSION_FILE = 'session.v4.jsonl'
 export function listSessions(deps: SessionTableDeps): SessionEntry[] {
   const map = new Map<string, SessionEntry>()
 
-  for (const agent of deps.agents?.list() ?? []) {
+  for (const agent of deps.agents?.list?.() ?? []) {
     const id = agent?.session?.id
     if (typeof id !== 'string' || id === '') continue
     map.set(id, { sessionId: id, live: true, onDisk: false, lastModifiedMs: null })

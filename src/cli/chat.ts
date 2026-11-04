@@ -20,6 +20,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Ledger } from '../ledger/index.ts'
 import type { MemoryStore } from '../memory/index.ts'
 import { findForOwner, forgetFlow, correctFlow } from '../memory/forget-flow.ts'
+import { listSessions, renderSessionLine } from '../runtime/session-table.ts'
 import { probeSessions, purgeSessions } from '../memory/session-purge.ts'
 import { AuditLog } from '../audit/audit.ts'
 import type { Authority } from '../authority/index.ts'
@@ -658,6 +659,20 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
       }
       if (line === '/tasks') {
         await runTasks(deps)
+        continue
+      }
+      // ---- Wave 3：会话表（live ∪ disk），只读 ----
+      if (line === '/sessions') {
+        const rows = listSessions({
+          sessionsRoot: join(deps.dataRoot, 'dsh-home', 'sessions'),
+          agents: (ctx.get('agents') as unknown as { list?(): Array<{ session?: { id?: string } }> } | undefined),
+        })
+        if (rows.length === 0) {
+          deps.out('[prts] 还没有会话记录\n')
+        } else {
+          for (const r of rows) deps.out(renderSessionLine(r) + '\n')
+        }
+        deps.onIdle?.()
         continue
       }
       streamed = ''
