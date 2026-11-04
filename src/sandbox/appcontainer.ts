@@ -187,6 +187,8 @@ const PeekNamedPipe = kernel32.func(
   'bool PeekNamedPipe(void *h, void *buf, uint32_t n, _Out_ uint32_t *read, _Out_ uint32_t *avail, void *left)',
 )
 const TerminateProcess = kernel32.func('bool TerminateProcess(void *h, uint32_t code)')
+const CreateMutexW = kernel32.func('void *CreateMutexW(void *sa, bool initial, const char16_t *name)')
+const ReleaseMutex = kernel32.func('bool ReleaseMutex(void *h)')
 const GetStdHandle = kernel32.func('void *GetStdHandle(uint32_t which)')
 
 const EXTENDED_STARTUPINFO_PRESENT = 0x0008_0000
@@ -205,19 +207,46 @@ function sidToString(sidPtr: unknown): string {
 }
 
 /** HRESULT 0x800700B7 = ERROR_ALREADY_EXISTS，此时改为派生 SID。 */
+/**
+ * AppContainer profile 的创建/派生走的是**用户级全局存储**：两个测试文件
+ * 并发创建时会在系统内部锁上排队，极端情况下挂死（实测：全量 15 轮里第 5/11/15
+ * 轮挂在 `workspace-acl.test.ts`，CPU 2.5s / 存活 87s，典型系统调用等待）。
+ *
+ * 用跨进程 Mutex 把「并发创建」变成「排队创建」。拿不到 Mutex 或等待超时就
+ * **退化无锁**——这个调用只该防并发，不该在等待上挂死。
+ */
+const PROFILE_MUTEX_NAME = 'Local\\PRTS.AppContainerProfile.Create'
+/** 等 Mutex 的上限：超时就无锁硬上，宁可冒险也不挂死。 */
+const PROFILE_MUTEX_WAIT_MS = 15_000
+const WAIT_ABANDONED = 0x80
+
 function ensureProfile(name: string): unknown {
-  const out: unknown[] = [null]
-  const hr = CreateAppContainerProfile(name, name, 'PRTS AppContainer sandbox', null, 0, out) as number
-  if (hr === 0) return out[0]
-  const out2: unknown[] = [null]
-  const hr2 = DeriveAppContainerSid(name, out2) as number
-  if (hr2 !== 0) {
-    throw new Error(
-      `prts: 建 AppContainer profile 失败 hr=0x${(hr >>> 0).toString(16).padStart(8, '0')}，`
-      + `派生也失败 hr=0x${(hr2 >>> 0).toString(16).padStart(8, '0')}`,
-    )
+  let mutex: unknown = null
+  let held = false
+  try {
+    mutex = CreateMutexW(null, false, PROFILE_MUTEX_NAME)
+    if (mutex !== null && mutex !== undefined) {
+      const rc = WaitForSingleObject(mutex, PROFILE_MUTEX_WAIT_MS)
+      held = rc === WAIT_OBJECT_0 || rc === WAIT_ABANDONED
+    }
+  } catch { /* Mutex 不可用：走无锁路径 */ }
+  try {
+    const out: unknown[] = [null]
+    const hr = CreateAppContainerProfile(name, name, 'PRTS AppContainer sandbox', null, 0, out) as number
+    if (hr === 0) return out[0]
+    const out2: unknown[] = [null]
+    const hr2 = DeriveAppContainerSid(name, out2) as number
+    if (hr2 !== 0) {
+      throw new Error(
+        `prts: 建 AppContainer profile 失败 hr=0x${(hr >>> 0).toString(16).padStart(8, '0')}，`
+        + `派生也失败 hr=0x${(hr2 >>> 0).toString(16).padStart(8, '0')}`,
+      )
+    }
+    return out2[0]
+  } finally {
+    if (held) { try { ReleaseMutex(mutex) } catch { /* ignore */ } }
+    if (mutex !== null && mutex !== undefined) { try { CloseHandle(mutex) } catch { /* ignore */ } }
   }
-  return out2[0]
 }
 
 function icacls(args: readonly string[]): Promise<{ code: number; out: string }> {
