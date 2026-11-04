@@ -65,6 +65,26 @@ export function applyAuditEvent(db: DatabaseSync, e: AuditEventRow): void {
         .run(e.ts, p.deletionId as string)
       break
     }
+    case 'session.registered': {
+      const roots = Array.isArray(p.roots) ? (p.roots as string[]) : []
+      db.prepare(
+        `INSERT INTO audit_sessions (session_id, kind, roots_json, parent_session, registered_at_ms, released_at_ms)
+         VALUES (?, ?, ?, ?, ?, NULL)`,
+      ).run(
+        String(p.sessionId),
+        String(p.sessionKind),
+        JSON.stringify(roots),
+        typeof p.parentSession === 'string' ? p.parentSession : null,
+        e.ts,
+      )
+      break
+    }
+    case 'session.released': {
+      // 幂等：已释放的不覆盖首次释放时刻。
+      db.prepare('UPDATE audit_sessions SET released_at_ms = ? WHERE session_id = ? AND released_at_ms IS NULL')
+        .run(e.ts, String(p.sessionId))
+      break
+    }
     default:
       // 其余 kind 只进事件表，无投影
       break

@@ -9,6 +9,9 @@ import type {
   AuditExportDoc,
   AuditRecord,
   DeletionState,
+  RegisterSessionInput,
+  SessionKind,
+  SessionRow,
 } from './types.ts'
 
 export const SCHEMA = `
@@ -45,6 +48,14 @@ CREATE TABLE IF NOT EXISTS audit_once (
   tool TEXT NOT NULL,
   capabilities_json TEXT NOT NULL,
   consumed INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit_sessions (
+  session_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('primary','subagent')),
+  roots_json TEXT NOT NULL,
+  parent_session TEXT,
+  registered_at_ms INTEGER NOT NULL,
+  released_at_ms INTEGER
 );
 `
 
@@ -168,6 +179,20 @@ function validateEvent(e: AuditEvent): void {
       return
     case 'deletion.completed':
       raise('INVALID_INPUT', 'deletion.completed is appended internally, not by callers')
+    case 'session.registered': {
+      nonEmpty(e.sessionId, 'sessionId')
+      if (e.sessionKind !== 'primary' && e.sessionKind !== 'subagent') {
+        raise('INVALID_INPUT', `bad session kind ${String(e.sessionKind)}`)
+      }
+      if (!Array.isArray(e.roots)) raise('INVALID_INPUT', 'roots must be string[]')
+      if (e.roots.some((r) => typeof r !== 'string' || r === '')) {
+        raise('INVALID_INPUT', 'roots must be non-empty strings')
+      }
+      if (e.parentSession !== undefined) nonEmpty(e.parentSession, 'parentSession')
+      return
+    }
+    case 'session.released':
+      nonEmpty(e.sessionId, 'sessionId'); return
     default:
       raise('INVALID_INPUT', `unknown event kind: ${String((e as { kind?: unknown }).kind)}`)
   }
@@ -298,6 +323,41 @@ export class AuditLog {
       .get(callId) as { consumed: number } | undefined
   }
 
+  /** 注册一个会话（事件 + 投影同事务）。actor 固定 system：这是宿主事实，不是模型可发起的动作。 */
+  registerSession(actor: AuditActor, input: RegisterSessionInput): void {
+    this.append(actor, {
+      kind: 'session.registered',
+      sessionId: input.sessionId,
+      sessionKind: input.kind,
+      roots: [...input.roots],
+      ...(input.parentSession === undefined ? {} : { parentSession: input.parentSession }),
+    })
+  }
+
+  /** 释放一个会话：写事件，投影置 released_at_ms；行保留（审计只追加）。 */
+  releaseSession(actor: AuditActor, sessionId: string): void {
+    this.append(actor, { kind: 'session.released', sessionId })
+  }
+
+  /** 读会话投影（判定与诊断用）。无进程内缓存——与 grant 判定同一不变量。 */
+  listSessions(): SessionRow[] {
+    const rows = this.db.prepare(
+      `SELECT session_id, kind, roots_json, parent_session, registered_at_ms, released_at_ms
+         FROM audit_sessions ORDER BY registered_at_ms, session_id`,
+    ).all() as unknown as Array<{
+      session_id: string; kind: SessionKind; roots_json: string; parent_session: string | null
+      registered_at_ms: number; released_at_ms: number | null
+    }>
+    return rows.map((r) => ({
+      sessionId: r.session_id,
+      kind: r.kind,
+      roots: JSON.parse(r.roots_json) as string[],
+      parentSession: r.parent_session,
+      registeredAtMs: Number(r.registered_at_ms),
+      releasedAtMs: r.released_at_ms === null ? null : Number(r.released_at_ms),
+    }))
+  }
+
   /** 投影读取（K2a 判定用）：全部授予行，含已撤销/过期，由调用方按时间判定。 */
   listGrants(): { grantId: string; subject: string; capability: string; expiresAt: number | null; issuedAt: number; revokedAt: number | null; revokeReason: string | null; sessionId: string | null }[] {
     const rows = this.db.prepare('SELECT * FROM audit_grants ORDER BY issued_at').all() as {
@@ -380,6 +440,7 @@ export class AuditLog {
       this.db.exec('DELETE FROM audit_deletions')
       this.db.exec('DELETE FROM audit_grants')
       this.db.exec('DELETE FROM audit_once')
+      this.db.exec('DELETE FROM audit_sessions')
       const rows = this.db.prepare('SELECT * FROM audit_events ORDER BY seq').all() as unknown as EventDbRow[]
       for (const r of rows) applyAuditEvent(this.db, rowToEvent(r))
     })

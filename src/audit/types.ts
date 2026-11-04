@@ -28,6 +28,29 @@ export type AuditEvent =
   | { kind: 'deletion.requested'; deletionId: string; target: { kind: string; id: string }; derivatives: { kind: string; ref: string }[] }
   | { kind: 'deletion.derivative-done'; deletionId: string; index: number }
   | { kind: 'deletion.completed'; deletionId: string }
+  /** 会话身份（设计见 `docs/design-session-identity.md` §3.1）：注册与释放都是授权事实。 */
+  | { kind: 'session.registered'; sessionId: string; sessionKind: SessionKind; roots: string[]; parentSession?: string }
+  | { kind: 'session.released'; sessionId: string }
+
+export type SessionKind = 'primary' | 'subagent'
+
+/** `audit_sessions` 投影的一行。`releasedAtMs` 非空 = 已释放，判定按 deny。 */
+export interface SessionRow {
+  sessionId: string
+  kind: SessionKind
+  roots: string[]
+  parentSession: string | null
+  registeredAtMs: number
+  releasedAtMs: number | null
+}
+
+/** 注册一个会话。`roots` 可以为空数组（只读会话）。 */
+export interface RegisterSessionInput {
+  sessionId: string
+  kind: SessionKind
+  roots: string[]
+  parentSession?: string
+}
 
 export interface AuditRecord {
   seq: number
