@@ -71,8 +71,8 @@
 | 项 | 阻塞类型 |
 |---|---|
 | 常驻 Router 第二步：多入口并发（终端 + 其他通道）、Router 自身上下文预算 | 需要真实负载才能验收（R2） |
-| `/switch` 与真实 DSH agent 的端到端验证 | 当前只有 fake agents 覆盖 |
-| `chat-client.ts` 自动重连 | 服务端已支持重连，客户端断线后仍需手动重连 |
+| ~~`/switch` 与真实 DSH agent 的端到端验证~~ | **已完成（2026-11-05，`4941f0b`）**：`test/acceptance/switch-real-agent.test.ts`，判据是 assistant/message 归属 |
+| ~~`chat-client.ts` 自动重连~~ | **已完成（2026-11-05，`f6163cc`）**：重读 endpoint + 退避重连，`/exit` 主动退出 |
 | ~~注册覆盖面 + 翻牌~~ | **已完成（2026-11-05）**：6 个 fixture 补注册，`decideSessionScoped` 未注册分支已翻为 deny，全量 787 绿 |
 
 ---

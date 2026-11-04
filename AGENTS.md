@@ -9,7 +9,9 @@ PRTS 是博士的个人综合智能工作系统：独立进程、自有数据根
 - `docs/reference/PRTS-PROJECT-CHARTER-2026-10-09.md`：产品目标、C01—C12 能力、A01—A12 首版验收、七条产品行为原则。
 - `docs/reference/PRTS-ARCHITECTURE-REQUIREMENTS-2026-10-29.md`：§4 受保护核心与插件信任分级、§5 四方向、§7 V1-01—V1-18 第一版范围。
 
-本仓实现的是 §4 那一层：任务账本（K1）、审计（K4）、权限入口（K2a）、启动完整性（K5）、运行沙箱（U3）、运行时与终端通道（P1/P2）。**人格、记忆、上下文装配、进化在 `src/` 里没有对应模块**——`src/` 只有 `audit/ authority/ chain/ cli/ core/ integrity/ ledger/ runtime/ sandbox/ stop/ supervisor/` 这几层，`grep -rn "consolidat" src/` 零命中，`grep -rn "persona" src/` 唯一命中是 `appcontainer.ts:10` 的 `SeImpersonate`（Win32 令牌特权名，与人格无关）。这是护栏层，不是产品目的——护栏服务的是架构需求 §5.4 那句「用得越久越懂博士，做事越熟练，同时不会变坏、不会悄悄改掉自己的底线」。
+本仓实现的是 §4 那一层：任务账本（K1）、审计（K4）、权限入口（K2a）、启动完整性（K5）、运行沙箱（U3）、运行时与终端通道（P1/P2）。除此之外，四方向的**机制层**已陆续落地：`src/memory/`（长期记忆与检索）、`src/persona/`（人格设定）、`src/emotion/`（情感状态）、`src/skills/`（进化：候选/评估/采用/回退）、`src/cost/`（费用计量）、`src/proactive/`、`src/reminders/`、`src/spill/`（工具输出卸载）。护栏层仍是产品目的之外的那道边界——它服务的是架构需求 §5.4 那句「用得越久越懂博士，做事越熟练，同时不会变坏、不会悄悄改掉自己的底线」。
+
+**机制存在 ≠ 验收通过**：V1-03/04/05/06/08/09 等仍是「有机制、缺真实流程或盲评」，判据对照 `docs/reference/PRTS-ARCHITECTURE-REQUIREMENTS-2026-10-29.md` §7 原文；当前项目的未完成事项见 `docs/HANDOFF-20261105-session-f.md` 与计划文件 `.rivet/plans/prts-后续建设方案-2026-11-04.md`。
 
 两条约束直接抄自原文，动手前先认：
 

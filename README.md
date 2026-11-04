@@ -72,7 +72,8 @@ test/           106 例；test/support/ 是驱动、脚本化模型替身、临�
 
 ## 当前状态
 
-- 最近的功能提交是 `ddc511d`（2026-10-31 22:55）"任务入口设计同步到实现状态"。在此之前 `b3cb34b`（2026-10-30）"Runtime integration 2a" 让真实 DSH 组合在自有守护进程下跑通、模型由脚本替身驱动；此后不再只有文档提交——K1 任务入口已按 `docs/task-entry-design.md` 的 W0–W5 全部落地（`306d240` W0 至 `a9e3dbf` W5），模型只能建 `draft`、`owner` 才能 `activate`。取准看 `git log`。
+- **最新（2026-11-05）**：Wave 3 收尾完成——会话表、`/sessions`、`/switch`、`/new`、分派器（`/dispatch`）、客户端寿命与运行时寿命解耦、授权翻牌（未注册会话写权限 → deny）；`/switch` 与分派器已有真实 runtime 端到端测试。当前全量 **796 pass / 0 fail**（`node --test "test/**/*.test.ts"`）。细节见 `docs/HANDOFF-20261105-session-f.md`。
+- （历史记录，截至 2026-10-31）最近的功能提交是 `ddc511d`（2026-10-31 22:55）"任务入口设计同步到实现状态"。在此之前 `b3cb34b`（2026-10-30）"Runtime integration 2a" 让真实 DSH 组合在自有守护进程下跑通、模型由脚本替身驱动；此后不再只有文档提交——K1 任务入口已按 `docs/task-entry-design.md` 的 W0–W5 全部落地（`306d240` W0 至 `a9e3dbf` W5），模型只能建 `draft`、`owner` 才能 `activate`。取准看 `git log`。
 - **测试稳定性（2026-10-31 实测）**：曾观察到 1 次 `fail 1`（85 例时代，详情因日志被 grep 过滤而丢失）。随后 **20 轮连续采样**（90 例，共 1800 次用例执行）**0 失败**，原始失败未复现——若真实概率是 1/5，20 轮全绿的概率仅 1.15%，故该频率假设可以否定；95% 置信的失败率上界约 15%（rule of three, 3/20）。**仍未定位**：头号嫌疑是 R2 等待 LanguageMode 落盘的轮询窗口（原 10s，已放宽到 15s，并把「等待超时」与「语言模式错误」拆成两条断言，避免下次复现时把定位引到错误的层）。单次全绿仍不作结论，判据是**连续两次全绿**。
 - O1 已修（2026-10-31）：驱动路径改用 `createUserMessage()` 构造消息，真实适配器经 agent 轮次能发出请求；回归见 `test/runtime/o1-real-adapter.test.ts`。
 - **E1 已通（2026-10-31）**：真实 key、真实 `api.deepseek.com`、出厂默认配置（`reasoningEffort` 缺省 = `high`，未改 `config/prts.yml`），连跑 4 次全部成功，`assistant/message` 含 `reasoning` + `text` 块，`turn/end` 为 `completed`，单次约 1580ms，`agent/error` 0 条。thinking block 被正确映射为 `reasoning`，不需要关掉推理。
@@ -88,7 +89,7 @@ test/           106 例；test/support/ 是驱动、脚本化模型替身、临�
 
 ## 已知限制
 
-- **K2a 守卫已接线，但只覆盖文件系统能力**（2026-10-31）：`src/runtime/start.ts` 在 boot 返回后挂 `tools.guard`，模型发起的读/写/删先过 `Authority.guard`——越界写/读返回拒绝理由并写 `tool.denied` 审计，工作区内读写正常放行（回归见 `test/runtime/guard-wiring.test.ts`）。`exec` / `net` / `system` / `tool` 暂不判定（归 K2b 沙箱）：K2a 对 pwsh 只能整体放行或整体拒绝，整体拒绝会破坏现有 pwsh 用例，而且那不是真正的边界。**这与下面的审批问题是两件事**——审批不可达是 fs backend 的问题，守卫接线是工具流水线的问题，不要互相代替。
+- **K2a 守卫已接线，覆盖 `fs.*` 与 `net.*`**（2026-10-31 初版只覆盖 fs；net 随后纳入，见 `src/runtime/start.ts:406-407`）：`src/runtime/start.ts` 在 boot 返回后挂 `tools.guard`，模型发起的读/写/删/联网先过 `Authority.guard`——越界返回拒绝理由并写 `tool.denied` 审计，工作区内读写正常放行（回归见 `test/runtime/guard-wiring.test.ts`）。`exec` / `tool` / `system` 暂不判定（归 K2b 沙箱）：K2a 对 pwsh 只能整体放行或整体拒绝，整体拒绝会破坏现有 pwsh 用例，而且那不是真正的边界。**这与下面的审批问题是两件事**——审批不可达是 fs backend 的问题，守卫接线是工具流水线的问题，不要互相代替。
 - **请求重试会重复输出片段**：`frame` 带 `attemptId` / `revision`，模型请求失败重试会起新 attempt 从头重发 delta，而已经写进终端的片段撤不回来。`chat.ts` 按 `attemptId` 变化重置游标，但不做终端回滚——重试路径下用户可能看到重复片段。正常对话（无错误、无工具重试）不触发。
 - **E3 审批已实现（2026-10-31），走 K2a 侧而非 DSH 的 fs escalation**。DSH 的 `resolvePolicy` 路径被 K2a 守卫遮蔽——越界写在 `authority.ts:148-152` 就被拒，到不了 `dsh-tool-fs/lib/index.js:1134-1150`。可用的钩子是 `tools/pre-execute`：它是异步 waterfall 且在同步 guards 之前（`dsh-tools/lib/index.js:3321` / `:3337`）。链路：pre-execute 用 `classify(name, arguments)` 算 capabilities → `decide()` 返 `ask` → 按 callId 暂存 → `approval/request` answerer（`src/cli/chat.ts`）弹终端提示 → `recordOwnerDecision({outcome:'allowed-once'})` → 同步 guard 读到 once 放行。回归见 `test/runtime/e3-approval.test.ts`。
 - **三层授权语义**：`protectedRoots` 内 → `deny`（绝对禁止，审批救不了）；工作区外且非 protected → `ask`（可审批）；工作区内 → `allow`。`decide()` 的优先级是 `deny > ask > allow`，所以越界写的 E3 用例必须落在「工作区外、非 protectedRoots」。
