@@ -100,7 +100,11 @@ test('DP1 并发上限：3 个任务、上限 2 → 同时存活 worker 不超�
       { task: 'c', taskId: 'd3' },
     ], { concurrency: 2 })
     assert.equal(r.length, 3)
-    assert.equal(r.every((x) => x.ok), true)
+    assert.equal(
+      r.every((x) => x.ok),
+      true,
+      `有 worker 失败：${r.map((x) => `${x.taskId}:${x.ok ? 'ok' : x.error ?? '?'}`).join('; ')}`,
+    )
     assert.equal(e.seen.maxActive, 2, `并发必须被限到 2，实际峰值 ${e.seen.maxActive}`)
     assert.equal(e.seen.disposed, 3, '每个 worker 都必须被回收')
   } finally { e.cleanup() }
