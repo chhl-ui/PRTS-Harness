@@ -9,6 +9,11 @@ const db = process.env.PRTS_DB as string
 const mode = process.env.FAKE_MODE ?? 'good'
 const dataRoot = process.env.PRTS_DATA_ROOT as string
 
+// freeze：模拟「进程活着但事件循环停摆」——连接控制管道但不发心跳。
+// 关掉心跳后，Watchdog 只能靠自身的超时判定（真实场景里是同步阻塞让
+// setInterval 停摆，效果相同）。
+if (mode === 'freeze') process.env.PRTS_HEARTBEAT_MS = '0'
+
 // 先连接控制管道（内部删除 PRTS_CONTROL_PIPE/TOKEN），再派生孙进程
 const ctl = await connectControl({
   onStop: async (level: RuntimeStopLevel) => {

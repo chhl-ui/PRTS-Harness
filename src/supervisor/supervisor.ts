@@ -19,7 +19,7 @@ export interface SupervisorConfig {
   dataRoot: string
   runtime: { command: string; args: string[]; cwd: string; env?: Record<string, string> }
   ownerPipeName: string
-  timeouts?: { s2Ms?: number; s3Ms?: number }
+  timeouts?: { s2Ms?: number; s3Ms?: number; heartbeatMs?: number; heartbeatTimeoutMs?: number }
   restart?: { maxRestarts: number; windowMs: number }
   /** K5：提供时，启动检查之后、spawn 之前执行完整性校验；失败不启动运行时。 */
   integrity?: { installRoot: string; manifestPath: string; entries: () => ComposedEntry[] }
@@ -42,6 +42,11 @@ export class Supervisor {
   private readonly controlPipe: string
   private readonly s2Ms: number
   private readonly s3Ms: number
+  /** 运行时发心跳的间隔；写进 PRTS_HEARTBEAT_MS，两侧必须同一个值。 */
+  private readonly heartbeatMs: number
+  /** 超过这么久没收到心跳就判卡死（默认 3 倍间隔）。 */
+  private readonly heartbeatTimeoutMs: number
+  private lastHeartbeatAt = 0
   private readonly maxRestarts: number
   private readonly windowMs: number
 
@@ -64,6 +69,8 @@ export class Supervisor {
     this.controlPipe = runtimePipeName()
     this.s2Ms = config.timeouts?.s2Ms ?? 5000
     this.s3Ms = config.timeouts?.s3Ms ?? 2000
+    this.heartbeatMs = config.timeouts?.heartbeatMs ?? 5000
+    this.heartbeatTimeoutMs = config.timeouts?.heartbeatTimeoutMs ?? this.heartbeatMs * 3
     this.maxRestarts = config.restart?.maxRestarts ?? 3
     this.windowMs = config.restart?.windowMs ?? 60000
   }
@@ -155,6 +162,7 @@ export class Supervisor {
         ...this.config.runtime.env,
         PRTS_CONTROL_PIPE: this.controlPipe,
         PRTS_CONTROL_TOKEN: this.controlToken,
+        PRTS_HEARTBEAT_MS: String(this.heartbeatMs),
         PRTS_DB: this.dbPath,
         PRTS_MODE: this.mode,
         PRTS_DATA_ROOT: this.config.dataRoot,
@@ -207,6 +215,8 @@ export class Supervisor {
 
   private adoptRuntime(sock: Socket): void {
     this.rt = sock
+    // 从「已认证」起算：心跳超时只对已连上的运行时生效，启动期不判卡死。
+    this.lastHeartbeatAt = Date.now()
     sock.removeAllListeners('data')
     sock.on('data', lineParser(
       (msg) => this.onRuntimeMsg(msg),
@@ -217,6 +227,7 @@ export class Supervisor {
 
   private onRuntimeMsg(msg: unknown): void {
     const m = msg as { type?: string; id?: string }
+    if (m?.type === 'heartbeat') { this.lastHeartbeatAt = Date.now(); return }
     if (m?.type === 'stopped' && typeof m.id === 'string') {
       const p = this.pending.get(m.id)
       if (p) {
@@ -324,24 +335,50 @@ export class Supervisor {
   }
 
   /** 意外退出自动重启（限额内）；所有者停止不重启。 */
-  private poll(): void {
-    if (this.closed || !this.job) return
-    const code = this.job.exitCode()
-    if (code === undefined) return
+  /**
+   * Watchdog 的第二问：**是否在推进**。
+   *
+   * 进程活着不等于在工作——同步阻塞（ffi / 等锁）会让运行时的事件循环停摆，
+   * 进程仍在（`exitCode()` 返回 undefined），但心跳停了。这正是 PRTS 实测到的
+   * 挂起形态（CPU 2.5s / 存活 90s）。
+   *
+   * 处理：S3 强杀整个 Job——`escalateS3()` 后 `exitCode()` 会变为非 undefined，
+   * 下一轮 `poll()` 走既有重启逻辑（限额仍由 restarts/windowMs 约束）。
+   * 判死后立即刷新 `lastHeartbeatAt`，避免同一轮挂死被重复触发。
+   */
+  private checkHeartbeat(): void {
+    // 没连上不判：启动期允许没有心跳（运行时可能还在 boot）。
+    if (this.rt === null || this.rt.destroyed) return
+    const now = Date.now()
+    if (now - this.lastHeartbeatAt <= this.heartbeatTimeoutMs) return
+    const silent = now - this.lastHeartbeatAt
+    this.lastHeartbeatAt = now
+    this.alert(`runtime heartbeat timeout (${silent}ms > ${this.heartbeatTimeoutMs}ms) — escalating S3`)
+    // 同步完成「杀 + 置空 + 重启」，不依赖 `poll()` 的 exitCode 与 escalateS3 的 Promise：
+    // 实测 terminate 后 `exitCode()` 不保证及时反映（Job 已空但仍 undefined），
+    // 异步链路里任何一环没走到，重启就永远不发生。
     const dead = this.job
     this.job = null
-    dead.close()
+    if (dead !== null) {
+      try { dead.terminate(1) } catch { /* 已死 */ }
+      try { dead.close() } catch { /* ignore */ }
+    }
+    this.restartAfterDead('heartbeat-timeout')
+  }
+
+  /** 运行时死亡后的重启决策（`poll` 与 Watchdog 共用；限额仍由 restarts/windowMs 约束）。 */
+  private restartAfterDead(reason: string): void {
     if (this.state === 'stopped-by-owner' || this.state === 'failed') return
     const now = Date.now()
     this.restarts = this.restarts.filter((t) => now - t < this.windowMs)
     if (this.restarts.length >= this.maxRestarts) {
       this.state = 'failed'
-      this.alert(`runtime exited (code ${code}); restart limit ${this.maxRestarts}/${this.windowMs}ms reached`)
+      this.alert(`runtime dead (${reason}); restart limit ${this.maxRestarts}/${this.windowMs}ms reached`)
       return
     }
     this.state = 'restarting'
     this.restarts.push(now)
-    this.alert(`runtime exited (code ${code}); restarting (${this.restarts.length}/${this.maxRestarts})`)
+    this.alert(`runtime dead (${reason}); restarting (${this.restarts.length}/${this.maxRestarts})`)
     try {
       this.spawnRuntime()
       this.state = 'running'
@@ -349,6 +386,16 @@ export class Supervisor {
       this.state = 'failed'
       this.alert(`respawn failed: ${e instanceof Error ? e.message : String(e)}`)
     }
+  }
+
+  private poll(): void {
+    if (this.closed || !this.job) return
+    const code = this.job.exitCode()
+    if (code === undefined) { this.checkHeartbeat(); return }
+    const dead = this.job
+    this.job = null
+    dead.close()
+    this.restartAfterDead(`exit code ${code}`)
   }
 
   /** 正常停机：先请求 S2，超时走 S3；然后关 Job 与管道；不触发重启。 */

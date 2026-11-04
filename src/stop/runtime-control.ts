@@ -25,6 +25,23 @@ export function connectControl(handlers: {
     sock.once('error', reject)
     sock.once('connect', () => {
       sock.write(encode({ type: 'hello', pid: process.pid, token }))
+      /**
+       * 心跳：每 `PRTS_HEARTBEAT_MS` 毫秒一次（0 / 非法 = 关闭）。
+       *
+       * 这是 Watchdog 的「进展」信号。**同步阻塞会让事件循环停摆，心跳随之停止**——
+       * 守护进程据此判断「进程活着但卡死」（2026-11-04 实测：全量 20 轮第 5/11/15 轮
+       * 挂起，CPU 2.5s / 存活 90s，正是这个形态）。
+       *
+       * `unref()`：心跳不能阻止进程退出——它只是给外界看的信号。
+       */
+      const hbRaw = Number(process.env.PRTS_HEARTBEAT_MS ?? '5000')
+      const hbMs = Number.isFinite(hbRaw) && hbRaw > 0 ? Math.floor(hbRaw) : 0
+      const hb = hbMs > 0
+        ? setInterval(() => {
+          try { sock.write(encode({ type: 'heartbeat', at: Date.now() })) } catch { /* gone */ }
+        }, hbMs)
+        : undefined
+      if (hb !== undefined) hb.unref?.()
       sock.on('data', lineParser(
         (msg) => {
           const m = msg as { type?: string; id?: string; level?: RuntimeStopLevel }
@@ -36,7 +53,7 @@ export function connectControl(handlers: {
         },
         () => { /* 畸形行丢弃 */ },
       ))
-      resolve({ close: () => { try { sock.destroy() } catch { /* ignore */ } } })
+      resolve({ close: () => { if (hb !== undefined) clearInterval(hb); try { sock.destroy() } catch { /* ignore */ } } })
     })
   })
 }
