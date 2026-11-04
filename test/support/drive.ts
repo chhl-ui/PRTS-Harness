@@ -3,7 +3,19 @@ import { randomUUID } from 'node:crypto'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 
-export async function runTurn(ctx: Context, text: string, opts: { cwd: string; sessionId?: string }): Promise<{ events: unknown[]; final: unknown }> {
+export async function runTurn(
+  ctx: Context,
+  text: string,
+  opts: {
+    cwd: string
+    sessionId?: string
+    /**
+     * 传入时把本次创建的会话注册为主会话。翻牌实验（未注册 → deny）依赖这条覆盖面：
+     * 测试驱动的会话与生产 `runChat` 一样，必须先有身份记录才谈收窄。
+     */
+    authority?: { registerPrimarySession(sessionId: string): void }
+  },
+): Promise<{ events: unknown[]; final: unknown }> {
   if (ctx == null || typeof (ctx as { on?: unknown }).on !== 'function') {
     throw new Error(`runTurn: bad ctx (type=${typeof ctx}, keys=${ctx ? Object.keys(ctx) : 'null'})`)
   }
@@ -16,6 +28,7 @@ export async function runTurn(ctx: Context, text: string, opts: { cwd: string; s
     create(o: { sessionId: unknown; meta?: { cwd?: string }; agentOptions?: { provider: string; model: string } }): Promise<{ agent: AgentLike; dispose(): Promise<void> }>
   }
   const sessionId = opts.sessionId ?? randomUUID()
+  opts.authority?.registerPrimarySession(sessionId as string)
   const { agent } = await agents.create({
     sessionId: sessionId as never,
     meta: { cwd: opts.cwd },

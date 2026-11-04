@@ -32,7 +32,7 @@ test('R1: 脚本 write 工具写工作区文件 → 文件存在 + 会话有 too
   try {
     const target = join(t.dir, 'ws', 'a.txt')
     app = await boot(t, [{ toolCalls: [{ name: 'write', arguments: { file_path: target, content: 'hello-prts' } }] }, { text: 'done' }])
-    const { events } = await runTurn(app.ctx as Context, 'write the file', { cwd: app.workspace })
+    const { events } = await runTurn(app.ctx as Context, 'write the file', { cwd: app.workspace, authority: app.authority })
     assert.ok(existsSync(target), 'a.txt 未创建')
     assert.equal(readFileSync(target, 'utf8'), 'hello-prts')
     const sessDir = join(app.dataRoot, 'dsh-home', 'sessions')
@@ -58,7 +58,7 @@ test('R2+网络对照：pwsh 沙箱写区内 OK/区外拒 + LanguageMode + TLS �
       { text: 'done' },
     ]
     app = await boot(t, script)
-    const { events } = await runTurn(app.ctx as Context, 'run commands', { cwd: app.workspace })
+    const { events } = await runTurn(app.ctx as Context, 'run commands', { cwd: app.workspace, authority: app.authority })
     assert.ok(existsSync(wsFile), '工作区文件未写')
     assert.equal(existsSync(outside), false, '沙箱外文件竟然被写了')
     // LanguageMode：从会话 JSONL 里找 pwsh 工具结果。
@@ -111,7 +111,7 @@ test('R3: 会话文件在 dataRoot 下，~/.dsh 不动', { skip: !WIN, timeout: 
   let app: Awaited<ReturnType<typeof boot>> | undefined
   try {
     app = await boot(t, [{ text: 'ok' }])
-    await runTurn(app.ctx as Context, 'hi', { cwd: app.workspace })
+    await runTurn(app.ctx as Context, 'hi', { cwd: app.workspace, authority: app.authority })
     await new Promise(r => setTimeout(r, 500))
     const home = join(app.dataRoot, 'dsh-home')
     const found: string[] = []
