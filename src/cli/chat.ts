@@ -68,7 +68,7 @@ function sessionFiles(dataRoot: string, sessionId: string): string[] {
 }
 
 /** 读 seq 之后的 assistant 文本；事件不带文本时用它兜底。 */
-function assistantAfterSeq(dataRoot: string, sessionId: string, afterSeq: number): { text: string; seq: number } {
+export function assistantAfterSeq(dataRoot: string, sessionId: string, afterSeq: number): { text: string; seq: number } {
   let text = ''
   let seq = afterSeq
   for (const f of sessionFiles(dataRoot, sessionId)) {
@@ -90,7 +90,7 @@ function assistantAfterSeq(dataRoot: string, sessionId: string, afterSeq: number
 }
 
 /** 等回合收敛：followup 后 status 仍可能是 idle，必须给 kick 留时间。 */
-async function waitIdle(agent: { status: string }, ms = 120000): Promise<boolean> {
+export async function waitIdle(agent: { status: string }, ms = 120000): Promise<boolean> {
   await new Promise((r) => setTimeout(r, 150))
   const t0 = Date.now()
   while (Date.now() - t0 < ms) {
