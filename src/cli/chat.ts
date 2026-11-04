@@ -21,6 +21,7 @@ import type { Ledger } from '../ledger/index.ts'
 import type { MemoryStore } from '../memory/index.ts'
 import { findForOwner, forgetFlow, correctFlow } from '../memory/forget-flow.ts'
 import { listSessions, renderSessionLine } from '../runtime/session-table.ts'
+import { dispatchTasks } from '../runtime/dispatcher.ts'
 import { probeSessions, purgeSessions } from '../memory/session-purge.ts'
 import { AuditLog } from '../audit/audit.ts'
 import type { Authority } from '../authority/index.ts'
@@ -148,6 +149,16 @@ export interface ChatDeps {
   authority?: Authority
   /** E3 审批桥：按 callId 取 pre-execute 暂存的 capabilities。 */
   approvalBridge?: ApprovalBridge
+  /**
+   * `/dispatch` 的分派参数（Router 侧一次性分派，worker 只回摘要）。
+   * 未提供时该命令明确报不可用——不静默忽略，也不猜 provider/model。
+   */
+  dispatch?: {
+    /** 子会话派生目录的根（workspace 根）。 */
+    workspace: string
+    provider: string
+    model: string
+  }
   /**
    * 本会话最近一次模型创建的 draft 任务（来自 startRuntime）。
    * 无参 /task-approve 靠它寻址——draft 不绑定会话，指针是唯一入口。
@@ -719,6 +730,41 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
         attemptId = undefined
         seenSeq = 0
         deps.out(`[prts] 已切到 ${target}\n`)
+        deps.onIdle?.()
+        continue
+      }
+      // ---- Wave 3 分派器：Router 侧把任务交给 worker，只回摘要 ----
+      if (line === '/dispatch' || line.startsWith('/dispatch ')) {
+        const task = line.slice('/dispatch'.length).trim()
+        if (task === '') {
+          deps.out('[prts] 用法：/dispatch <任务>（worker 只回摘要）\n')
+          deps.onIdle?.()
+          continue
+        }
+        if (deps.dispatch === undefined || deps.authority === undefined) {
+          deps.out('[prts] 未配置分派器（需要 dispatch 配置与 authority），/dispatch 不可用\n')
+          deps.onIdle?.()
+          continue
+        }
+        const results = await dispatchTasks({
+          ctx: deps.ctx,
+          authority: deps.authority,
+          workspace: deps.dispatch.workspace,
+          dataRoot: deps.dataRoot,
+          parentSessionId: sessionId,
+          provider: deps.dispatch.provider,
+          model: deps.dispatch.model,
+        }, [{ task }])
+        const r = results[0]
+        if (r === undefined) {
+          deps.out('[prts] 分派失败：没有返回结果\n')
+        } else if (!r.ok) {
+          deps.out(`[prts] 分派失败：${r.error ?? '未知错误'}\n`)
+        } else if (r.summary.trim() === '') {
+          deps.out(`[prts] 分派完成（${r.sessionId}），子会话没有产出文本\n`)
+        } else {
+          deps.out(`[prts] 分派完成（${r.sessionId}）：\n${r.summary}\n`)
+        }
         deps.onIdle?.()
         continue
       }

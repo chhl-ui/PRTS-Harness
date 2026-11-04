@@ -29,7 +29,7 @@ export interface SubtaskPlan {
   dir: string
 }
 
-const TASK_ID = /^[A-Za-z0-9_-]{1,64}$/
+export const TASK_ID = /^[A-Za-z0-9_-]{1,64}$/
 
 const SUBTASK_BASE = '.prts-subtask'
 

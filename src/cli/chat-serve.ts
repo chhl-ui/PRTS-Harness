@@ -82,6 +82,13 @@ try {
     authority: app.authority,
     approvalBridge: app.approvalBridge,
     draftTaskForSession: app.draftTaskForSession,
+    // Wave 3 分派器：/dispatch 用。worker 与主会话同一 provider/model（与
+    // start.ts 的 createSubtaskTool 取法一致），派生目录落在 workspace 下。
+    dispatch: {
+      workspace,
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+    },
     // 模型文本：与 out 互斥（A1 在 chat.ts 里做的分流），不会同时走两条。
     onAssistantDelta: (text) => term.pushModelDelta(text),
     approvalChannel: { ask: (info) => term.requestApproval(info) },

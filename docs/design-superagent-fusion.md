@@ -233,9 +233,13 @@ warm 日志符合预期。五分钟，不算使用，算体检。
 | W3 | 任务事件触发的主动提醒 | 单测：blocked 超阈值触发一次、不重复触发、重启不丢 |
 | R | Router + Workers 第一步：会话表（`list()` + 目录）→ `/sessions` `/switch` → 分派器（worker 只回摘要） | 前置：客户端寿命与运行时寿命解耦（`chat-serve.ts`）。单测：`list()` 含活会话、`/switch` 后消息进对的 agent、worker 只回摘要；真机：两会话并存不串话 |
 
-**落地状态（2026-11-04 交接时实测）**：W3 已完成并接线（`src/runtime/task-reminder.ts`、
+**落地状态（2026-11-05 更新）**：W3 已完成并接线（`src/runtime/task-reminder.ts`、
 `start.ts:23`）；W1 的检测与审计已接（`start.ts:547-551`），**停机权未接**——代码注释写明
-等真实误报率数据；W2 未做（`prts_subtask` 在 `src/` 零命中）；R 未开始（第四节即其前置）。
+等真实误报率数据；W2 已完成（`src/runtime/subtask.ts`：`spawnSubtask` + `prts_subtask` 派生闸，
+测试 `test/runtime/spawn-subtask.test.ts`）；R 的会话表、`/sessions`、`/switch`、分派器已完成
+（`src/runtime/session-table.ts`、`src/runtime/dispatcher.ts`、`src/cli/chat.ts` 的 `/dispatch`，
+测试 `test/runtime/dispatcher.test.ts` / `test/cli/dispatch-command.test.ts`）。
+**仍未做**：客户端寿命与运行时寿命解耦（`chat-serve.ts:94-95`）——常驻 Router 的前置。
 
 ## 七、预测的失败模式（先写下来，复查时对照）
 
