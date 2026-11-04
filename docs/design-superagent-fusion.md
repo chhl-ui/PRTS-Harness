@@ -175,7 +175,9 @@ Router 要常驻，必须解耦「运行时寿命」与「客户端连接寿命�
 
 **Q3 人怎么切任务？** 现在是单会话单输入，必须加一层：
 
-- 当前入口只有一条对话流：`/exit` `/task` `/memory` `/intent`（`src/cli/chat.ts:598-628`）；
+- 当前入口只有一条对话流，宿主命令全集是 `/exit` `/quit` `/task` `/task-approve` `/memory`
+  `/forget-session` `/forget` `/correct` `/intent` `/accept` `/reject` `/cancel` `/budget`
+  `/tasks`（`src/cli/chat.ts:598-649`）——**没有一条与会话列表或切换有关**；
   终端服务端明确拒绝第二个客户端（`src/runtime/terminal-server.ts:159-162` 的 `busy` 分支），
   理由是 `runChat` 单会话长循环共享同一个输入迭代器。
 - 最小可用入口：`/sessions`（列 `AgentRegistry.list()` + 落盘会话）、`/switch <id>`（把当前输入
