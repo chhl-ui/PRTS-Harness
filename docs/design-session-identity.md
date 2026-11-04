@@ -23,7 +23,7 @@ Wave 2 的「子会话授权收窄」连续 30+ 次被议事会否决，每次�
 | 空会话已对 grant fail-closed | `src/authority/authority.ts:142-147` |
 | 运行时两条订阅都用 `exec.agent?.session?.id ?? ''` | `src/runtime/start.ts:402`、`:446` |
 | 全仓 `agents.create` 仅一处生产调用 | `src/cli/chat.ts:499` |
-| 七条注入链是运行时级 handler | `src/runtime/intent-trigger.ts:132`、`task-reminder.ts:113` |
+| 七条注入链是运行时级 handler | `src/runtime/intent-trigger.ts:163`、`task-reminder.ts:204` |
 | **只读打开不执行 SCHEMA**：`AuditLog.open({readOnly:true})` 只设 busy_timeout 就返回 | `src/audit/audit.ts:184-188` |
 | 空 sessionId 的现有用例全部期望 deny（无「期望 allow」的反对用例） | `test/authority/session-scope.test.ts:66/129/140` |
 
