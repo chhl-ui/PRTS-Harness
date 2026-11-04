@@ -71,6 +71,7 @@ interface RawIntentRow {
   fired_at_ms: number | null
   cancelled_at_ms: number | null
   source_turn_id: string | null
+  session_id: string | null
 }
 
 function toIntentRow(r: RawIntentRow): IntentRow {
@@ -84,6 +85,7 @@ function toIntentRow(r: RawIntentRow): IntentRow {
     firedAtMs: r.fired_at_ms,
     cancelledAtMs: r.cancelled_at_ms,
     sourceTurnId: r.source_turn_id,
+    sessionId: r.session_id,
   }
 }
 /**
@@ -1735,10 +1737,14 @@ export class MemoryStore {
   }
 
   /**
-   * 记一次触发。`firedAtMs` 是**实际**触发时刻，可能与计划时刻差很远
+   * 记一次**投递**。`firedAtMs` 是实际触发时刻，可能与计划时刻差很远
    * （方案 B：进程不在时下次启动补发）。非 pending 状态视为无操作——补触发可能重放。
+   *
+   * `sessionId` 是这条提醒被念给的那个会话。留痕只能由「真的进了本轮的 messages」
+   * 触发（`intent-trigger.ts` 的 `markDelivered`），所以这个参数不是装饰：
+   * 没有它，事后无法回答「这条提醒到底有没有说出口、说给了谁」。
    */
-  markFired(input: { actor: ActorKind; intentId: string; firedAtMs: number }): void {
+  markFired(input: { actor: ActorKind; intentId: string; firedAtMs: number; sessionId?: string }): void {
     const row = this.getIntent(input.intentId)
     if (row === undefined) throw new Error(`intent: 不存在 ${input.intentId}`)
     if (row.status !== 'pending') return
@@ -1746,14 +1752,18 @@ export class MemoryStore {
       kind: 'intent.fired',
       actor: input.actor,
       recordedAtMs: Date.now(),
-      payload: { intent_id: input.intentId, fired_at_ms: input.firedAtMs },
+      payload: {
+        intent_id: input.intentId,
+        fired_at_ms: input.firedAtMs,
+        session_id: input.sessionId ?? null,
+      },
     })
   }
 
   getIntent(intentId: string): IntentRow | undefined {
     const row = this.db.prepare(
       `SELECT intent_id, condition_raw, action, fire_at_ms, status, created_at_ms,
-              fired_at_ms, cancelled_at_ms, source_turn_id
+              fired_at_ms, cancelled_at_ms, source_turn_id, session_id
          FROM mem_intents WHERE intent_id = ?`,
     ).get(intentId) as unknown as RawIntentRow | undefined
     return row === undefined ? undefined : toIntentRow(row)
@@ -1761,7 +1771,7 @@ export class MemoryStore {
 
   listIntents(opts: { status?: IntentStatus } = {}): IntentRow[] {
     const base = `SELECT intent_id, condition_raw, action, fire_at_ms, status, created_at_ms,
-                         fired_at_ms, cancelled_at_ms, source_turn_id
+                         fired_at_ms, cancelled_at_ms, source_turn_id, session_id
                     FROM mem_intents`
     const rows = (opts.status === undefined
       ? this.db.prepare(`${base} ORDER BY created_at_ms DESC`).all()
@@ -1776,7 +1786,7 @@ export class MemoryStore {
   dueIntents(nowMs: number): IntentRow[] {
     const rows = this.db.prepare(
       `SELECT intent_id, condition_raw, action, fire_at_ms, status, created_at_ms,
-              fired_at_ms, cancelled_at_ms, source_turn_id
+              fired_at_ms, cancelled_at_ms, source_turn_id, session_id
          FROM mem_intents
         WHERE status = 'pending' AND fire_at_ms <= ?
         ORDER BY fire_at_ms ASC`,

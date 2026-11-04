@@ -69,6 +69,8 @@ test('C1 超过上限时折叠：只展开前 3 条，其余折成「另有 N �
       const text = await fireText(hook, {})
       assert.equal((text.match(/\[提醒\]/g) ?? []).length, 3, '默认只展开 3 条，不能拼成一堵墙')
       assert.match(text, /另有 2 条/, '被折叠的条数要明说，否则用户以为只有 3 件事')
+      // 新语义：注入只算「渲染」，装配器确认投递后才落 fired（markDelivered）。
+      trig.markDelivered('')
       assert.equal(store.listIntents({ status: 'fired' }).length, 5, '折叠只改显示——5 条都必须标记 fired，否则下次重复提醒')
 
       // 同一步再触发不得二次注入（fired 集合与状态双保险）。

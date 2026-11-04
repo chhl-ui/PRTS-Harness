@@ -143,6 +143,9 @@ CREATE TABLE IF NOT EXISTS mem_intents (
   fired_at_ms     INTEGER,
   cancelled_at_ms INTEGER,
   source_turn_id  TEXT,
+  -- 投递会话：这条提醒念给了哪个会话。投递失败（被预算裁掉 / 上游 reject）时
+  -- 该列保持 NULL、行也仍是 pending——「留痕」与「投递」因此可以对上账。
+  session_id      TEXT,
   CHECK (status IN ('pending','fired','cancelled')),
   CHECK (status <> 'fired' OR fired_at_ms IS NOT NULL),
   CHECK (status <> 'cancelled' OR cancelled_at_ms IS NOT NULL)
@@ -273,6 +276,7 @@ export function openMemoryDb(path: string): DatabaseSync {
   ensureFactAccessColumns(db)
   ensureConsolidationFactCursor(db)
   ensureDerivedOriginColumns(db)
+  ensureIntentSessionColumn(db)
   ensureFtsIndexed(db)
   ensureSessionsBuilt(db)
   return db
@@ -379,6 +383,18 @@ function ensureDerivedOriginColumns(db: DatabaseSync): void {
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_profiles_origin ON mem_profiles(scope, origin, deleted_at_ms)')
   db.exec('CREATE INDEX IF NOT EXISTS idx_summaries_origin ON mem_summaries(scope, origin, deleted_at_ms)')
+}
+
+/**
+ * `session_id` 列的自愈迁移（投递留痕, v2.19）。
+ *
+ * 旧库执行 SCHEMA 时 `mem_intents` 已存在，`CREATE TABLE IF NOT EXISTS` 不会补列，
+ * 只能 ALTER。老行保持 NULL：它们触发于「还没记会话」的旧行为，回填任意值都是编造。
+ * 不加索引：只按主键单行 UPDATE，没有按会话过滤意图的查询。
+ */
+function ensureIntentSessionColumn(db: DatabaseSync): void {
+  const cols = (db.prepare('PRAGMA table_info(mem_intents)').all() as Array<{ name: string }>).map((c) => c.name)
+  if (!cols.includes('session_id')) db.exec('ALTER TABLE mem_intents ADD COLUMN session_id TEXT')
 }
 
 export function ensureSessionsBuilt(db: DatabaseSync, inTransaction = false): void {

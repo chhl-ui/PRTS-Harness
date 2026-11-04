@@ -340,6 +340,11 @@ export interface IntentRow {
   firedAtMs: number | null
   cancelledAtMs: number | null
   sourceTurnId: string | null
+  /**
+   * 投递留痕：这条提醒念给了哪个会话。`null` 表示没有会话可归（旧数据，
+   * 或手工 `runOnce` 手动触发）。投递失败时整行仍是 `pending`，此列也为 `null`。
+   */
+  sessionId: string | null
 }
 
 export interface CreateIntentInput {

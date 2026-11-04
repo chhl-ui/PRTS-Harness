@@ -69,6 +69,8 @@ test('G2 同一条意图不会重复注入', async () => {
       clock = fireAt + 1000
       const first = await hook.fire({}, async () => enter([{ id: 'm1' }])) as { messages: unknown[] }
       assert.equal(first.messages.length, 2)
+      // 新语义：注入只算「渲染」，装配器确认投递后才落 fired（markDelivered）。
+      trig.markDelivered('')
       const second = await hook.fire({}, async () => enter([{ id: 'm2' }])) as { messages: unknown[] }
       assert.equal(second.messages.length, 1, '已触发的不能再提醒一次')
     } finally { trig.dispose() }
@@ -152,7 +154,8 @@ test('G6 重启后补触发：新实例扫描到过期意图并标记为 fired',
     try {
       const out = await hook.fire({}, async () => enter([{ id: 'm1' }])) as { messages: unknown[] }
       assert.equal(out.messages.length, 2, '重启后的第一次交互必须补发')
-      assert.equal(second.listIntents({ status: 'fired' }).length, 1, '状态要落到 fired，不能下次再提醒')
+      trig.markDelivered('')
+      assert.equal(second.listIntents({ status: 'fired' }).length, 1, '投递确认后状态要落到 fired')
       assert.equal(second.dueIntents(clock).length, 0)
     } finally { trig.dispose() }
   } finally { second.close(); t.cleanup() }

@@ -801,6 +801,10 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // Wave 1 装配器：必须**最先注册**——Cordis 的 waterfall 是「先注册 = 最外层」，
   // 只有最外层的 next() 才在其余七条注入链全部追加完之后返回（见 assembly.ts 头注释）。
   // 预算延迟求值：真正的 injectBudgetTokens 在下方才算出。
+  //
+  // `intentTrigger` 此刻还没建（它要 `memory` 且注册点在下游）：用 holder 延后绑定。
+  // 装配器只在 pre-step 运行期回调，那时 holder 早已赋值——顺序是安全的。
+  let intentTrigger: ReturnType<typeof attachIntentTrigger> | undefined
   const assembly = attachAssembly(
     ctx as unknown as {
       on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
@@ -810,6 +814,11 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       ...(memory === undefined
         ? {}
         : { record: (input: Parameters<MemoryStore['recordInjection']>[0]) => { memory.recordInjection(input) } }),
+      // 「投递成功才留痕」的跨链接线：装配器报出**裁剪后仍保留**的链，
+      // 只有 intent 链还在，到期提醒才算真的送到了模型眼前。
+      onDelivered: (chains, sessionId) => {
+        if (chains.includes('intent')) intentTrigger?.markDelivered(sessionId)
+      },
     },
   )
 
@@ -840,7 +849,9 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // V1-14 触发（方案 B）：到期时进程在则准点，不在则下次交互补发并如实告知延迟。
   // 挂在 pre-step 而不是定时器上——提醒必须有会话可投递，定时器到点时没有对话，
   // 注入无处可去；而 pre-step 天然覆盖「重启后补发」。
-  const intentTrigger = memory === undefined ? undefined : attachIntentTrigger(
+  // 留痕不在这里写：本 handler 只渲染候选，真正的 `markFired` 由装配器的
+  // `onDelivered`（上方）确认「intent 链真的被保留」后经 `markDelivered` 落地。
+  intentTrigger = memory === undefined ? undefined : attachIntentTrigger(
     ctx as unknown as {
       on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
     },

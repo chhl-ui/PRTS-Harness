@@ -291,13 +291,19 @@ export function applyMemoryEvent(db: DatabaseSync, e: MemoryEventRow): void {
       break
     }
     case 'intent.fired': {
-      const p = JSON.parse(e.payload_json) as { intent_id: string; fired_at_ms: number }
+      const p = JSON.parse(e.payload_json) as {
+        intent_id: string
+        fired_at_ms: number
+        session_id?: string | null
+      }
       // 只从 pending 迁出：fired/cancelled 是终态。方案 B 的启动补触发可能重放同一事件，
       // 用 WHERE status='pending' 让重放变成无操作，而不是把时刻改来改去。
+      // `session_id` 记「念给了哪个会话」：旧事件的 payload 没有这个键，coalesce 成 NULL，
+      // 而不是把 NOT NULL 约束或默认值硬塞进历史。
       db.prepare(
-        `UPDATE mem_intents SET status = 'fired', fired_at_ms = ?
+        `UPDATE mem_intents SET status = 'fired', fired_at_ms = ?, session_id = ?
           WHERE intent_id = ? AND status = 'pending'`,
-      ).run(p.fired_at_ms, p.intent_id)
+      ).run(p.fired_at_ms, p.session_id ?? null, p.intent_id)
       break
     }
     case 'intent.cancelled': {

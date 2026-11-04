@@ -39,6 +39,20 @@ export interface AssemblyDeps {
   budget?: AssemblyBudget | (() => AssemblyBudget | undefined)
   /** 写装配总账；抛错不得影响本轮装配。 */
   record?: (input: RecordInjectionInput) => void
+  /**
+   * 本轮**最终保留**的注入链回调（保留的链标识 + 会话 id）。
+   *
+   * 为什么需要：有些链的留痕必须发生在「消息真的进了本轮 messages」之后
+   * （`intent-trigger.ts` 的 `markDelivered`，见其头注释）。只有装配器知道
+   * 裁剪之后到底剩了哪几条链，所以回调只能挂在这里。
+   *
+   * 回调**在两条 return 路径之前**触发：不裁时（`kept === messages`）也必须回调，
+   * 否则预算充裕的生产默认路径（`DSH_CONTEXT_WINDOW` 默认 1e6）永远不留痕，
+   * 意图会被每轮重复提醒。
+   *
+   * 抛错不得影响本轮装配。
+   */
+  onDelivered?: (chains: readonly string[], sessionId: string) => void
   /** 裁剪顺序，低 → 高。默认 proactive 最先、memory 最后。 */
   dropOrder?: readonly string[]
 }
@@ -150,6 +164,13 @@ export function attachAssembly(hookCtx: HookContext, deps: AssemblyDeps = {}): A
           droppedChains: dropped,
         })
       } catch { /* 观测失败不阻断装配 */ }
+
+      // 投递确认：只报**裁剪之后仍在**的链。单独 try/catch——回调失败不能让装配崩，
+      // 更不能退化成「注入消失」。
+      const retained = chains.filter((c) => !dropped.includes(c))
+      try {
+        deps.onDelivered?.(retained, sessionId)
+      } catch { /* 投递确认失败不阻断装配 */ }
 
       if (kept.length === decision.messages.length) return decision
       return { ...decision, messages: kept.map((e) => e.message) }

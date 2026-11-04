@@ -155,3 +155,34 @@ test('A5 非注入消息不被误裁（id 不匹配任何前缀）', async () =>
   assert.ok(ids.includes('runtime-context'), '非注入消息不能动')
   assert.ok(!ids.includes('mem-x'), '预算 1 token 连 memory 也放不下')
 })
+
+test('A6 onDelivered 只报裁剪后仍保留的链', async () => {
+  const delivered: { chains: readonly string[]; sessionId: string }[] = []
+  const hook = makeHookCtx()
+  const assembly = attachAssembly(hook.ctx as never, {
+    budget: { maxTokens: 300 },
+    onDelivered: (chains, sessionId) => { delivered.push({ chains, sessionId }) },
+  })
+  for (const c of CHAINS) hook.ctx.on('agent/pre-step', chain(c.prefix, c.text))
+  await hook.dispatch({ agent: { session: { id: 's1' } }, turn: 1, step: 0, messages: [{ id: 'u1' }] })
+  assembly.dispose()
+
+  assert.equal(delivered.length, 1, '一次装配一次投递确认')
+  assert.equal(delivered[0]?.sessionId, 's1')
+  assert.ok(!delivered[0]?.chains.includes('proactive'), '被裁的链不能报已投递')
+  assert.ok(delivered[0]?.chains.includes('memory'), '保留的链要报')
+})
+
+test('A7 上游 reject 时 onDelivered 不触发（reject 回合不能记成已投递）', async () => {
+  let called = 0
+  const hook = makeHookCtx()
+  const assembly = attachAssembly(hook.ctx as never, {
+    onDelivered: () => { called += 1 },
+  })
+  hook.ctx.on('agent/pre-step', async () => ({ kind: 'reject' }))
+  const d = await hook.dispatch({ agent: { session: { id: 's1' } }, turn: 1, step: 0, messages: [] })
+  assembly.dispose()
+
+  assert.equal((d as { kind: string }).kind, 'reject')
+  assert.equal(called, 0, 'reject 路径不得触发 onDelivered')
+})
