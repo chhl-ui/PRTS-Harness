@@ -20,6 +20,7 @@ import { attachSkillInjection } from './skill-inject.ts'
 import { attachEmotionInjection } from './emotion-inject.ts'
 import { attachSessionRecall } from './session-recall.ts'
 import { attachProactiveRecall } from './proactive-recall.ts'
+import { resolveTokenBudget } from './token-budget.ts'
 import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachToolLoopAudit } from './tool-loop-audit.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
@@ -786,12 +787,26 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 与记忆的 forget/correct 同一纪律（模型面零破坏性工具）。
   const intentTools = memory === undefined ? undefined : createIntentTools(tools, { store: memory })
 
+  // ③ 装配预算（`docs/context-assembly-status.md:17`）：窗口取 `DSH_CONTEXT_WINDOW`，
+  // 与 `config/prts.yml` 的 `defaultContextWindow` 同一个来源；未设时按 1000000。
+  // 大窗口下预算很大、实际不裁（现状 5 条记忆 ~1K token）；换成本地小模型时
+  // 设 `DSH_CONTEXT_WINDOW=8192`，窗口装不下输出预留+安全余量时预算自然为 0，注入让路。
+  // `PRTS_MEMORY_INJECT_BUDGET` 可显式封顶（token），0 = 关掉注入。
+  const contextWindowRaw = Number(process.env.DSH_CONTEXT_WINDOW ?? '1000000')
+  const injectBudgetTokens = resolveTokenBudget({
+    contextWindow: Number.isFinite(contextWindowRaw) && contextWindowRaw > 0 ? contextWindowRaw : undefined,
+    ...(process.env.PRTS_MEMORY_INJECT_BUDGET === undefined
+      ? {}
+      : { configMaxTokens: Number(process.env.PRTS_MEMORY_INJECT_BUDGET) }),
+  })
+
   const memoryInjection = memory === undefined ? undefined : attachMemoryInjection(
     ctx as unknown as {
       on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
     },
     {
       store: memory, limit: injectLimit,
+      budget: { maxTokens: injectBudgetTokens },
       ...(embedderResolver === undefined ? {} : { embedder: embedderResolver }),
       ...(reranker === undefined ? {} : { reranker }),
     },

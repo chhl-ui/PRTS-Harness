@@ -25,6 +25,7 @@
 import { randomUUID } from 'node:crypto'
 import { renderReading } from '../memory/index.ts'
 import { applyRerank, type Reranker } from '../memory/rerank.ts'
+import { fitToBudget } from './token-budget.ts'
 import type { Embedder, MemoryHit, MemoryStore, ReadingDeps } from '../memory/index.ts'
 
 export interface MemoryInjectionDeps {
@@ -63,6 +64,16 @@ export interface MemoryInjectionDeps {
   correctionPins?: number
   /** 更正标记的回看窗口，默认 30 天。 */
   correctionWindowMs?: number
+  /**
+   * ③ token 预算（`docs/context-assembly-status.md:17`）。undefined = 不限制，
+   * 保持旧行为不变。由 `start.ts` 用 `resolveTokenBudget` 算好后传入；
+   * 测试可传固定值。预算不够时**整条丢弃**（不截断：半句话比不注入更坏）。
+   */
+  budget?: {
+    maxTokens: number
+    /** 估算一段文本的 token；缺省 `ceil(chars / 2)`（中文约 1 字 1 token，英文约 4 字符 1 token 的折中）。 */
+    estimateTokens?: (text: string) => number
+  }
 }
 
 export interface MemoryInjection {
@@ -129,6 +140,9 @@ export function renderInjection(hits: MemoryHit[], deps: ReadingDeps = {}): stri
     : '[记忆检索] 与当前问题可能相关的历史记录（按相关度排序，来自长期记忆；不是用户本轮发言）：\n'
   return header + r.body
 }
+
+/** 注入正文 header 的固定 token 开销：粗估（约 60 个中文字），取 100 留余量。 */
+const BUDGET_HEADER_TOKENS = 100
 
 export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectionDeps): MemoryInjection {
   const limit = deps.limit ?? 5
@@ -234,11 +248,20 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
         .recentCorrections({ sinceMs: Date.now() - correctionWindowMs, limit: correctionPins, excludeSessionId: sessionId })
         .filter((h) => !seen.has(h.id))
       const pinnedIds = new Set(pinned.map((h) => h.id))
-      const hits = [...pinned, ...ordered.filter((h) => !pinnedIds.has(h.id))].slice(0, limit)
+      const selected = [...pinned, ...ordered.filter((h) => !pinnedIds.has(h.id))].slice(0, limit)
+      // ③ 预算裁剪：header 是固定开销，先从预算里扣掉，避免「装了 N 条但算不下 header」。
+      // 未传 budget = 不限制（旧行为一字不变，默认接线前结果与历史一致）。
+      const hits = deps.budget === undefined
+        ? selected
+        : fitToBudget(
+          selected,
+          Math.max(0, deps.budget.maxTokens - BUDGET_HEADER_TOKENS),
+          (h) => (deps.budget!.estimateTokens ?? ((text: string) => Math.ceil(text.length / 2)))(h.text),
+        ).kept
       if (hits.length === 0) {
         recordOnce(stepKey, {
           sessionId, turn, step, injected: 0, hitIds: [], kinds: {}, usedChars: 0, limit,
-          outcome: 'skipped', reason: 'no-hit',
+          outcome: 'skipped', reason: selected.length === 0 ? 'no-hit' : 'budget',
         })
         return decision
       }
