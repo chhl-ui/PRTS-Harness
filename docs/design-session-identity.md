@@ -26,6 +26,7 @@ Wave 2 的「子会话授权收窄」连续 30+ 次被议事会否决，每次�
 | 七条注入链是运行时级 handler | `src/runtime/intent-trigger.ts:163`、`task-reminder.ts:204` |
 | **只读打开不执行 SCHEMA**：`AuditLog.open({readOnly:true})` 只设 busy_timeout 就返回 | `src/audit/audit.ts:184-188` |
 | 空 sessionId 的现有用例全部期望 deny（无「期望 allow」的反对用例） | `test/authority/session-scope.test.ts:66/129/140` |
+| 直接构造 `new Authority(` 18 处 / 7 个文件；`startRuntime(` 42 处 / 28 个文件（本次只读扫描） | `src/` + `test/` 全文扫描 |
 
 ## 三、设计
 
@@ -33,14 +34,17 @@ Wave 2 的「子会话授权收窄」连续 30+ 次被议事会否决，每次�
 
 新增两个审计事件，**必须先落类型联合与校验分支**（`validateEvent` 是逐 kind 的 switch，default 直接 raise，漏接则写入即拒）：
 
-- `AuditEvent` 联合加 `session.registered` / `session.released`（`src/audit/types.ts`）。
-- `validateEvent` 分支：`sessionId` 非空；`kind ∈ {primary, subagent}`；`roots` 为 `string[]`（可为空数组）；`parentSession` 若给则非空串；`session.released` 只校验 `sessionId`。
+- `AuditEvent` 联合加 `session.registered` / `session.released`（`src/audit/types.ts:31-33`）。
+- **事件字段名是 `sessionKind`，不是 `kind`**：外层 `kind` 已被事件判别占用，`session.registered` 只能写 `{ sessionId, sessionKind, roots, parentSession? }`（`types.ts:32`）。类型是 `SessionKind = 'primary' | 'subagent'`。
+- **但注册 API 的入参仍是 `kind`**：`RegisterSessionInput` 是 `{ sessionId, kind, roots, parentSession? }`（`types.ts:48-52`），由 `registerSession` 在写事件时映射为 `sessionKind`（`audit.ts:331`）。两者不可混写——事件字段是判别冲突后的形状，入参字段是公开 API 的形状。
+- `validateEvent` 分支：`sessionId` 非空；`sessionKind ∈ {primary, subagent}`；`roots` 为 `string[]`（可为空数组）；`parentSession` 若给则非空串；`session.released` 只校验 `sessionId`（`audit.ts:182-188`）。
 
 投影表（只能由 `applyAuditEvent` 在同事务更新）：
 
 ```sql
 CREATE TABLE IF NOT EXISTS audit_sessions (
   session_id       TEXT PRIMARY KEY,
+  -- 投影列名保持 kind（表内无判别冲突），对应事件字段 sessionKind
   kind             TEXT NOT NULL CHECK (kind IN ('primary','subagent')),
   roots_json       TEXT NOT NULL,
   parent_session   TEXT,
@@ -103,13 +107,16 @@ fs.delete 保持恒 ask，只在 ask 前加「子会话活跃 + roots 外 → de
 
 ### 3.5 未注册 = 主会话：显式取舍与收紧路径
 
-**本波不施加「未注册 deny」**。理由：`startRuntime` 调用点 40+，unknown deny 会让全部 wiring 用例同时变红。
+**本波不施加「未注册 deny」**。理由：`startRuntime` 全仓 42 处调用（28 个文件，见 §二），unknown deny 会让全部 wiring 用例同时变红。
 
-但议事会指出这个爆炸半径**可能被高估**：空会话 deny 已在 Wave 0 落地且无反对用例（见 §二），说明 40+ 调用点大多传了非空 sessionId。因此本设计的收紧路径缩短为：
+但议事会指出这个爆炸半径**可能被高估**：空会话 deny 已在 Wave 0 落地且无反对用例（见 §二），说明这 42 处大多传了非空 sessionId。
+
+**收紧路径的真实前置不是改默认值。** `allowUnregisteredSessions` 这个开关在 `src/` 内零命中（grep 无任何符号定义或引用），`decideSessionScoped`（§3.3）也尚未实现——§3.3 是待落地设计，不是已存在的代码。所以「把默认值翻为 false」既没有对象可翻，也没有判定可翻。收紧必须按实现顺序推进：
 
 1. 先落 `registerPrimarySession` 在 `chat.ts:499` 的挂点 + 覆盖测试；
-2. 跑一次全量，若「未注册 deny」只打穿少数用例，**本波就把 `allowUnregisteredSessions` 默认值翻为 false**；
-3. 若打穿面过大，才退回 defer 并押后到 Wave 3。
+2. 实现 `decideSessionScoped` 并接进 `evalCap`（`src/authority/`），此时「未注册」分支的返回值本身即收紧开关——defer 是现状口径，deny 是收紧口径；
+3. 跑一次全量，若把「未注册」分支从 defer 改为 deny 只打穿少数用例，本波就改该分支返回值（无需引入新配置项）；
+4. 若打穿面过大，保持 defer 并押后到 Wave 3。
 
 残余风险（若退回 defer）：不经注册的 `agents.create` 会以主会话权限运行；缓解是 3.4 的覆盖测试 + 注册失败即拒绝。
 

@@ -502,6 +502,19 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
     agentOptions: { provider: 'deepseek-official', model: 'deepseek-chat' },
   })
 
+  /*
+   * 会话身份：主会话必须在跑到第一个模型回合之前就注册好。
+   * 「谁是主会话」是后续权限收窄与审计归属的依据，缺登记就等于作用域空白。
+   * 注册失败按 fail-closed：报错并退出，不进入主循环——静默继续会让整段会话
+   * 在没有身份记录的前提下照常对话，失败被藏到最后才暴露。
+   */
+  try {
+    deps.authority?.registerPrimarySession(sessionId)
+  } catch (error) {
+    deps.out(`[prts] 会话身份注册失败：${error instanceof Error ? error.message : String(error)}\n`)
+    return { turns: 0, replies: [] }
+  }
+
   const replies: string[] = []
   /** E3 审批应答的解绑器；在 try 内赋值、finally 里解绑，故声明在 try 外。 */
   let offApproval: (() => void) | undefined

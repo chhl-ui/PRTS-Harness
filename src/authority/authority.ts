@@ -194,7 +194,38 @@ export class Authority {
       .filter((g) => g.sessionId === null || g.sessionId === sessionId)
   }
 
-  private evalCap(c: Capability, grants: { grantId: string; capability: string; sessionId: string | null }[]): CapResult {
+  /** 该路径是否落在会话登记的 roots 内（roots 已 realpath 归一，这里再归一一侧对齐）。 */
+  private inSessionRoots(row: SessionRow, rp: string): boolean {
+    return row.roots.some((r) => isWithin(rp, realpathBestEffort(r)))
+  }
+
+  /**
+   * 会话级写入口径（W2）。只收窄、不打开任何新通道：
+   *
+   * - 空 sessionId → deny（「没有会话」不是「任何会话」，与 grantsForSession 同一判据）
+   * - 未注册 → defer（没有身份记录不等于有罪，回落原判定）
+   * - 主会话 → defer
+   * - 已释放子会话 → deny（身份已交回，不再持有任何写权）
+   * - 活跃子会话 → roots 内 allow；全局 workspace 内且 roots 外 deny；其余 defer
+   *
+   * 只由 fs.write / fs.delete 调用；fs.read 与 exec 不经过这里。
+   */
+  private decideSessionScoped(sessionId: string, rp: string): 'allow' | 'deny' | 'defer' {
+    if (sessionId === '') return 'deny'
+    const row = this.sessionRow(sessionId)
+    if (row === undefined) return 'defer'
+    if (row.releasedAtMs !== null) return 'deny'
+    if (row.kind === 'primary') return 'defer'
+    if (this.inSessionRoots(row, rp)) return 'allow'
+    if (this.workspaceRoots.some((r) => isWithin(rp, r))) return 'deny'
+    return 'defer'
+  }
+
+  private evalCap(
+    c: Capability,
+    grants: { grantId: string; capability: string; sessionId: string | null }[],
+    sessionId: string,
+  ): CapResult {
     const p = parseCapability(c)
     switch (p.kind) {
       case 'fs.read': {
@@ -223,6 +254,10 @@ export class Authority {
           if (sub !== undefined) {
             return { kind: 'deny', reason: `fs.write denied: ${p.arg} is inside read-only subpath '${sub}'` }
           }
+          // 会话级收窄（W2）：已注册子会话只能写自己的 roots。
+          // 未注册会话 / 主会话 → defer，落到原先的 workspace allow，不翻转。
+          const scoped = this.decideSessionScoped(sessionId, rp)
+          if (scoped === 'deny') return { kind: 'deny', reason: 'fs.write denied: subagent session' }
           return { kind: 'allow', via: 'policy' }
         }
         const g = grants.find((g) => g.capability.startsWith('fs.write:')
@@ -241,6 +276,14 @@ export class Authority {
         const roSub = this.readOnlySubpathOf(rp)
         if (roSub !== undefined) {
           return { kind: 'deny', reason: `fs.delete denied: ${p.arg} is inside read-only subpath '${roSub}'` }
+        }
+        // 删除恒 ask，唯一例外：活跃子会话删自己 roots 之外的全局工作区文件——
+        // 这不是「要不要批准」的问题，而是子会话根本没有那份权限。
+        const row = this.sessionRow(sessionId)
+        if (row !== undefined && row.kind === 'subagent' && row.releasedAtMs === null
+          && this.workspaceRoots.some((r) => isWithin(rp, r))
+          && !this.inSessionRoots(row, rp)) {
+          return { kind: 'deny', reason: 'fs.delete denied: subagent session' }
         }
         return { kind: 'ask', reason: `fs.delete requires per-call approval: ${p.arg}` }
       }
@@ -266,7 +309,7 @@ export class Authority {
   /** 同步、只读。一次调用的全部能力都放行才放行；deny > ask > allow。 */
   decide(call: ToolCall): Decision {
     const grants = this.grantsForSession(call.sessionId)
-    const results = call.capabilities.map((c) => this.evalCap(c, grants))
+    const results = call.capabilities.map((c) => this.evalCap(c, grants, call.sessionId))
 
     const deny = results.find((r) => r.kind === 'deny')
     if (deny) return { kind: 'deny', reason: (deny as { reason: string }).reason }
