@@ -127,6 +127,19 @@ fs.delete 保持恒 ask，只在 ask 前加「子会话活跃 + roots 外 → de
 
 **结论：本波不翻牌，保持 defer。** 关键不是 fixture 数量，而是那 4 条真实装配路径——`startRuntime` 不注册主会话，只有 `runChat` 注册；翻牌前必须先让所有装配入口注册（§3.4 的覆盖矩阵）。这修正了先前「爆炸半径小到中、本波可翻牌」的估计。
 
+**第二轮实测（补齐 `runTurn` 注册后，2026-11-04）**：`test/support/drive.ts` 的 `runTurn` 支持注册主会话、`runtime.test.ts` 三处接入后重跑，仍 **10 fail / 742 pass**——只少 1 条。剩余 10 条全部是测试 fixture 的未注册会话，分布在 6 个文件：
+
+| 文件 | 未注册来源 |
+|---|---|
+| `test/authority/authority.test.ts` | 直接构造 Authority + 字面量 sessionId |
+| `test/authority/read-only-subpaths.test.ts` | 同上（fixture 固定 `'s1'`） |
+| `test/authority/session-scoped-write.test.ts` | 自己的「零翻转」断言 |
+| `test/runtime/guard-wiring.test.ts` | runChat 之外的第二个会话 |
+| `test/runtime/ledger-step.test.ts` | 直接 `agents.create` |
+| `test/runtime/task-loop.test.ts` | 同上 |
+
+**翻牌的剩余成本是「给 6 个测试文件的 fixture 补注册」，不是产品缺陷**；而生产只有 `chat.ts:499` 一处 `agents.create`（已注册），未注册会话在生产中不会出现。因此当前 defer 口径的残余风险只落在「未来新增的装配入口忘记注册」——由 §3.4 的覆盖测试拦截。
+
 残余风险（若退回 defer）：不经注册的 `agents.create` 会以主会话权限运行；缓解是 3.4 的覆盖测试 + 注册失败即拒绝。
 
 ## 四、与现有不变量的关系
