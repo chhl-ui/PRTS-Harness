@@ -42,6 +42,8 @@ function makeAgent(id: string, record: Followup[]): FakeAgent {
 interface FakeCtxOpts {
   agents: Map<string, FakeAgent>
   record: Followup[]
+  /** 记录 create 调用（`/new` 用）。 */
+  creates?: string[]
   /** 捕获 `ctx.on('approval/request', …)`；其余事件忽略。 */
   approval?: { handler?: (req: unknown, next: () => unknown) => unknown }
 }
@@ -55,6 +57,7 @@ function fakeCtx(opts: FakeCtxOpts): Context {
         get: (id: string) => opts.agents.get(id),
         async create(o: { sessionId?: unknown }): Promise<unknown> {
           const sid = String(o?.sessionId ?? '')
+          opts.creates?.push(sid)
           if (!opts.agents.has(sid)) opts.agents.set(sid, makeAgent(sid, opts.record))
           return { agent: opts.agents.get(sid), dispose: async (): Promise<void> => {} }
         },
@@ -102,6 +105,9 @@ function fakeAuthority(): {
     },
     hasSessionScope(sessionId: string): boolean {
       return registered.has(sessionId)
+    },
+    releaseSession(sessionId: string): void {
+      registered.delete(sessionId)
     },
     recordOwnerDecision(): void { /* noop */ },
   } as unknown as Authority
@@ -315,3 +321,93 @@ const _typeProbe: ChatDeps['approvalBridge'] = {
   dropSession: () => 0,
 }
 void _typeProbe
+
+test('SN1 /new 新建会话并切换：后续 followup 进入新 agent', async () => {
+  const t = makeTmp('prts-switch-new1-')
+  try {
+    const record: Followup[] = []
+    const creates: string[] = []
+    const agents = new Map([['sess-a', makeAgent('sess-a', record)]])
+    const printed: string[] = []
+    const r = await runChat({
+      ctx: fakeCtx({ agents, record, creates }),
+      lines: lines('/new', 'hello', '/exit'),
+      out: (s) => printed.push(s),
+      cwd: t.dir,
+      dataRoot: join(t.dir, 'data'),
+      sessionId: 'sess-a',
+    })
+    const text = printed.join('')
+    assert.match(text, /已新建会话 prts-chat-/, `应有新建确认，实际：${text}`)
+    assert.equal(creates.length, 1, '应 create 一个新会话')
+    const newId = creates[0]!
+    assert.equal(record.length, 1)
+    assert.equal(record[0]!.id, newId, 'followup 必须进入新会话')
+    assert.equal(r.turns, 1, '/new 本身不产生回合')
+  } finally {
+    t.cleanup()
+  }
+})
+
+test('SN2 /new 注册新会话身份', async () => {
+  const t = makeTmp('prts-switch-new2-')
+  try {
+    const record: Followup[] = []
+    const creates: string[] = []
+    const agents = new Map([['sess-a', makeAgent('sess-a', record)]])
+    const { authority, registered } = fakeAuthority()
+    await runChat({
+      ctx: fakeCtx({ agents, record, creates }),
+      lines: lines('/new', '/exit'),
+      out: () => {},
+      cwd: t.dir,
+      dataRoot: join(t.dir, 'data'),
+      sessionId: 'sess-a',
+      authority,
+    })
+    const newId = creates[0]!
+    assert.equal(registered.has(newId), true, '新会话必须注册身份')
+  } finally {
+    t.cleanup()
+  }
+})
+
+test('SN3 /new create 失败：释放身份、报错、不切换', async () => {
+  const t = makeTmp('prts-switch-new3-')
+  try {
+    const record: Followup[] = []
+    const agents = new Map([['sess-a', makeAgent('sess-a', record)]])
+    const { authority, registered } = fakeAuthority()
+    const ctx = {
+      get(name: string): unknown {
+        if (name !== 'agents') return undefined
+        return {
+          get: (id: string) => agents.get(id),
+          list: () => [...agents.keys()].map((id) => ({ session: { id } })),
+          async create(): Promise<unknown> {
+            throw new Error('create boom')
+          },
+        }
+      },
+    } as unknown as Context
+    const printed: string[] = []
+    await runChat({
+      ctx,
+      lines: lines('/new', 'hello', '/exit'),
+      out: (s) => printed.push(s),
+      cwd: t.dir,
+      dataRoot: join(t.dir, 'data'),
+      sessionId: 'sess-a',
+      authority,
+    })
+    assert.match(printed.join(''), /新建会话失败：create boom/)
+    assert.equal(
+      [...registered].some((id) => id.startsWith('prts-chat-')),
+      false,
+      '失败的新会话身份必须释放，不能留幽灵会话',
+    )
+    assert.equal(record[0]?.id, 'sess-a', '失败后仍留在原会话')
+  } finally {
+    t.cleanup()
+  }
+})

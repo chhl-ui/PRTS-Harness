@@ -569,6 +569,22 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
     else deps.out(delta)
     // 模型文本出口见上：回调与 out 二选一，不可双写（否则 host 通道会混入模型文本）。
   })
+  /**
+   * 切换/新建会话后的公共状态复位：替换 agent/sessionId，清掉属于旧会话的中间态
+   * （流式文本、attempt、日志 seq），并丢弃旧会话的待审批请求。
+   */
+  const applySwitch = (next: { status: string; followup(m: unknown): void }, target: string): void => {
+    // 旧会话的待审批请求必须丢弃：终端是同一个，切走后读到的 [y/N] 会应答错会话。
+    deps.approvalBridge?.dropSession(sessionId)
+    agent = next
+    sessionId = target
+    // 上一条回复的中间态与旧日志 seq 都属于旧会话，不能带进新会话。
+    streamed = ''
+    attemptText = ''
+    attemptId = undefined
+    seenSeq = 0
+  }
+
   try {
     // E3：审批应答与主循环共用同一个输入迭代器。审批发生在回合内，此时主循环
     // 正阻塞等回合收敛，两者不会同时消费同一行。
@@ -731,16 +747,40 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
             continue
           }
         }
-        // 旧会话的待审批请求必须丢弃：终端是同一个，切走后读到的 [y/N] 会应答错会话。
-        deps.approvalBridge?.dropSession(sessionId)
-        agent = next
-        sessionId = target
-        // 上一条回复的中间态与旧日志 seq 都属于旧会话，不能带进新会话。
-        streamed = ''
-        attemptText = ''
-        attemptId = undefined
-        seenSeq = 0
+        applySwitch(next, target)
         deps.out(`[prts] 已切到 ${target}\n`)
+        deps.onIdle?.()
+        continue
+      }
+      // ---- Wave 3 第二步：新建会话（设计 Q3 最小入口的 `/new`）----
+      if (line === '/new') {
+        const newId = `prts-chat-${Date.now()}`
+        // 先注册身份再 create：与 spawnSubtask 同一顺序，消除「已创建但未注册」的窗口。
+        if (deps.authority !== undefined) {
+          try {
+            deps.authority.registerPrimarySession(newId)
+          } catch (error) {
+            deps.out(`[prts] 新会话身份注册失败：${error instanceof Error ? error.message : String(error)}\n`)
+            deps.onIdle?.()
+            continue
+          }
+        }
+        let created: { agent: { status: string; followup(m: unknown): void } }
+        try {
+          created = await agents.create({
+            sessionId: newId,
+            meta: { cwd: deps.cwd },
+            agentOptions: { provider: 'deepseek-official', model: 'deepseek-chat' },
+          })
+        } catch (error) {
+          // create 失败要释放刚注册的身份，不留幽灵会话；原会话保持不变。
+          try { deps.authority?.releaseSession(newId) } catch { /* 释放失败不掩盖主错误 */ }
+          deps.out(`[prts] 新建会话失败：${error instanceof Error ? error.message : String(error)}\n`)
+          deps.onIdle?.()
+          continue
+        }
+        applySwitch(created.agent, newId)
+        deps.out(`[prts] 已新建会话 ${newId}\n`)
         deps.onIdle?.()
         continue
       }
