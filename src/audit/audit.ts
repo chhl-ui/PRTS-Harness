@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS audit_grants (
   expires_at INTEGER,
   issued_at INTEGER NOT NULL,
   revoked_at INTEGER,
-  revoke_reason TEXT
+  revoke_reason TEXT,
+  session_id TEXT
 );
 CREATE TABLE IF NOT EXISTS audit_once (
   call_id TEXT PRIMARY KEY,
@@ -48,6 +49,21 @@ CREATE TABLE IF NOT EXISTS audit_once (
 `
 
 const DELETION_ACTOR: AuditActor = { kind: 'system', component: 'deletion' }
+
+/**
+ * 幂等迁移：`audit_grants` 增可选列 `session_id`（grant 的会话归属）。
+ *
+ * 不能只改 SCHEMA：老库的 `CREATE TABLE IF NOT EXISTS` 不会补列，而 grant 的会话
+ * 归属必须对既有授权链生效。所以先 `PRAGMA table_info` 看真实列，缺了才
+ * `ALTER TABLE ... ADD COLUMN`——重复打开不报错，也不会重置已有数据。
+ * 只读打开不做迁移（写不了）；读侧对缺失列按 null（全局授予）处理。
+ */
+function migrateSessionScope(db: DatabaseSync): void {
+  const cols = db.prepare('PRAGMA table_info(audit_grants)').all() as { name: string }[]
+  if (!cols.some((c) => c.name === 'session_id')) {
+    db.exec('ALTER TABLE audit_grants ADD COLUMN session_id TEXT')
+  }
+}
 
 interface EventDbRow {
   seq: number
@@ -90,6 +106,8 @@ function validateEvent(e: AuditEvent): void {
     case 'grant.issued':
       nonEmpty(e.grantId, 'grantId'); nonEmpty(e.subject, 'subject'); nonEmpty(e.capability, 'capability')
       if (e.expiresAt !== null) num(e.expiresAt, 'expiresAt')
+      // sessionId 缺省 = 全局授予；给了就必须是非空串（空串会被读成「没有归属」的歧义）
+      if (e.sessionId !== undefined) nonEmpty(e.sessionId, 'sessionId')
       return
     case 'grant.revoked':
       nonEmpty(e.grantId, 'grantId'); nonEmpty(e.reason, 'reason'); return
@@ -174,6 +192,7 @@ export class AuditLog {
     db.exec('PRAGMA journal_mode = WAL')
     db.exec('PRAGMA busy_timeout = 5000')
     db.exec(SCHEMA)
+    migrateSessionScope(db)
     return new AuditLog(db, opts?.now ?? (() => Date.now()), false)
   }
 
@@ -280,14 +299,17 @@ export class AuditLog {
   }
 
   /** 投影读取（K2a 判定用）：全部授予行，含已撤销/过期，由调用方按时间判定。 */
-  listGrants(): { grantId: string; subject: string; capability: string; expiresAt: number | null; issuedAt: number; revokedAt: number | null; revokeReason: string | null }[] {
+  listGrants(): { grantId: string; subject: string; capability: string; expiresAt: number | null; issuedAt: number; revokedAt: number | null; revokeReason: string | null; sessionId: string | null }[] {
     const rows = this.db.prepare('SELECT * FROM audit_grants ORDER BY issued_at').all() as {
       grant_id: string; subject: string; capability: string; expires_at: number | null
       issued_at: number; revoked_at: number | null; revoke_reason: string | null
+      session_id?: string | null
     }[]
     return rows.map((r) => ({
       grantId: r.grant_id, subject: r.subject, capability: r.capability,
       expiresAt: r.expires_at, issuedAt: r.issued_at, revokedAt: r.revoked_at, revokeReason: r.revoke_reason,
+      // 老库（迁移前建的）只读打开时没有这一列 → undefined，按全局授予处理
+      sessionId: r.session_id ?? null,
     }))
   }
 

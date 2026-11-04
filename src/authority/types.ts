@@ -35,6 +35,14 @@ export interface AuthorityConfig {
 }
 
 export interface ToolCall {
+  /**
+   * 发起调用的会话。空串表示「解析失败」，**不是**「任何会话」：空串不匹配任何
+   * 会话绑定 grant/once，也不匹配全局授予（fail-closed）。
+   *
+   * 契约：会话创建与切换只经 owner 通道，不注册为模型工具；子会话不继承
+   * 父会话的 grant/once，需要重新问人（子会话的 workspaceRoots 收窄在 W2
+   * `prts_subtask` 派生时处理）。
+   */
   sessionId: string
   callId: string
   tool: string
@@ -52,4 +60,6 @@ export interface GrantView {
   capability: Capability
   expiresAt: number | null
   issuedAt: number
+  /** null = 全局授予；非空 = 只对该会话生效。 */
+  sessionId: string | null
 }

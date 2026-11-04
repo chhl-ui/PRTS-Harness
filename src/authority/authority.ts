@@ -124,14 +124,30 @@ export class Authority {
     return undefined
   }
 
-  private validGrants(): { grantId: string; capability: string }[] {
+  private validGrants(): { grantId: string; capability: string; sessionId: string | null }[] {
     const now = this.now()
     return this.audit.listGrants()
       .filter((g) => g.revokedAt === null && (g.expiresAt === null || now < g.expiresAt))
-      .map((g) => ({ grantId: g.grantId, capability: g.capability }))
+      .map((g) => ({ grantId: g.grantId, capability: g.capability, sessionId: g.sessionId }))
   }
 
-  private evalCap(c: Capability, grants: { grantId: string; capability: string }[]): CapResult {
+  /**
+   * grant 对本次调用是否在会话范围内：`sessionId === null` → 全局（旧数据、所有者显式全局授权）；
+   * 非空 → 必须与 `call.sessionId` 完全相等，父会话的持久授权不会静默传给子会话。
+   *
+   * 四族（fs.write / net / exec / tool）在这里统一收窄，而不是在 evalCap 各分支里各写一遗——
+   * 分支里写就会漏一个。空 `call.sessionId` 不匹配任何会话绑定 grant（与 once 同一判据：
+   * 「没有会话」不等于「任何会话」）。
+   */
+  private grantsForSession(sessionId: string): { grantId: string; capability: string; sessionId: string | null }[] {
+    // 空会话没有任何 grant：全局授予（sessionId === null）也只对「某个真实会话」生效。
+    // 「没有会话」不是「任何会话」——这一条与 once 的 covered 判据同源。
+    if (sessionId === '') return []
+    return this.validGrants()
+      .filter((g) => g.sessionId === null || g.sessionId === sessionId)
+  }
+
+  private evalCap(c: Capability, grants: { grantId: string; capability: string; sessionId: string | null }[]): CapResult {
     const p = parseCapability(c)
     switch (p.kind) {
       case 'fs.read': {
@@ -202,7 +218,7 @@ export class Authority {
 
   /** 同步、只读。一次调用的全部能力都放行才放行；deny > ask > allow。 */
   decide(call: ToolCall): Decision {
-    const grants = this.validGrants()
+    const grants = this.grantsForSession(call.sessionId)
     const results = call.capabilities.map((c) => this.evalCap(c, grants))
 
     const deny = results.find((r) => r.kind === 'deny')
@@ -210,10 +226,17 @@ export class Authority {
 
     const asks = results.filter((r) => r.kind === 'ask')
     if (asks.length > 0) {
-      // 一次性批准：callId 未消费且记录的能力覆盖本次全部能力 → ask 变 once
+      // 一次性批准：callId 未消费、会话一致、且记录的能力覆盖本次全部能力 → ask 变 once。
+      //
+      // 会话必须一并比：批准是「给某会话的某一次调用」的，只比 capabilities 时，
+      // 同 callId 换个 sessionId 就能复用别人问出来的批准（父会话 → 子会话静默通过）。
+      // 空 sessionId 一律不 covered——运行时确实存在空会话 id，不能把「没有会话」
+      // 当成「任何会话」，否则去掉 callId 唯一性假设就整条旁路了。
       const once = this.audit.getOnce(call.callId)
       const recorded = once ? new Set(once.capabilities.map(capabilityKey)) : null
       const covered = recorded !== null && !once!.consumed
+        && call.sessionId !== ''
+        && once!.sessionId === call.sessionId
         && call.capabilities.every((c) => recorded.has(capabilityKey(c)))
       if (covered) return { kind: 'allow', via: 'once' }
       return { kind: 'ask', reason: (asks[0] as { reason: string }).reason }
@@ -225,11 +248,6 @@ export class Authority {
     return { kind: 'allow', via: 'policy' }
   }
 
-  /**
-   * DSH tools.guard 形态：拒绝返回理由串，放行返回 undefined。
-   * allow(via==='once') 时写 approval.consumed 消费本次批准；
-   * ask/deny 写 tool.denied 审计。输入非法时按拒绝处理（fail closed）。
-   */
   /**
    * DSH tools.guard 形态：拒绝返回理由串，放行返回 undefined。
    * allow(via==='once') 时经 AuditLog.consumeOnce 原子消费；
@@ -308,6 +326,9 @@ export class Authority {
           subject: 'model',
           capability: g.capability,
           expiresAt: null,
+          // 「总是允许」是「给这个会话的」，不是「给整台机器的」：子会话问出来的
+          // always 不能变成全局授予，否则一次审批就能把小孩升级成主人。
+          sessionId: d.sessionId,
         },
       })),
     ]
@@ -315,16 +336,20 @@ export class Authority {
     return { grantIds: grants.map((g) => g.grantId) }
   }
 
-  /** 所有者通道：签发授予，返回 grantId。 */
-  issueGrant(g: { subject: 'model'; capability: Capability; expiresAt: number | null }): string {
+  /** 所有者通道：签发授予，返回 grantId。`sessionId` 缺省 = 全局授予。 */
+  issueGrant(g: { subject: 'model'; capability: Capability; expiresAt: number | null; sessionId?: string }): string {
     if (g.subject !== 'model') raise('INVALID_INPUT', `subject must be 'model': ${String(g.subject)}`)
     parseCapability(g.capability) // 校验结构
     if (g.expiresAt !== null && (typeof g.expiresAt !== 'number' || !Number.isFinite(g.expiresAt))) {
       raise('INVALID_INPUT', 'expiresAt must be a number or null')
     }
+    if (g.sessionId !== undefined && (typeof g.sessionId !== 'string' || g.sessionId === '')) {
+      raise('INVALID_INPUT', 'sessionId must be a non-empty string when given')
+    }
     const grantId = `grant-${randomUUID()}`
     this.audit.append(OWNER, {
       kind: 'grant.issued', grantId, subject: g.subject, capability: g.capability, expiresAt: g.expiresAt,
+      ...(g.sessionId === undefined ? {} : { sessionId: g.sessionId }),
     })
     return grantId
   }
@@ -340,6 +365,6 @@ export class Authority {
     const now = this.now()
     return this.audit.listGrants()
       .filter((g) => g.revokedAt === null && (g.expiresAt === null || now < g.expiresAt))
-      .map((g) => ({ grantId: g.grantId, subject: g.subject, capability: g.capability, expiresAt: g.expiresAt, issuedAt: g.issuedAt }))
+      .map((g) => ({ grantId: g.grantId, subject: g.subject, capability: g.capability, expiresAt: g.expiresAt, issuedAt: g.issuedAt, sessionId: g.sessionId }))
   }
 }

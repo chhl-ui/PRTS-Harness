@@ -10,7 +10,8 @@ export type AuditActor =
 export type Capability = string
 
 export type AuditEvent =
-  | { kind: 'grant.issued'; grantId: string; subject: string; capability: Capability; expiresAt: number | null }
+  /** sessionId 缺省 = 全局授予（旧数据与所有者显式发的全局授权）；非空 = 只对该会话生效。 */
+  | { kind: 'grant.issued'; grantId: string; subject: string; capability: Capability; expiresAt: number | null; sessionId?: string }
   | { kind: 'grant.revoked'; grantId: string; reason: string }
   | { kind: 'tool.denied'; sessionId: string; tool: string; reason: string }
   /** 工具循环检测：同一会话连续 N 次同工具同参。落链是为了攒误报率样本。 */

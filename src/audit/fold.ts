@@ -9,10 +9,13 @@ export function applyAuditEvent(db: DatabaseSync, e: AuditEventRow): void {
   const p = e.payload as Record<string, unknown>
   switch (e.kind) {
     case 'grant.issued': {
+      // sessionId 缺省（旧事件、全局授权）→ NULL。「空串」由 validateEvent 拦在写入前，
+      // 这里再兜一次：只有非空字符串才算会话绑定，其余一律全局。
+      const sessionId = typeof p.sessionId === 'string' && p.sessionId !== '' ? p.sessionId : null
       db.prepare(
-        `INSERT INTO audit_grants (grant_id, subject, capability, expires_at, issued_at, revoked_at, revoke_reason)
-         VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
-      ).run(String(p.grantId), String(p.subject), String(p.capability), p.expiresAt as number | null, e.ts)
+        `INSERT INTO audit_grants (grant_id, subject, capability, expires_at, issued_at, revoked_at, revoke_reason, session_id)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)`,
+      ).run(String(p.grantId), String(p.subject), String(p.capability), p.expiresAt as number | null, e.ts, sessionId)
       break
     }
     case 'grant.revoked': {
