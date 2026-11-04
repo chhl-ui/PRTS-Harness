@@ -22,6 +22,7 @@ import { attachEmotionInjection } from './emotion-inject.ts'
 import { attachSessionRecall } from './session-recall.ts'
 import { attachProactiveRecall } from './proactive-recall.ts'
 import { attachTaskReminder } from './task-reminder.ts'
+import { createSubtaskTool } from './subtask.ts'
 import { resolveTokenBudget } from './token-budget.ts'
 import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachToolLoopAudit } from './tool-loop-audit.ts'
@@ -826,6 +827,17 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 一律不注册——技能是能力扩张，采用与否是博士的决策（与账本「只能建 draft」同构）。
   const skillTools = skills === undefined ? undefined : createSkillTools(tools, { store: skills })
 
+  // ⑥ 子任务上下文：模型侧 prts_subtask。派生闸与深度上限在工具内；
+  // 子会话的 roots 注册、dispose、释放都由 spawnSubtask 负责。
+  const subtaskTool = createSubtaskTool(tools, {
+    ctx: ctx as unknown as { get(name: string): unknown },
+    authority,
+    workspace: o.workspace,
+    dataRoot: o.dataRoot,
+    provider: 'deepseek-official',
+    model: 'deepseek-chat',
+  })
+
   // V1-09 第二半：已采用的技能按当前问题推进上下文。只注入 `active`——
   // `candidate` 是博士没批准的做法，注入它等于让模型执行未获批准的经验。
   // 与记忆/提醒/开场重建各自独立注册，一条链挂了不牵连其余三条。
@@ -1025,6 +1037,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       memoryScheduler?.dispose()
       memoryTools?.dispose()
       skillTools?.dispose()
+      subtaskTool.dispose()
       skillInjection?.dispose()
       skills?.close()
       emotionInjection?.dispose()

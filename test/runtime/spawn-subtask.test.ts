@@ -109,7 +109,8 @@ test('SP4 派生闸：子会话调用 prts_subtask 被拒（深度上限 1）', 
   try {
     e.auth.registerSessionRoots('sub-1', [])
     const defs: Array<{ name?: string; execute?: (a: unknown, x: unknown) => Promise<unknown> }> = []
-    createSubtaskTool({ register: (d) => { defs.push(d as never); return () => {} } }, e.deps)
+    const { parentSessionId: _parent, ...toolDeps } = e.deps
+    createSubtaskTool({ register: (d) => { defs.push(d as never); return () => {} } }, toolDeps)
     assert.equal(defs.length, 1)
     assert.equal(defs[0]?.name, 'prts_subtask')
     await assert.rejects(

@@ -156,14 +156,21 @@ export interface SubtaskTool {
 }
 
 /**
+ * 工具面 deps：`parentSessionId` **不是固定入参**——每次 execute 从调用方会话取，
+ * 否则一个工具实例只能服务一个父会话。
+ */
+export type SubtaskToolDeps = Omit<SpawnSubtaskDeps, 'parentSessionId'>
+
+/**
  * 注册 `prts_subtask`。派生闸：
  * - 只有主会话可调（`authority.isSubagentSession` 为真 → 拒）——子会话不能再开子会话，
  *   深度上限因此恒为 1，不依赖 `delegationDepth`（框架没有上限逻辑）。
  * - taskId 由 `planSubtask` 白名单校验；不传则用随机 12 位。
+ * - 取不到调用方 sessionId → 拒（fail-closed，不猜父会话）。
  */
 export function createSubtaskTool(
   tools: SubtaskToolRegistry,
-  deps: SpawnSubtaskDeps,
+  deps: SubtaskToolDeps,
 ): SubtaskTool {
   const off = tools.register({
     name: 'prts_subtask',
@@ -189,6 +196,10 @@ export function createSubtaskTool(
         },
         required: ['sessionId', 'summary'],
       },
+      render: (value: unknown): { type: 'text'; text: string }[] => {
+        const v = value as { summary?: unknown }
+        return [{ type: 'text', text: typeof v?.summary === 'string' ? v.summary : JSON.stringify(value) }]
+      },
     },
     execute: async (args: unknown, exec: unknown): Promise<unknown> => {
       const a = (args ?? {}) as { task?: unknown; taskId?: unknown }
@@ -199,10 +210,11 @@ export function createSubtaskTool(
         throw new Error('prts: taskId 必须是字符串')
       }
       const sessionId = (exec as { agent?: { session?: { id?: string } } })?.agent?.session?.id ?? ''
+      if (sessionId === '') throw new Error('prts: 无法确定当前会话，拒绝派生')
       if (deps.authority.isSubagentSession(sessionId)) {
         throw new Error('prts: 子会话不能再开子会话（深度上限 1）')
       }
-      return spawnSubtask(deps, a.task, a.taskId)
+      return spawnSubtask({ ...deps, parentSessionId: sessionId }, a.task, a.taskId)
     },
   })
   return { dispose: off }
