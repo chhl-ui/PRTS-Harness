@@ -288,6 +288,16 @@ export interface InjectionRecord {
    */
   outcome: 'injected' | 'skipped'
   reason?: string
+  /**
+   * 装配来源：`memory` / `skill` / `intent` / `emotion` / `session-recall` /
+   * `task-reminder` / `proactive`，或装配器自己的总账 `assembly`。
+   * 历史事件没有这个字段，读取侧按 `undefined` 处理（不代表任何链）。
+   */
+  chain?: string
+  /** 仅装配器总账使用：这一轮实际装入的链标识（去重）。 */
+  chains?: readonly string[]
+  /** 仅装配器总账使用：因超预算被整链裁掉的链标识。 */
+  droppedChains?: readonly string[]
   recordedAtMs: number
 }
 
@@ -307,6 +317,12 @@ export interface RecordInjectionInput {
   /** `injected` = 真的装进了上下文；`skipped` = 该装但没装成，配 `reason`。 */
   outcome: 'injected' | 'skipped'
   reason?: string
+  /** 装配来源链；装配器总账写 `'assembly'`。 */
+  chain?: string
+  /** 仅装配器总账：这一轮实际装入的链标识。 */
+  chains?: readonly string[]
+  /** 仅装配器总账：因超预算被整链裁掉的链标识。 */
+  droppedChains?: readonly string[]
 }
 
 /** V1-14 前瞻记忆：意图状态。`fired` 与 `cancelled` 是终态，不可互转。 */

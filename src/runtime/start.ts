@@ -16,6 +16,7 @@ import { createIntentTools } from './intent-tools.ts'
 import { createSkillTools } from './skill-tools.ts'
 import { attachIntentTrigger } from './intent-trigger.ts'
 import { attachMemoryInjection } from './memory-inject.ts'
+import { attachAssembly } from './assembly.ts'
 import { attachSkillInjection } from './skill-inject.ts'
 import { attachEmotionInjection } from './emotion-inject.ts'
 import { attachSessionRecall } from './session-recall.ts'
@@ -797,6 +798,21 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     ...(reranker === undefined ? {} : { reranker }),
   })
 
+  // Wave 1 装配器：必须**最先注册**——Cordis 的 waterfall 是「先注册 = 最外层」，
+  // 只有最外层的 next() 才在其余七条注入链全部追加完之后返回（见 assembly.ts 头注释）。
+  // 预算延迟求值：真正的 injectBudgetTokens 在下方才算出。
+  const assembly = attachAssembly(
+    ctx as unknown as {
+      on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
+    },
+    {
+      budget: () => ({ maxTokens: injectBudgetTokens }),
+      ...(memory === undefined
+        ? {}
+        : { record: (input: Parameters<MemoryStore['recordInjection']>[0]) => { memory.recordInjection(input) } }),
+    },
+  )
+
   // V1-09：模型侧只有 propose / list。evaluate / adopt / retire / restore
   // 一律不注册——技能是能力扩张，采用与否是博士的决策（与账本「只能建 draft」同构）。
   const skillTools = skills === undefined ? undefined : createSkillTools(tools, { store: skills })
@@ -988,6 +1004,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       offMemoryTurnStop?.()
       offCostUsage?.()
       cost?.close()
+      assembly?.dispose()
       memoryInjection?.dispose()
       sessionRecall?.dispose()
       proactiveRecall?.dispose()

@@ -2339,6 +2339,9 @@ export class MemoryStore {
           limit: input.limit,
           outcome: input.outcome,
           ...(input.reason === undefined ? {} : { reason: input.reason }),
+          ...(input.chain === undefined ? {} : { chain: input.chain }),
+          ...(input.chains === undefined ? {} : { chains: [...input.chains] }),
+          ...(input.droppedChains === undefined ? {} : { dropped_chains: [...input.droppedChains] }),
         },
       })
       this.db.exec('COMMIT')
@@ -2386,6 +2389,9 @@ export class MemoryStore {
         limit: number
         outcome?: 'injected' | 'skipped'
         reason?: string
+        chain?: string
+        chains?: string[]
+        dropped_chains?: string[]
       }
       return {
         sessionId: p.session_id,
@@ -2398,6 +2404,9 @@ export class MemoryStore {
         limit: p.limit,
         outcome: p.outcome === 'skipped' ? 'skipped' : 'injected',
         ...(p.reason === undefined ? {} : { reason: p.reason }),
+        ...(p.chain === undefined ? {} : { chain: p.chain }),
+        ...(p.chains === undefined ? {} : { chains: p.chains }),
+        ...(p.dropped_chains === undefined ? {} : { droppedChains: p.dropped_chains }),
         recordedAtMs: row.t,
       }
     })
