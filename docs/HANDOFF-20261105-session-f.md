@@ -77,7 +77,18 @@
 
 ---
 
-## 五、证据边界（不要当成已验证）
+## 五、冒烟体检（2026-11-05，真实环境实测）
+
+真实数据根 `C:/prts-data`、工作区 `C:/prts-workspace`，key 从 Windows 凭据管理器
+（target `PRTS/DeepSeek`）读出，无警告。
+
+- 最小冒烟：`printf '你好\n/exit\n' | env PRTS_DATA_ROOT=... PRTS_WORKSPACE=... PRTS_CONFIG=... node src/cli/chat-main.ts`
+  → **exit=0**，真实模型回复，共 1 轮。
+- 完整冒烟（设计 §四之二 的版本）：加 `PRTS_EMBED=1 PRTS_RERANK=1` → **exit=0**，
+  `[prts] memory vector index warmed: 0 rows / dim 0 / 1 ms`。**dim 0 说明 embedding
+  模型未实际加载**（空库）——启动链路通过，记忆向量功能本身未验证。
+
+## 六、证据边界（不要当成已验证）
 
 - **787 是并发模式的实测**；串行模式（`--test-concurrency=1`）的定位结果见下一条记录。
 - **全量挂起的根因未独立验证**：只观察到「无汇总输出、进程挂住」的形态与 sandbox runner 附近的停点。
@@ -87,6 +98,6 @@
 
 ---
 
-## 六、接手第一件事
+## 七、接手第一件事
 
 先按 §三 的方式跑一次**分批**全量（或串行全量），确认基线；不要直接连跑默认并发的全量。
