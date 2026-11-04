@@ -11,4 +11,7 @@ export type {
   AuditRecord,
   Capability,
   DeletionState,
+  RegisterSessionInput,
+  SessionKind,
+  SessionRow,
 } from './types.ts'

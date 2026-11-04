@@ -2,7 +2,7 @@ import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 import { AuditLog } from '../audit/index.ts'
-import type { AuditActor, AuditEvent } from '../audit/index.ts'
+import type { AuditActor, AuditEvent, SessionRow } from '../audit/index.ts'
 import { raise } from './errors.ts'
 import { cap, capabilityKey, parseCapability } from './capability.ts'
 import { isWithin, normalizePath, realpathBestEffort } from './paths.ts'
@@ -41,6 +41,53 @@ export class Authority {
    * 一条写连接，再开一条只会增加 WAL 写锁竞争，而事故现场恰恰是最不想锁冲突的时刻。
    */
   get auditLog(): AuditLog { return this.audit }
+
+  // ── 会话身份（设计见 docs/design-session-identity.md §3.2）──────────────
+  // actor 固定 system：注册/释放是宿主事实，不是模型可发起的动作。
+
+  /** 注册主会话：roots = 当前 workspaceRoots。 */
+  registerPrimarySession(sessionId: string): void {
+    this.audit.registerSession(AUTH, {
+      sessionId, kind: 'primary', roots: [...this.workspaceRoots],
+    })
+  }
+
+  /**
+   * 注册子会话：roots 由调用方（`spawnSubtask`）代码派生，**不接受模型可见入参**。
+   * 写入前 realpath 归一——与 workspace/protected/spill 的构造口径一致，否则
+   * symlink / 8.3 短名 / 大小写差异会让 roots 内 allow 漏判或越界。
+   */
+  registerSessionRoots(sessionId: string, roots: readonly string[], parentSession?: string): void {
+    this.audit.registerSession(AUTH, {
+      sessionId,
+      kind: 'subagent',
+      roots: roots.map(realpathBestEffort),
+      ...(parentSession === undefined ? {} : { parentSession }),
+    })
+  }
+
+  /** 释放会话：写事件、投影置 released_at_ms。行保留（审计只追加）。 */
+  releaseSession(sessionId: string): void {
+    this.audit.releaseSession(AUTH, sessionId)
+  }
+
+  /** 是否活跃子会话（已注册、kind=subagent、未释放）。 */
+  isSubagentSession(sessionId: string): boolean {
+    const row = this.sessionRow(sessionId)
+    return row?.kind === 'subagent' && row.releasedAtMs === null
+  }
+
+  /** 是否有活跃会话身份（主/子都算）。空串与未注册一律 false。 */
+  hasSessionScope(sessionId: string): boolean {
+    const row = this.sessionRow(sessionId)
+    return row !== undefined && row.releasedAtMs === null
+  }
+
+  /** 直查投影，无进程内缓存（与 grant 判定同一不变量）。 */
+  private sessionRow(sessionId: string): SessionRow | undefined {
+    if (sessionId === '') return undefined
+    return this.audit.listSessions().find((r) => r.sessionId === sessionId)
+  }
 
   private constructor(audit: AuditLog, config: AuthorityConfig, now: () => number) {
     this.audit = audit
