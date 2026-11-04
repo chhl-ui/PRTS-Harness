@@ -19,10 +19,12 @@ import { attachMemoryInjection } from './memory-inject.ts'
 import { attachSkillInjection } from './skill-inject.ts'
 import { attachEmotionInjection } from './emotion-inject.ts'
 import { attachSessionRecall } from './session-recall.ts'
+import { attachProactiveRecall } from './proactive-recall.ts'
 import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachToolLoopAudit } from './tool-loop-audit.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
 import { Authority, classify } from '../authority/index.ts'
+import { openProactiveStore, type ProactiveStore } from '../proactive/index.ts'
 import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
@@ -314,6 +316,16 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     }
   } catch (error) {
     console.error(`[prts] emotion store unavailable: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  // V1-07 主动回忆的留痕库：与 memory 分库——记忆模块明确不做主动回忆
+  //（`docs/design-memory-v1.md:1077`），留痕是评价「恰当率」的抽样源，
+  // 不属于记忆事实。打不开时整条线缺席：没有留痕就没有冷却与上限，宁可不提。
+  let proactiveMentions: ProactiveStore | undefined
+  try {
+    proactiveMentions = openProactiveStore(process.env.PRTS_PROACTIVE_DB ?? join(o.dataRoot, 'proactive.sqlite'))
+  } catch (error) {
+    console.error(`[prts] proactive store unavailable: ${error instanceof Error ? error.message : String(error)}`)
   }
   // 工具结果卸载的存储根：默认与 dataRoot 平级，**不嵌在受保护根里**——
   // 嵌进去会被 `fs.read` 的 protectedRoots 判定拒掉，卸载的内容模型就永远读不回来
@@ -798,6 +810,19 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     { store: memory, ledger },
   )
 
+  // V1-07 主动回忆：默认开启，`PRTS_PROACTIVE=off` 关闭（验收原文「可以关闭」）。
+  // 与 memory-inject 是相反方向的克制：那条每轮都答，这条多数轮次不开口。
+  const proactiveRecall = memory === undefined || proactiveMentions === undefined ? undefined : attachProactiveRecall(
+    ctx as unknown as {
+      on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
+    },
+    {
+      store: memory,
+      mentions: proactiveMentions,
+      enabled: process.env.PRTS_PROACTIVE !== 'off',
+    },
+  )
+
   // P1-3 后台巩固调度：空闲时把 live turn 巩固成实体图与事实。
   // `PRTS_CONSOLIDATE=off` 整体关闭。
   //
@@ -873,6 +898,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       offMemoryTurnStop?.()
       memoryInjection?.dispose()
       sessionRecall?.dispose()
+      proactiveRecall?.dispose()
+      proactiveMentions?.close()
       memoryScheduler?.dispose()
       memoryTools?.dispose()
       skillTools?.dispose()
