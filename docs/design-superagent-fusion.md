@@ -20,7 +20,7 @@
 | 附加 | 子会话跑完一个 turn 回到 idle，315 ms |
 
 结论：**Router/Worker 的机制本钱 DSH 已经付过了**。`ctx.get('agents').create()` 是
-`src/cli/chat.ts:492` 的生产路径（不是测试专用），`CreateAgentOptions.meta`
+`src/cli/chat.ts:499` 的生产路径（不是测试专用），`CreateAgentOptions.meta`
 （`dsh-agent/lib/types/index.d.ts:48-71`）本来就为子会话预留了 origin / 血缘 / 递归预算 / 配置档。
 
 同一批实测还捞到一条负面事实：**`delegationDepth` 没有框架级上限**。
@@ -37,7 +37,7 @@
 | 3 面向人的交互（异步 start/stop、Inline & Spill） | `src/spill`（512 行，可回读卸载）、`ctx.jobs`、`StopController` | **半成品**：卸载与停止有；「后台任务不阻塞前台对话」没有——`runChat` 是单会话长循环 |
 | 4 计算/状态/环境分离 | 事件链 = 状态入库；`src/sandbox` = 环境留在本地；LLM 适配器可换 = BYOM | **已达成**，无动作 |
 | 5 外部 Watchdog | `supervisor`（进程外 Job + 崩溃重启）+ `StopController`（分级停止） | **半成品**：只答「进程活着吗」，不答「是否原地打转或偏离目标」 |
-| 1 双层 Router/Worker | 机制通（见第一节），**零使用**：`agent-loop.agents: []`，无任何工具包装 | **未建设**，且现在不该建（见第四节） |
+| 1 双层 Router/Worker | 机制通（见第一节），**零使用**：`agent-loop.agents: []`，无任何工具包装 | **未建设**；2026-11-04 博士定为要做，分期落地（见第四节） |
 
 ```mermaid
 flowchart TB
@@ -115,26 +115,75 @@ V1-14 的触发只有时间闸门。Super-agent 模块 2 的第二级过滤（�
 
 ---
 
-## 四、现在不做的：常驻 Router
+## 四、Router + Workers：要做，分两步（2026-11-04 方向更新）
 
-**前提已更正（博士 2026-11-03）**：真实使用要等到 PRTS 整体完工之后。
-所以「等真实使用暴露并发压力再上 Router」不能作为开发期的判据——那个触发条件
-被推迟到了验收阶段。结论不变，理由换成三条不依赖真实使用的：
+**博士 2026-11-04 决定：「五个模块都有做的打算」。** 这一条推翻了本节原先「不做常驻 Router」的
+结论。原先三条理由的现状：
 
-1. **产品形态里没有这个瓶颈**。Super-agent 要解决的是「一个人同时盯不住 3-5 个以上会话」。
-   PRTS 的入口是终端 + 所有者命令（`/task`、`/intent`、`/memory`），一次只有一条对话流，
-   不存在「手动在会话间切换、还要记住每个会话里有什么」的负担。
-   模块 1 的火力对准的是 IM/GitHub 那种多线程事件流，PRTS 没有那个形状。
-2. ~~位置不对（§10 依赖顺序）~~ ——**这条已撤回**（议事会指出，核对属实）：§10 把 Router 与本方案
-   自己推荐的三件增量都归入「第一版实现」，用同一把尺子会连后者一起否决。
-   另：上一条（产品形态）是**不可测的产品断言，属判断不是证据**；若产品变成多入口并发，它第一个失效。
-3. **无真实负载时，编排层的正确性无法被验证**。并发时序、跨会话上下文同步、子会话回收，
-   是最难用单测覆盖的一类；没有真实负载，做完也只能自证。
-   在这一点上，「先做能被确定性验证的部分」不是保守，是唯一能交付证据的路径。
+1. **产品形态里没有这个瓶颈**——**作废**。它是不可测的产品断言（原文自述「属判断不是证据」），
+   现由方向决定直接失效。保留在此仅作历史记录：它的失效条件是「产品变成多入口并发」，
+   而博士的方向等于提前承认了这个条件。
+2. ~~位置不对（§10 依赖顺序）~~——**2026-11-03 已撤回**（议事会指出，核对属实）。
+3. **无真实负载时编排层的正确性无法被验证**——**仍成立，但性质变了**：它不再是「不做的理由」，
+   而是**实现顺序的约束**。编排层必须先把不依赖真实负载的部分（会话注册、派生、回收、
+   摘要回传）做到可确定性验证，再谈多入口并发。
 
-**什么情况下重新评估**：不是「等真实使用」，而是当 W2 的 `prts_subtask` 在离线基准上
-被证明不够用——即出现「单次任务必须并发多个子任务才满足延迟或上下文预算」的实测场景。
-那是可测的，不需要等博士上手。
+**分期，不是一步到位**：
+
+- **第一步（可确定性验证）**：会话注册表 + 分派器 + Worker 派生三件，在单进程内用现有
+  `AgentRegistry` 实现（`create` / `resume` / `get` / `list`，见下方三问）。验收用 scripted LLM
+  的离线场景，不需要博士上手。
+- **第二步（需要真实负载）**：多入口并发（终端 + 其他通道同时在线）、活跃会话切换的体验、
+  Router 自身的上下文预算。验收指标只能在真实使用中取，按第四之二节的 R1/R2 划分，属 R2 之后。
+
+**与 W2 的关系**：W2 的 `prts_subtask` 是「一次性子会话」，即 Worker 派生的最小切片；
+Router 是它的常驻化。先做 W2 再做 Router——机制、授权收窄、记忆隔离是同一套，
+W2 做完 Router 的第一步就只剩「注册表 + 入口命令」。
+
+### 前置三问（2026-11-04 实证回答）
+
+交接文档要求「开工前先回答三个问题」。以下每条指到代码位置，不是推断。
+
+**Q1 常驻进程的生命周期谁管？** 分两层，不要混：
+
+- **进程层**：`Supervisor` 已经是进程外的生命周期管理者——单 job（`src/supervisor/supervisor.ts:53`
+  的 `private job: JobProcess | null`）、kill-on-close Job、S0–S3（同文件 `escalateS3()` L305）、
+  崩溃重启（`restartAfterDead()` L370）、心跳 Watchdog（`checkHeartbeat()` L349）。
+  它管的是**运行时进程**，且当前设计是单运行时：控制管道名每次守护进程启动生成一个
+  （`src/supervisor/protocol.ts:13` 的 `runtimePipeName()`），运行时认证先到先得
+  （`supervisor.ts` 的 `attachRuntime`）。要做多运行时，得先改这两处——这是事实，不是建议。
+- **会话层**：进程内 agent 由 DSH `AgentRegistry` 管，API 齐全：`create`
+  （`node_modules/@deepseek-ai/dsh-agent/lib/types/index.d.ts:278`）、`resume`（`:286`）、
+  `get`（`:343`）、`list`（`:357`）、`AgentHandle.dispose`（`:145`）。
+  生产调用点是 `src/cli/chat.ts:499`。
+
+**真正的缺口不是「谁管」，是「寿命绑在客户端上」**：`src/cli/chat-serve.ts:94-95` 在
+`runChat` 返回后 `finally` 里 `term.close()` + `await app.dispose()`——终端断开 → 运行时销毁。
+Router 要常驻，必须解耦「运行时寿命」与「客户端连接寿命」（服务端进程常驻，客户端可断可连）。
+改动落在入口层，不在 `Supervisor`。
+
+**Q2 会话状态存哪？** 沿用 DSH session 库，不另建：
+
+- `DSH_HOME` 被显式设为 `<dataRoot>/dsh-home`（`src/runtime/start.ts:213`）；
+- 会话落在 `<dataRoot>/dsh-home/sessions/<--cwd-->/<sessionId>/session.v4.jsonl`
+  （`src/cli/chat.ts:56` 的根路径、`src/memory/session-purge.ts:66-67` 的目录约定）；
+- 血缘字段 `parentSession` / `origin` / `delegationDepth` / `agentPreset` 已实测落盘
+  （第一节 A–D 探针，已固化为 `test/acceptance/subagent-session.test.ts`）。
+
+需要新增的只有**活跃会话索引**：`AgentRegistry.list()` 给进程内的活会话，sessions 目录给
+历史会话；两者合并成一张「会话表」，不引入第二套持久化。
+
+**Q3 人怎么切任务？** 现在是单会话单输入，必须加一层：
+
+- 当前入口只有一条对话流：`/exit` `/task` `/memory` `/intent`（`src/cli/chat.ts:598-628`）；
+  终端服务端明确拒绝第二个客户端（`src/runtime/terminal-server.ts:159-162` 的 `busy` 分支），
+  理由是 `runChat` 单会话长循环共享同一个输入迭代器。
+- 最小可用入口：`/sessions`（列 `AgentRegistry.list()` + 落盘会话）、`/switch <id>`（把当前输入
+  接到另一个 agent）、`/new`。前提是先做 Q1 的解耦——否则「切会话」等于换进程。
+
+**结论**：三问都有答案，且**都不需要改 `Supervisor` 的进程模型**（除非要跑多个运行时）。
+第一步最小闭环：解耦客户端寿命 → 会话表（`list()` + 目录）→ `/sessions` `/switch` →
+分派器（`create` worker，只回摘要）。W2 的授权收窄与记忆隔离仍是前置硬约束（第三节 ②）。
 
 ## 四之二、由此暴露的一个循环依赖（需要博士定夺）
 
@@ -168,7 +217,7 @@ warm 日志符合预期。五分钟，不算使用，算体检。
 | 用 `delegationDepth` 当递归预算 | 框架只管格式校验（实测 `dsh-session/lib/index.js:1054`），没有上限逻辑。要预算自己写 |
 | 把子会话的授权从父会话继承 | 破坏「授权判定按 sessionId」这条安全不变量。宁可让子会话重新问人 |
 | 复用 `memory.origin` 标 subagent | 该列的 CHECK 约束是 `'live' \| 'benchmark'`，语义是数据来源不是会话来源。改语义会污染基准评测的区分 |
-| 直接把 Router 做成常驻服务 | 见第四节：无并发压力、成本常驻、违背阶段顺序 |
+| 在解耦「客户端寿命」之前做常驻 Router | `src/cli/chat-serve.ts:94-95` 客户端断开即 `dispose()`；不先解耦，常驻只能停在纸面 |
 | 照搬模块 2 的「语义层 Slow Path 研判外部事件」 | PRTS 的事件源是博士本人，不是群聊/邮件流。没有要筛的东西 |
 
 ---
@@ -180,7 +229,11 @@ warm 日志符合预期。五分钟，不算使用，算体检。
 | W1 | 工具循环检测（`tools/result` → 连续 N 次同工具同参 → 标记 + StopController） | 单测：连续 5 次相同调用被标记；4 次不标记；参数不同不标记。真机：跑一个会重复调用的假场景 |
 | W2 | `prts_subtask` 工具 + 子会话记忆隔离 | 单测：子会话 turn 不进主召回；子会话无账本工具；父会话只收到摘要。真机：一次读 10 文件汇总 |
 | W3 | 任务事件触发的主动提醒 | 单测：blocked 超阈值触发一次、不重复触发、重启不丢 |
-| — | 常驻 Router | **不排期**，等第四节的触发条件 |
+| R | Router + Workers 第一步：会话表（`list()` + 目录）→ `/sessions` `/switch` → 分派器（worker 只回摘要） | 前置：客户端寿命与运行时寿命解耦（`chat-serve.ts`）。单测：`list()` 含活会话、`/switch` 后消息进对的 agent、worker 只回摘要；真机：两会话并存不串话 |
+
+**落地状态（2026-11-04 交接时实测）**：W3 已完成并接线（`src/runtime/task-reminder.ts`、
+`start.ts:23`）；W1 的检测与审计已接（`start.ts:547-551`），**停机权未接**——代码注释写明
+等真实误报率数据；W2 未做（`prts_subtask` 在 `src/` 零命中）；R 未开始（第四节即其前置）。
 
 ## 七、预测的失败模式（先写下来，复查时对照）
 
