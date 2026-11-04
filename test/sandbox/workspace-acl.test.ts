@@ -153,12 +153,18 @@ test('T3 appcontainer: .git 只读授 RX + 二次启动 already + dispose 后无
       'Set-Content .git\\x.txt x', 'Add-Content .git\\HEAD junk', 'Rename-Item .git g2',
       'Get-Content .git\\HEAD', 'Set-Content root.txt ok',
     ], 'appcontainer')
-    const r = results(await transcript(out.dr))
-    assert.match(r[0] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
-    assert.match(r[1] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
-    assert.match(r[2] ?? '', /访问被拒绝|Access is denied|exit code: 1/i)
-    assert.match(r[3] ?? '', /ref: refs\/heads/)
-    await out.app.dispose()
+    // dispose 必须在 finally：断言失败时若跳过它，持久 pwsh 子进程/管道不会关，
+    // 测试文件子进程不退出，全量 runner 会无汇总挂住（本段实测的挂死形态：
+    // 测试全部跑完、报告已出、进程不退）。
+    try {
+      const r = results(await transcript(out.dr))
+      assert.match(r[0] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
+      assert.match(r[1] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
+      assert.match(r[2] ?? '', /访问被拒绝|Access is denied|exit code: 1/i)
+      assert.match(r[3] ?? '', /ref: refs\/heads/)
+    } finally {
+      await out.app.dispose()
+    }
     assert.equal(readFileSync(join(ws, '.git', 'HEAD'), 'utf8'), head0)
     assert.equal(existsSync(join(ws, '.git', 'x.txt')), false)
     gitCheck(ws)
