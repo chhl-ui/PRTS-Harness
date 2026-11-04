@@ -283,7 +283,11 @@ test('控制管道认证：四种冒充场景全拒 + 孙进程无控制 env', {
     l0.create(owner, { title: 'T', objective: 'O', acceptance: { kind: 'owner-confirm' } })
     l0.close()
 
-    sup = await Supervisor.start(cfg(dir, 'good', { timeouts: { s2Ms: 1000, s3Ms: 3000 } }))
+    // s2Ms 用产品默认值（5s），不用其他用例的 1s：本用例验证的是「真运行时
+    // 能应答 S2」，不是「超时升级」（那是 :104 的 hang 用例）——1s 在高负载下
+    // （全量跑 15 个文件并发）不够 fixture 子进程被调度 + 回包，会让第 5 步
+    // 偶发升级到 S3（实测 30 次全量 1 次）。
+    sup = await Supervisor.start(cfg(dir, 'good', { timeouts: { s2Ms: 5000, s3Ms: 3000 } }))
     assert.ok(await waitFor(() => sup!.status().runtimePid !== null))
     pids.push(sup.status().runtimePid!)
     assert.ok(await waitFor(() => sup!.runtimeConnected))
@@ -317,7 +321,7 @@ test('控制管道认证：四种冒充场景全拒 + 孙进程无控制 env', {
 
     // 5) 真运行时仍正常应答 S2，无升级
     const r = await sup.stop('S2')
-    assert.equal(r.escalatedTo, undefined)
+    assert.equal(r.escalatedTo, undefined, `S2 应正常应答而不是升级（耗时 ${r.durationMs}ms）`)
 
     // 6) 孙进程 env 检查：两控制变量都不得存在
     const grandFile = join(dir, `grand-${realPid}.json`)
