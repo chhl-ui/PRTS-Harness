@@ -38,6 +38,11 @@ export interface ReminderRow {
   kind: string
   /** 提醒时刻（Unix ms）。 */
   notifiedAtMs: number
+  /**
+   * 提醒投递到的会话（多会话下用于区分「念给谁听」）。
+   * 旧行没有这个字段（2026-11-04 之前），读取侧按 `undefined` 处理。
+   */
+  sessionId?: string
 }
 
 /** 写一条留痕的入参。`id` 由库生成，调用方不给。 */
@@ -45,6 +50,8 @@ export interface ReminderRecordInput {
   taskId: string
   kind: string
   notifiedAtMs: number
+  /** 投递到的会话；省略 = 未知（旧行为）。 */
+  sessionId?: string
 }
 
 /** 读留痕的过滤条件。 */

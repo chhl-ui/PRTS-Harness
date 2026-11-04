@@ -206,3 +206,27 @@ test('TR9 再次停滞：任务回到 active 后重新 blocked（updatedAt 前�
     )
   } finally { env.cleanup() }
 })
+
+test('TR10 留痕记下投递会话：多会话下能事后分辨念给了谁', async () => {
+  const env = setup([task('t1')])
+  try {
+    await runOnce(env)
+    const rows = env.store.list()
+    assert.equal(rows.length, 1, '一次提醒一条留痕')
+    assert.equal(rows[0]?.sessionId, 'sess-reminder', '留痕要带投递到的会话')
+  } finally { env.cleanup() }
+})
+
+test('TR11 上游 reject 时不写留痕：投递没发生就不算提醒过', async () => {
+  const env = setup([task('t1')])
+  const { ctx, fire } = fakeHookCtx()
+  const att = attachTaskReminder(ctx, { ledger: env.ledger as never, store: env.store, now: () => NOW })
+  try {
+    const d = await fire(payloadOf(), async () => ({ kind: 'reject' }))
+    assert.equal((d as { kind: string }).kind, 'reject', '上游 reject 原样返回')
+    assert.equal(env.store.list().length, 0, 'reject 时不得留痕')
+    // 下一次正常投递仍能提醒——说明那一轮没有被误标记成「已提醒」。
+    const text = await runOnce(env)
+    assert.notEqual(text, '', '未投递的那次不应消耗提醒')
+  } finally { att.dispose(); env.cleanup() }
+})

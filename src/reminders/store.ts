@@ -27,12 +27,24 @@ CREATE TABLE IF NOT EXISTS reminders (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id        TEXT    NOT NULL,
   kind           TEXT    NOT NULL,
-  notified_at_ms INTEGER NOT NULL
+  notified_at_ms INTEGER NOT NULL,
+  session_id     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_reminders_task ON reminders(task_id, kind);
 `
 
-const SELECT_COLUMNS = 'id, task_id, kind, notified_at_ms'
+const SELECT_COLUMNS = 'id, task_id, kind, notified_at_ms, session_id'
+
+/**
+ * 老库补列：`CREATE TABLE IF NOT EXISTS` 不会给已存在的表加列。
+ * 与 `audit_grants` 同一做法——先 `PRAGMA table_info` 再 `ALTER`，幂等。
+ */
+function migrateSessionColumn(db: DatabaseSync): void {
+  const cols = db.prepare('PRAGMA table_info(reminders)').all() as unknown as Array<{ name: string }>
+  if (!cols.some((c) => c.name === 'session_id')) {
+    db.exec('ALTER TABLE reminders ADD COLUMN session_id TEXT')
+  }
+}
 
 /** SQLite 的 INTEGER 在超出安全整数时会以 bigint 返回，统一收敛到 number。 */
 interface ReminderDbRow {
@@ -40,6 +52,7 @@ interface ReminderDbRow {
   task_id: string
   kind: string
   notified_at_ms: number | bigint
+  session_id: string | null
 }
 
 function toRow(row: ReminderDbRow): ReminderRow {
@@ -48,6 +61,7 @@ function toRow(row: ReminderDbRow): ReminderRow {
     taskId: row.task_id,
     kind: row.kind,
     notifiedAtMs: Number(row.notified_at_ms),
+    ...(row.session_id === null ? {} : { sessionId: row.session_id }),
   }
 }
 
@@ -87,6 +101,7 @@ export function openReminderStore(path: string): ReminderStore {
   const db = new DatabaseSync(path)
   db.exec('PRAGMA journal_mode = WAL')
   db.exec(SCHEMA)
+  migrateSessionColumn(db)
   let closed = false
 
   const wasNotified = (taskId: string, kind: string): boolean => {
@@ -114,9 +129,10 @@ export function openReminderStore(path: string): ReminderStore {
     const taskId = requireText(input.taskId, 'taskId')
     const kind = requireText(input.kind, 'kind')
     const notifiedAtMs = requireFinite(input.notifiedAtMs, 'notifiedAtMs')
+    const sessionId = input.sessionId === undefined || input.sessionId === '' ? null : input.sessionId
     db.prepare(
-      `INSERT INTO reminders (task_id, kind, notified_at_ms) VALUES (?,?,?)`,
-    ).run(taskId, kind, notifiedAtMs)
+      `INSERT INTO reminders (task_id, kind, notified_at_ms, session_id) VALUES (?,?,?,?)`,
+    ).run(taskId, kind, notifiedAtMs, sessionId)
   }
 
   const list = (opts: ReminderListQuery = {}): ReminderRow[] => {

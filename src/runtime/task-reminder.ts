@@ -138,7 +138,14 @@ export function attachTaskReminder(
    */
   const fired = new Set<string>()
 
-  const runOnce = (): string[] => {
+  /**
+   * 选停滞任务并渲染正文，**不写留痕**。
+   *
+   * 与 `markAll` 分开的理由：投递可能因为预算裁剪或上游 reject 而没真正发生，
+   * 而留痕一旦先写就把「这一次停滞」永久标记成已提醒。顺序必须是
+   * 「真的追加进 messages → 再留痕」。
+   */
+  const selectStale = (): { tasks: TaskSnapshot[]; body: string } | undefined => {
     const at = now()
     // 先按「阶段 + 时长」筛，再查留痕：留痕查询是 IO，能量小的先筛掉。
     const candidates = deps.ledger.list().filter((task) => {
@@ -151,7 +158,7 @@ export function attachTaskReminder(
       const last = deps.store.lastNotifiedAt(task.id, task.phase)
       return last === undefined || last < task.updatedAt
     })
-    if (candidates.length === 0) return []
+    if (candidates.length === 0) return undefined
 
     // 最久的排前面。`updatedAt` 相同时按账本顺序（下标）定序——不依赖
     // Array#sort 的稳定性假设，让「先后」在任何引擎上都可复现。
@@ -165,17 +172,18 @@ export function attachTaskReminder(
     const hidden = ordered.length - visible.length
     // 折叠只改显示：提示里那句「另有 N 条」必须说清去哪儿看，否则等于没提醒。
     if (hidden > 0) lines.push(`另有 ${hidden} 条未展开（用 /task 查看）`)
-    const body = [
-      `${MARK} 以下是系统自动整理的停滞任务，不是用户本轮发言：`,
-      ...lines,
-    ].join('\n')
+    return {
+      tasks: ordered,
+      body: [`${MARK} 以下是系统自动整理的停滞任务，不是用户本轮发言：`, ...lines].join('\n'),
+    }
+  }
 
-    // 先标记再注入（同 intent-trigger）：重复提醒比漏提醒更烦人，
-    // 而漏提醒用户可以自己 /task 查一次。标记失败只记日志——提醒本身不能
-    // 因为记账失败而发不出去。
-    for (const task of ordered) {
+  /** 注入成功后再写留痕；`sessionId` 记下这次提醒念给了哪个会话。 */
+  const markAll = (tasks: TaskSnapshot[], sessionId: string): void => {
+    const at = now()
+    for (const task of tasks) {
       try {
-        deps.store.record({ taskId: task.id, kind: task.phase, notifiedAtMs: at })
+        deps.store.record({ taskId: task.id, kind: task.phase, notifiedAtMs: at, sessionId })
         fired.add(keyOf(task.id, task.phase, task.updatedAt))
       } catch (error) {
         console.error(
@@ -183,7 +191,14 @@ export function attachTaskReminder(
         )
       }
     }
-    return [body]
+  }
+
+  /** 手动跑一次（测试入口）：算完即标记，复用旧语义。 */
+  const runOnce = (): string[] => {
+    const picked = selectStale()
+    if (picked === undefined) return []
+    markAll(picked.tasks, '')
+    return [picked.body]
   }
 
   const off = hookCtx.on('agent/pre-step', async (payload, next) => {
@@ -194,20 +209,25 @@ export function attachTaskReminder(
     try {
       if (decision?.kind !== 'enter') return decision
       if (!Array.isArray(decision.messages)) return decision
-      const bodies = runOnce()
-      if (bodies.length === 0) return decision
-      return {
+      const picked = selectStale()
+      if (picked === undefined) return decision
+      const p = payload as { agent?: { session?: { id?: string } } }
+      const sessionId = p.agent?.session?.id ?? ''
+      const out = {
         ...decision,
         messages: [
           ...decision.messages,
           {
             id: `task-reminder-${randomUUID()}`,
             role: 'user',
-            content: [{ type: 'text', text: bodies[0] }],
+            content: [{ type: 'text', text: picked.body }],
             source: { kind: 'user' },
           },
         ],
       }
+      // 注入成功后才留痕（与旧实现顺序相反，理由见 selectStale 注释）。
+      markAll(picked.tasks, sessionId)
+      return out
     } catch (error) {
       // 提醒失败绝不能阻断对话——它是增强，不是闸门。
       console.error(`[prts] task reminder failed: ${error instanceof Error ? error.message : String(error)}`)
