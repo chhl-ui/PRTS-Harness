@@ -272,6 +272,7 @@ test('Windows 路径别名：尾点/尾空格/\\?\\ 前缀/ADS/8.3 短名', () =
   const prot = join(t.dir, 'prot')
   mkdirSync(prot)
   const a = openAuth(t.db(), AUTH_CFG([t.dir], [prot]))
+  a.registerPrimarySession('s1') // 写权限以已注册身份为前提（2026-11-05 翻牌）
   try {
     // 尾点与尾空格段是同一目录的别名
     assert.equal(a.decide(call({ capabilities: [cap.fsWrite(prot + '.\\a')] })).kind, 'deny')

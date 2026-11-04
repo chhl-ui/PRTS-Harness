@@ -58,6 +58,8 @@ test('W3: 绑定会话的任务会把工具调用记成 step', { timeout: 180000
       cwd: ws,
       dataRoot,
       sessionId: SESSION,
+      // 写权限以已注册身份为前提（2026-11-05 翻牌）：runChat 负责注册主会话。
+      authority: app.authority,
     })
 
     const steps = app.ledger.steps(task.id)

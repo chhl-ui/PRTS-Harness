@@ -80,6 +80,8 @@ async function runWrite(where: 'protected' | 'workspace'): Promise<{ created: bo
       out: () => {},
       cwd: ws,
       dataRoot,
+      // 写权限以已注册身份为前提（2026-11-05 翻牌）：runChat 负责注册主会话。
+      authority: app.authority,
     })
     const created = existsSync(targetPath)
     return {

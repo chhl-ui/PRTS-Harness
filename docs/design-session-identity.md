@@ -140,6 +140,14 @@ fs.delete 保持恒 ask，只在 ask 前加「子会话活跃 + roots 外 → de
 
 **翻牌的剩余成本是「给 6 个测试文件的 fixture 补注册」，不是产品缺陷**；而生产只有 `chat.ts:499` 一处 `agents.create`（已注册），未注册会话在生产中不会出现。因此当前 defer 口径的残余风险只落在「未来新增的装配入口忘记注册」——由 §3.4 的覆盖测试拦截。
 
+**第三轮：翻牌已落地（2026-11-05）**：补齐上述 6 个 fixture 的注册（另加 `test/authority/spill-roots.test.ts` 一处）
+后，把 `decideSessionScoped` 的未注册分支从 defer 改为 **deny**（`src/authority/authority.ts:216-219`）。
+全量 **787 pass / 0 fail**。被翻转的特性化断言：
+- `test/authority/session-scoped-write.test.ts` W5：未注册会话写工作区 → 由「allow via policy」改为 **deny**；
+- `test/acceptance/subagent-authority.test.ts` 用例③：由「policy 放行」改为 **未注册与已注册子会话均 deny**。
+
+生产影响面不变：只有 `runChat` 启动处一处 `agents.create`，注册后才进入主循环；未注册会话在生产中不出现。
+
 残余风险（若退回 defer）：不经注册的 `agents.create` 会以主会话权限运行；缓解是 3.4 的覆盖测试 + 注册失败即拒绝。
 
 ## 四、与现有不变量的关系

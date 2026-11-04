@@ -88,11 +88,10 @@ test('W4 主会话写工作区 → 仍 allow via policy（零翻转）', () => {
   })
 })
 
-test('W5 未注册会话写工作区 → 仍 allow via policy（零翻转）', () => {
+test('W5 未注册会话写工作区 → deny（2026-11-05 翻牌）', () => {
   withScopedAuth(({ a, ws }) => {
     const d = decide(a, 'nobody', 'write', cap.fsWrite(join(ws, 'shared', 'ok2.txt')))
-    assert.equal(d.kind, 'allow')
-    assert.equal(d.kind === 'allow' ? d.via : undefined, 'policy')
+    assert.equal(d.kind, 'deny', '写权限以已注册身份为前提')
   })
 })
 

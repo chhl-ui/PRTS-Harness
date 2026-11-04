@@ -82,6 +82,8 @@ async function chat(app: App, ws: string, dataRoot: string, printed: string[], s
     dataRoot,
     sessionId,
     ledger: app.ledger,
+    // 写权限以已注册身份为前提（2026-11-05 翻牌）：runChat 负责注册主会话。
+    authority: app.authority,
     ...pointerDeps(app),
   })
 }

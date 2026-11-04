@@ -25,6 +25,8 @@ function fixture(readOnlySubpaths?: string[]) {
     protectedRoots: [dataRoot],
     ...(readOnlySubpaths === undefined ? {} : { readOnlySubpaths }),
   })
+  // 写权限以已注册身份为前提（2026-11-05 翻牌）：fixture 的会话先注册为主会话。
+  authority.registerPrimarySession('s1')
   return { authority, workspace, t, cleanup: () => t.cleanup(authority) }
 }
 

@@ -115,10 +115,10 @@ test('DP2 失败隔离：一个 worker 失败，其余照常完成且结果按�
       { task: 'c', taskId: 'd3' },
     ], { concurrency: 3 })
     assert.deepEqual(r.map((x) => x.taskId), ['d1', 'd2', 'd3'], '结果必须按输入顺序')
-    assert.equal(r[0]!.ok, true)
+    assert.equal(r[0]!.ok, true, `d1 应成功：${r[0]!.error ?? ''}`)
     assert.equal(r[1]!.ok, false)
     assert.match(r[1]!.error ?? '', /create boom d2/)
-    assert.equal(r[2]!.ok, true)
+    assert.equal(r[2]!.ok, true, `d3 应成功：${r[2]!.error ?? ''}`)
     assert.equal(e.auth.hasSessionScope('subtask-d2'), false, '失败的 worker 不残留身份')
   } finally { e.cleanup() }
 })

@@ -203,7 +203,7 @@ export class Authority {
    * 会话级写入口径（W2）。只收窄、不打开任何新通道：
    *
    * - 空 sessionId → deny（「没有会话」不是「任何会话」，与 grantsForSession 同一判据）
-   * - 未注册 → defer（没有身份记录不等于有罪，回落原判定）
+   * - 未注册 → deny（写权限以已注册身份为前提；2026-11-05 翻牌）
    * - 主会话 → defer
    * - 已释放子会话 → deny（身份已交回，不再持有任何写权）
    * - 活跃子会话 → roots 内 allow；全局 workspace 内且 roots 外 deny；其余 defer
@@ -213,10 +213,10 @@ export class Authority {
   private decideSessionScoped(sessionId: string, rp: string): 'allow' | 'deny' | 'defer' {
     if (sessionId === '') return 'deny'
     const row = this.sessionRow(sessionId)
-    // 未注册 → defer（= 主会话）。翻牌实验 #2（2026-11-04，补齐 runTurn 注册后）
-    // 仍打穿 10 条，全部是测试 fixture 的未注册会话；翻牌的剩余成本是改 6 个测试文件的
-    // fixture，而不是产品缺陷。数据见 docs/design-session-identity.md §3.5。
-    if (row === undefined) return 'defer'
+    // 未注册 → deny（2026-11-05 翻牌）。生产入口都在 runChat / startRuntime 注册；
+    // 未注册会话只可能来自测试 fixture 或未来新增的装配入口——后者应由注册覆盖
+    // 测试拦截，而不是默认给它主会话写权限。数据见 docs/design-session-identity.md §3.5。
+    if (row === undefined) return 'deny'
     if (row.releasedAtMs !== null) return 'deny'
     if (row.kind === 'primary') return 'defer'
     if (this.inSessionRoots(row, rp)) return 'allow'

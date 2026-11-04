@@ -12,9 +12,9 @@
  *   「全局授予（sessionId=null）」与「本会话授予」，`evalCap` 的 fs.write / net / exec / tool
  *   四族共用这一份过滤，没有哪一族能绕开
  * - `once` 按 `callId + sessionId` 消费（父会话的批准换会话即失效）
- * - **未收窄**：工作区内 fs.write 仍走 `via:'policy'` 无条件放行，与 sessionId 无关。
- *   这条路不是「继承」——它对所有会话（包括主会话）一视同仁。要收窄它需要「谁是子会话」
- *   的注册信息，那是 W2 `prts_subtask` 的会话级 workspace 收窄，不属于 grant 会话归属。
+ * - **已收窄（2026-11-05 翻牌）**：工作区内 fs.write 需要已注册身份——未注册一律 deny；
+ *   已注册子会话只在自身 roots 内 allow，工作区内 roots 外 deny；主会话保持 policy 放行。
+ *   收窄点是 `decideSessionScoped`（`src/authority/authority.ts`），与 grant 会话归属分开。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -94,20 +94,25 @@ test('子会话权限②：无 once 时默认 ask（不覆盖 once 跨会话场�
   })
 })
 
-test('子会话权限③：工作区内 fs.write 仍是 policy 放行（残留缺口，属 W2 会话级 workspace 收窄）', async () => {
+test('子会话权限③：工作区内 fs.write 对未注册会话与子会话均已 deny（2026-11-05 翻牌）', async () => {
   await withAuth(({ auth, ws }) => {
     const target = join(ws, 'shared.txt')
-    const decision = auth.decide({
+    // (a) 未注册会话：写权限以已注册身份为前提，一律 deny。
+    const unregistered = auth.decide({
       sessionId: 'child-worker-3',
       callId: 'call-child-3',
       tool: 'write',
       capabilities: [`fs.write:${target}` as never],
     })
-    // 现状：workspaceRoots 命中 → allow via policy，与 sessionId 无关。
-    // 这说明「给 grant 加会话归属」不足以让子会话失去工作区写权限——policy 那条路根本
-    // 不查 grant。收窄它需要「谁是子会话」的注册信息（W2 `prts_subtask` 派生时收窄
-    // 子会话的 workspaceRoots），届时本断言翻转为 deny。
-    assert.equal(decision.kind, 'allow', '现状记录：工作区内写入放行')
-    assert.equal((decision as { via?: string }).via, 'policy', '放行通道是 policy，不是 grant')
+    assert.equal(unregistered.kind, 'deny', '未注册会话不应享有工作区写权限')
+    // (b) 已注册子会话：roots 为空 → 工作区内、roots 外 → deny（同一收窄口径）。
+    auth.registerSessionRoots('child-worker-4', [])
+    const child = auth.decide({
+      sessionId: 'child-worker-4',
+      callId: 'call-child-4',
+      tool: 'write',
+      capabilities: [`fs.write:${target}` as never],
+    })
+    assert.equal(child.kind, 'deny', '子会话只能写自己的 roots')
   })
 })
