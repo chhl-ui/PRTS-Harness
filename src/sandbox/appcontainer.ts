@@ -183,6 +183,10 @@ const SetHandleInformation = kernel32.func(
 const ReadFile = kernel32.func(
   'bool ReadFile(void *h, void *buf, uint32_t n, _Out_ uint32_t *got, void *ov)',
 )
+const PeekNamedPipe = kernel32.func(
+  'bool PeekNamedPipe(void *h, void *buf, uint32_t n, _Out_ uint32_t *read, _Out_ uint32_t *avail, void *left)',
+)
+const TerminateProcess = kernel32.func('bool TerminateProcess(void *h, uint32_t code)')
 const GetStdHandle = kernel32.func('void *GetStdHandle(uint32_t which)')
 
 const EXTENDED_STARTUPINFO_PRESENT = 0x0008_0000
@@ -226,24 +230,49 @@ function icacls(args: readonly string[]): Promise<{ code: number; out: string }>
   })
 }
 
+/** 单次 wait 的总预算：超时后强杀并返回错误码——宁可报失败，不可挂死。 */
+const WAIT_TIMEOUT_MS = 30_000
+/** 进程未退出时每轮等待的毫秒数：小到及时读管道，大到不烧 CPU。 */
+const WAIT_SLICE_MS = 20
+const WAIT_OBJECT_0 = 0
+
 /**
- * 同步读空一个管道句柄直到 EOF，然后关掉它。
+ * 读子进程输出：**有数据才读，不等 EOF**。
  *
- * 注意这是阻塞读：调用方必须在「父进程写端已关闭」之后调它，否则永远读不到 EOF。
- * 同理不能在调用它的同一个线程里等子进程先退出——输出填满管道时子进程会卡在写。
+ * 为什么不等 EOF：管道的写端被子进程继承，若它又派生孙进程且孙进程不退出，
+ * 写端永不关闭、EOF 永不到来——同步 `ReadFile` 会永久阻塞，`node --test` 的
+ * 120s 超时也不触发（事件循环停摆）。2026-11-04 实测：全量 20 轮第 5 轮挂起，
+ * 卡在 `workspace-acl.test.ts` 的 AppContainer 路径（CPU 2.6s / 存活 90s，
+ * 典型阻塞），且有一个孙进程存活。
+ *
+ * 顺序：`PeekNamedPipe` 查可读字节 → 有就 `ReadFile`（已有数据不会阻塞）→
+ * 没有就 `WaitForSingleObject` 等 20ms 看进程是否退出 → 进程退出后再读残留，
+ * Peek 为 0 即停。总预算 30s，超时由调用方强杀。
  */
-function drainPipe(handle: unknown): string {
+function drainUntilExit(pipeHandle: unknown, procHandle: unknown): { output: string; timedOut: boolean } {
   const chunks: Buffer[] = []
   const buf = Buffer.alloc(65536)
+  const deadline = Date.now() + WAIT_TIMEOUT_MS
+  let exited = false
   for (;;) {
-    const got: unknown[] = [0]
-    const okRead = ReadFile(handle, buf, 65536, got, null)
-    const n = Number(got[0] as number)
-    if (!okRead || n === 0) break
-    chunks.push(Buffer.from(buf.subarray(0, n)))
+    const availOut: unknown[] = [0]
+    const okPeek = PeekNamedPipe(pipeHandle, null, 0, null, availOut, null)
+    if (!okPeek) break   // 句柄已不可用：读不到更多
+    const avail = Number(availOut[0] as number)
+    if (avail > 0) {
+      const got: unknown[] = [0]
+      const okRead = ReadFile(pipeHandle, buf, Math.min(avail, 65536), got, null)
+      const read = Number(got[0] as number)
+      if (!okRead || read === 0) break
+      chunks.push(Buffer.from(buf.subarray(0, read)))
+      continue
+    }
+    if (exited) break     // 进程已退出且无残留：结束（不等 EOF）
+    if (Date.now() >= deadline) return { output: Buffer.concat(chunks).toString('utf8'), timedOut: true }
+    if (WaitForSingleObject(procHandle, WAIT_SLICE_MS) === WAIT_OBJECT_0) exited = true
   }
-  CloseHandle(handle)
-  return Buffer.concat(chunks).toString('utf8')
+  CloseHandle(pipeHandle)
+  return { output: Buffer.concat(chunks).toString('utf8'), timedOut: false }
 }
 
 // ---------------------------------------------------------------- 实现
@@ -424,11 +453,30 @@ export async function createAppContainer(opts: AppContainerOptions): Promise<App
         pid: pi.dwProcessId,
         wait(): Promise<{ exitCode: number; output: string }> {
           return new Promise((resolve) => {
-            // 先读再等：读会一直阻塞到所有写端关闭（父进程的写端已在上面关掉），
-            // 子进程退出即 EOF。反过来「先等再读」会在输出填满管道时死锁。
-            // inherit 模式没有管道可读，输出归调用方，output 恒为空。
-            const output = inherit ? '' : drainPipe(pipeReadHandle)
-            WaitForSingleObject(pi.hProcess, 0xFFFF_FFFF)
+            // inherit 模式没有管道可读，输出归调用方；仍给总预算，不无限等。
+            if (inherit) {
+              const rc = WaitForSingleObject(pi.hProcess, WAIT_TIMEOUT_MS)
+              if (rc !== WAIT_OBJECT_0) {
+                try { TerminateProcess(pi.hProcess, 1) } catch { /* 已死 */ }
+                WaitForSingleObject(pi.hProcess, 1000)
+                CloseHandle(pi.hProcess)
+                resolve({ exitCode: -1, output: `[prts] AppContainer 子进程超时（${WAIT_TIMEOUT_MS}ms，inherit）` })
+                return
+              }
+              const code: unknown[] = [0]
+              GetExitCodeProcess(pi.hProcess, code)
+              CloseHandle(pi.hProcess)
+              resolve({ exitCode: Number(code[0] as number), output: '' })
+              return
+            }
+            const { output, timedOut } = drainUntilExit(pipeReadHandle, pi.hProcess)
+            if (timedOut) {
+              try { TerminateProcess(pi.hProcess, 1) } catch { /* 已死 */ }
+              WaitForSingleObject(pi.hProcess, 1000)
+              CloseHandle(pi.hProcess)
+              resolve({ exitCode: -1, output: `${output}\n[prts] AppContainer 子进程超时（${WAIT_TIMEOUT_MS}ms），已强杀` })
+              return
+            }
             const code: unknown[] = [0]
             GetExitCodeProcess(pi.hProcess, code)
             CloseHandle(pi.hProcess)

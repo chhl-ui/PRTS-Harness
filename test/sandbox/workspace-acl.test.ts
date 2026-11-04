@@ -22,7 +22,18 @@ import {
 import { appContainerProfileName } from '../../src/sandbox/provider.ts'
 import type { Context } from '@deepseek-ai/cordis'
 
-const USER_SID = execSync('C:/Windows/System32/whoami.exe /user /fo csv /nh', { encoding: 'utf8' }).split(',')[1].replace(/"/g, '').trim()
+/**
+ * 所有同步子进程都带超时。
+ *
+ * 无超时的 `execSync` 在高并发下会永久挂起：全量跑 15 个测试文件并行时，
+ * `git` / `icacls` / `cmd` 会等文件系统锁，而同步等待本身不触发
+ * `node --test` 的 120s 超时（事件循环停摆）。2026-11-04 实测：20 轮全量里
+ * 第 5、11 轮挂在本文件，卡住的子进程 CPU 2.5s / 存活 90s（典型阻塞）。
+ */
+const RUN_TIMEOUT = 30_000
+const sh = (cmd: string): string => execSync(cmd, { encoding: 'utf8', timeout: RUN_TIMEOUT, killSignal: 'SIGKILL' })
+
+const USER_SID = sh('C:/Windows/System32/whoami.exe /user /fo csv /nh').split(',')[1].replace(/"/g, '').trim()
 // 与生产同源：用 appContainerProfileName() 而不是硬编码的规范名。
 // 这样 T3 断言的就是「启动时真正授出去的那个 SID」——两处不同源的形态才抓得住。
 const CSID = deriveAppContainerSid(appContainerProfileName())
@@ -36,8 +47,8 @@ const newWs = (name: string, withGit = true): string => {
   assert.equal(existsSync(p), false, `${p} 已存在`)
   mkdirSync(p); created.push(p)
   if (withGit) {
-    execSync(`git -C "${p}" -c user.name=probe -c user.email=probe@local init -q`)
-    execSync(`git -C "${p}" -c user.name=probe -c user.email=probe@local commit --allow-empty -qm init`)
+    sh(`git -C "${p}" -c user.name=probe -c user.email=probe@local init -q`)
+    sh(`git -C "${p}" -c user.name=probe -c user.email=probe@local commit --allow-empty -qm init`)
   }
   return p
 }
@@ -45,7 +56,7 @@ const dataRoot = (): string => {
   const p = mkdtempSync(join(tmpdir(), 'prts-atest-')); created.push(p)
   mkdirSync(join(p, 'data'), { recursive: true }); return join(p, 'data')
 }
-const icacls = (p: string): string => execSync(`icacls "${p}"`, { encoding: 'utf8' })
+const icacls = (p: string): string => sh(`icacls "${p}"`)
 
 async function transcript(dr: string): Promise<string> {
   const sessDir = join(dr, 'dsh-home', 'sessions'); let text = ''
@@ -71,8 +82,8 @@ const withBackend = async <T>(b: 'local' | 'appcontainer', fn: () => Promise<T>)
   try { return await fn() } finally { prev === undefined ? delete process.env.PRTS_SANDBOX_BACKEND : process.env.PRTS_SANDBOX_BACKEND = prev }
 }
 const gitCheck = (ws: string) => {
-  assert.equal(spawnSync('git', ['-C', ws, '-c', 'user.name=probe', '-c', 'user.email=probe@local', 'commit', '--allow-empty', '-qm', 'h'], { encoding: 'utf8' }).status, 0, 'host commit')
-  assert.equal(spawnSync('git', ['-C', ws, 'fsck'], { encoding: 'utf8' }).status, 0, 'host fsck')
+  assert.equal(spawnSync('git', ['-C', ws, '-c', 'user.name=probe', '-c', 'user.email=probe@local', 'commit', '--allow-empty', '-qm', 'h'], { encoding: 'utf8', timeout: RUN_TIMEOUT }).status, 0, 'host commit')
+  assert.equal(spawnSync('git', ['-C', ws, 'fsck'], { encoding: 'utf8', timeout: RUN_TIMEOUT }).status, 0, 'host fsck')
 }
 
 test('T1 local: 无预授权的 C:\\ ws 自动 WO，pwsh 写区内成功/区外被拒，无旧横幅', { timeout: 240000 }, async () => {
@@ -196,7 +207,7 @@ test('T6 读回不符 throw；startRuntime 对 protect 失败拒绝启动', { ti
 
 test('T-unit ensureWorkspaceWriteOwner: 已有 WO → already', async () => {
   const ws = newWs('tunit', false)
-  execSync(`icacls "${ws}" /grant *${USER_SID}:(OI)(CI)(WO)`)
+  sh(`icacls "${ws}" /grant *${USER_SID}:(OI)(CI)(WO)`)
   assert.equal(await ensureWorkspaceWriteOwner(ws), 'already')
 })
 
@@ -248,7 +259,7 @@ test('T10 .git 是 junction：两后端 protect 都 throw，目标 ACL 不变', 
   const ws = newWs('junc', false)
   const target = `C:\prts-test-acl-jt-${hex()}`
   mkdirSync(target); created.push(target)
-  execSync(`cmd /c mklink /J "${join(ws, '.git')}" "${target}"`)
+  sh(`cmd /c mklink /J "${join(ws, '.git')}" "${target}"`)
   const snapBefore = await readAcl(target)
   await assert.rejects(() => protectSubpathLocal(ws, '.git'), /reparse|junction|symlink/i)
   await assert.rejects(() => protectSubpathAppContainer(ws, '.git', CSID), /reparse|junction|symlink/i)
