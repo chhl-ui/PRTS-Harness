@@ -3,3 +3,9 @@ node_modules/
 # 一次性诊断探针：不参与 npm test（glob 是 test/**/*.test.ts），不进版本库
 .scratch/
 __pycache__/
+
+# 运行时探针与作业产物（非项目资产）
+.rivet/artifacts/
+.rivet/cache/
+.rivet/checkpoints/
+.rivet/scratch/
