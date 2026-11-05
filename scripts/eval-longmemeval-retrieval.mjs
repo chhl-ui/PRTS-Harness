@@ -18,7 +18,7 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { MemoryStore } from 'file:///C:/prts-system/src/memory/index.ts'
+import { MemoryStore, OpenAiCompatibleEmbedder } from 'file:///C:/prts-system/src/memory/index.ts'
 
 const SRC = process.env.SRC ?? 'C:/prts-benchmark/longmemeval/longmemeval_s_cleaned.json'
 const DB = process.env.DB ?? 'C:/prts-benchmark/memory-s.sqlite'
@@ -34,6 +34,14 @@ const pct = (x, n) => `${((100 * x) / n).toFixed(1)}%`
 
 const data = JSON.parse(readFileSync(SRC, 'utf8'))
 const store = MemoryStore.open(DB)
+
+/** `EMBED=1`：用 llama.cpp 的 OpenAI 兼容端点算查询向量；默认 null = 纯字面。 */
+const embedder = process.env.EMBED === '1'
+  ? new OpenAiCompatibleEmbedder({
+    baseUrl: process.env.EMBED_URL ?? 'http://127.0.0.1:11435',
+    model: process.env.EMBED_MODEL ?? 'bge-m3',
+  })
+  : null
 
 const perType = new Map()
 /** 逐题耗时的原始值——V1-16 的判据是 P95，只留 per-type 均值会把尾部掩掉。 */
@@ -57,7 +65,13 @@ for (const q of data) {
   }
 
   const started = Date.now()
-  const hits = store.search({ text: q.question, includeOrigin: ['benchmark'], limit: K2 })
+  // `EMBED=1`：把查询嵌入并传 queryVector，测「字面 + 向量」；默认不传 = 纯字面。
+  // 两种模式必须用同一批题、同一库，否则分数不可比。
+  const queryVector = embedder === null ? undefined : (await embedder.embed([q.question]))[0]
+  const hits = store.search({
+    text: q.question, includeOrigin: ['benchmark'], limit: K2,
+    ...(queryVector === undefined ? {} : { queryVector, semanticTopK: K2, semanticMinSim: 0.25 }),
+  })
     .filter((h) => h.kind === 'turn')
   const ms = Date.now() - started
   n += 1
