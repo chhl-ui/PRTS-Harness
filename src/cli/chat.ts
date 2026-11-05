@@ -91,8 +91,26 @@ export function assistantAfterSeq(dataRoot: string, sessionId: string, afterSeq:
   return { text, seq }
 }
 
+/**
+ * 回合收敛的墙钟预算。
+ *
+ * 为什么可配：120s 对云端模型够用，对本地模型（实测 59–71 t/s）在多工具调用时不宽裕——
+ * S10 那次 123.47s 正好撞线，回了个空。`PRTS_TURN_TIMEOUT_MS` 让本地场景调到 300s，
+ * 而不必改代码；默认值保持 120s 不变，不动既有行为。
+ *
+ * 非法值（非数字、0、负数）一律回落默认：超时配成 0 会让每个回合都「没收敛」，
+ * 那是比不配更危险的静默失败。
+ */
+export function resolveTurnTimeoutMs(): number {
+  const raw = process.env.PRTS_TURN_TIMEOUT_MS
+  if (raw === undefined || raw.trim() === '') return 120_000
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return 120_000
+  return Math.floor(n)
+}
+
 /** 等回合收敛：followup 后 status 仍可能是 idle，必须给 kick 留时间。 */
-export async function waitIdle(agent: { status: string }, ms = 120000): Promise<boolean> {
+export async function waitIdle(agent: { status: string }, ms = resolveTurnTimeoutMs()): Promise<boolean> {
   await new Promise((r) => setTimeout(r, 150))
   const t0 = Date.now()
   while (Date.now() - t0 < ms) {
@@ -854,7 +872,11 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
         else deps.out(fromLog.text)
       }
       // replies 仍存整段（不是逐片）：最后一次 attempt 的文本优先，其次终端所见，再其次日志。
-      const text = attemptText || streamed || fromLog.text
+      const turnText = attemptText || streamed || fromLog.text
+      // 超时（settled=false）且三路都没内容时**不许 push 空串**：上游会把空串当成
+      // 「模型无话可说」，而不是「回合没跑完」——V1-18 正是这样白跑掉 15 题的
+      // （端点崩了，runChat 不抛错，只把每题跑成空回复）。
+      const text = turnText === "" && !settled ? "[回合未收敛：等待超时且无任何输出]" : turnText
       replies.push(text)
       deps.onTurnEnd?.({ sessionId, turn: replies.length, text, settled })
       deps.onIdle?.()
