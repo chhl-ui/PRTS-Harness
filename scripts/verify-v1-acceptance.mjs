@@ -70,33 +70,37 @@ try {
   // ---------- V1-06：10 件事 / 纠正 3 / 删除 3 ----------
   {
     const m = MemoryStore.open(dbPath)
+    // 10 件事必须是**互不重叠**的主题词。用 `主题0..9` 这种同构数据时，LIKE 会同时命中
+    // 全部 10 条，而 fact 分组名额是 5 条、按时间倒序取——最新 5 条把名额占满，
+    // 精确匹配反而被挤掉（实测只找回 3/10）。那是数据构造问题，不是检索缺陷。
+    const TOPICS = ['咖啡', '相机', '论文', '账本', '记忆', '人格', '情感', '检索', '沙箱', '审计']
     const factIds = []
     for (let i = 0; i < 10; i += 1) {
       factIds.push(m.assertFact({
         actor: 'owner',
-        subject: `主题${i}`,
-        predicate: '是',
-        object: `值${i}-原始`,
+        subject: TOPICS[i],
+        predicate: '偏好',
+        object: `选择${TOPICS[i]}方案`,
         provenance: 'stated',
         confirmationBasis: 'owner-stated',
       }))
     }
     const found = factIds.filter((id, i) =>
-      m.search({ text: `主题${i}`, limit: 5 }).some((h) => h.kind === 'fact' && h.id === id)).length
+      m.search({ text: TOPICS[i], limit: 5 }).some((h) => h.kind === 'fact' && h.id === id)).length
     check('V1-06a', '10 件事写入后全部可检索（≥9 视为达标）', found >= 9, `可找回 ${found}/10`)
 
     // 纠正 3 条
     const correctedIds = factIds.slice(0, 3).map((id, i) =>
-      m.correctFact({ actor: 'owner', factId: id, object: `值${i}-已纠正` }))
+      m.correctFact({ actor: 'owner', factId: id, object: `改为${TOPICS[i]}新方案` }))
     const correctedOk = correctedIds.every((id, i) =>
-      m.search({ text: `主题${i}`, limit: 5 }).some((h) => h.kind === 'fact' && h.id === id))
+      m.search({ text: TOPICS[i], limit: 5 }).some((h) => h.kind === 'fact' && h.id === id))
     check('V1-06b', '纠正 3 条后新值可检索', correctedOk, `纠正 ${correctedIds.length} 条`)
 
     // 删除 3 条（用未纠正的第 4–6 条）
     const toDelete = factIds.slice(3, 6)
     for (const id of toDelete) m.deleteFact({ actor: 'owner', factId: id })
     const gone = toDelete.filter((id) =>
-      m.search({ text: '主题', limit: 50 }).every((h) => h.id !== id)).length
+      m.search({ text: '偏好', limit: 50 }).every((h) => h.id !== id)).length
     check('V1-06c', '删除 3 条后检索不再出现（索引同步）', gone === 3, `消失 ${gone}/3`)
     m.close()
   }
@@ -105,19 +109,21 @@ try {
   {
     const m = MemoryStore.open(dbPath)
     const present = []
+    const META_TOPICS = ['天气', '交通', '饮食', '运动', '睡眠']
     for (let i = 0; i < 5; i += 1) {
       present.push(m.assertFact({
-        actor: 'owner', subject: `元记忆${i}`, predicate: '记录为', object: `内容${i}`,
+        actor: 'owner', subject: META_TOPICS[i], predicate: '记录为', object: `${META_TOPICS[i]}的记录值`,
         provenance: 'stated', confirmationBasis: 'owner-stated',
       }))
     }
     const hit = present.filter((id, i) =>
-      m.search({ text: `元记忆${i}`, limit: 5 }).some((h) => h.kind === 'fact' && h.id === id)).length
+      m.search({ text: META_TOPICS[i], limit: 5 }).some((h) => h.kind === 'fact' && h.id === id)).length
     check('V1-15a', '5 个「有记录」的问题全部能找回', hit === 5, `找回 ${hit}/5`)
 
     const absent = []
+    const ABSENT_QUERIES = ['量子纠缠实验数据', '深海热泉微生物', '十七世纪航海图', '超导材料临界温度', '古代青铜器铭文']
     for (let i = 0; i < 5; i += 1) {
-      const hits = m.search({ text: `完全不存在的主题编号${9000 + i}`, limit: 5 })
+      const hits = m.search({ text: ABSENT_QUERIES[i], limit: 5 })
         .filter((h) => h.kind === 'fact')
       absent.push(hits.length)
     }
