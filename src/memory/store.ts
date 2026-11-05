@@ -151,6 +151,21 @@ function rowImportance(
   return decayedImportance(r.importance, r.recorded_at_ms, nowMs, IMPORTANCE_HALF_LIFE_DAYS, r.access_count ?? 0)
 }
 
+/**
+ * `turnEntities` 的查询文本（模块级导出，供计划测试用）。
+ *
+ * 为什么它值得单独抽出来：`e.scope = ?` 若留在 JOIN 条件上，SQLite 会选
+ * 「先扫 scope='prts' 的全部实体、再逐个回查 mentions」——基准库（71.7 万条
+ * mentions）上单次 **646ms**；装配每轮调它一次，把 V1-16 端到端 p95 推到 1610ms。
+ * 差异无法用行为断言捕捉，只能靠 `EXPLAIN QUERY PLAN`，
+ * 见 `test/memory/turn-entities-plan.test.ts`。
+ */
+export function turnEntitiesSql(idCount: number): string {
+  return `SELECT m.turn_id, m.entity_key, e.name, e.mention_count
+            FROM mem_mentions m CROSS JOIN mem_entities e ON e.entity_key = m.entity_key
+           WHERE m.turn_id IN (${Array.from({ length: idCount }, () => '?').join(',')}) AND e.scope = ?`
+}
+
 export class MemoryStore {
   private readonly db: DatabaseSync
 
@@ -891,15 +906,17 @@ export class MemoryStore {
   /**
    * turn 命中的实体提及（`mem_mentions` × `mem_entities`）。
    * 阅读阶段拿它做主题卡聚合键；`mentionCount` 供消费方过滤枢纽实体。
+   *
+   * **SQL 抽成常量是为了让它可被计划测试钉住**：`e.scope = ?` 写成 JOIN 条件时，
+   * SQLite 会选「先扫 scope='prts' 的全部实体、再逐个回查 mentions」——基准库上
+   * 单次 646ms；`CROSS JOIN` 强制先按 turn_id 筛（1.0ms）。这条差异只能靠
+   * `EXPLAIN QUERY PLAN` 断言，所以查询文本必须能被测试拿到。
+   * 见 `test/memory/turn-entities-plan.test.ts`。
    */
   turnEntities(turnIds: readonly string[]): Map<string, TurnEntityMention[]> {
     const out = new Map<string, TurnEntityMention[]>()
     if (turnIds.length === 0) return out
-    const rows = this.db.prepare(
-      `SELECT m.turn_id, m.entity_key, e.name, e.mention_count
-         FROM mem_mentions m JOIN mem_entities e ON e.entity_key = m.entity_key
-        WHERE e.scope = ? AND m.turn_id IN (${turnIds.map(() => '?').join(',')})`,
-    ).all(SCOPE, ...turnIds) as Array<{
+    const rows = this.db.prepare(turnEntitiesSql(turnIds.length)).all(...turnIds, SCOPE) as Array<{
       turn_id: string
       entity_key: string
       name: string

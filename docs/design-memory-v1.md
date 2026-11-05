@@ -736,8 +736,29 @@ single-session-user 45.3%、single-session-preference 3.3%。
 knowledge-update 70.8%（317）、single-session-assistant **82.1%（729）**、
 single-session-user 45.3%（227）、single-session-preference 3.3%（590，仍是 bm25 天花板，见 §9.2）。
 
-**V1-16 判据**：架构需求要求「装配含检索 P95 ≤ 1s」。本次实测**检索层** p95 = 803ms（达标）；
-端到端装配延迟（注入 + 上下文拼装）**未测**，不当作已达标宣称。max 1249ms 有个别题仍超 1s。
+**V1-16 判据**：架构需求要求「装配含检索 P95 ≤ 1s」。两段分别实测：
+
+- **检索层**：p50 334 / p95 803ms（达标）。
+- **端到端装配**（memory-inject 的 pre-step：检索 + `turnEntities` 二阶补查 + 渲染 + 预算裁剪，
+  100 题新会话首轮）：修复前 p50 1138 / p95 **1610ms**，**76/100 题超 1s → 不达标**。
+
+端到端不达标的根因是 `store.turnEntities` 的**查询计划**：`e.scope = ?` 写在 JOIN 条件上，
+SQLite 选「先扫 scope='prts' 的全部实体、再逐个回查 mentions」——基准库 71.7 万条
+mentions 上单次 **646ms**，而装配每轮调它一次。改成 `CROSS JOIN` 强制先按 `turn_id`
+索引筛后单次 **1.0ms**（计划断言见 `test/memory/turn-entities-plan.test.ts`；耗时差异
+无法用行为断言捕捉，钉的是 `EXPLAIN QUERY PLAN`）。
+
+| 装配延迟（100 题新会话首轮） | 修复前 | **修复后** |
+|---|---|---|
+| p50 | 1138ms | **396ms** |
+| p95 | 1610ms | **815ms** |
+| max | 1955ms | 1171ms |
+| 超 1s 的题 | 76/100 | **1/100** |
+
+**V1-16 达标**：装配含检索 p95 = **815ms ≤ 1s**。max 1171ms 仍有 1 题过线，记录在案。
+测量口径两个坑（第一版探针各踩一次）：生产注入只查 live，基准库是 benchmark origin，
+不强制纳入就只测到空库装配；同一 sessionId 第二轮回会因 `injectedHitIds` 去重短路，
+必须每题独立会话取最重口径。
 
 **上一段 6.3pp 悬案在此闭合**：纯 FTS 探针当时测得 45.1%，与修复后的实现数字**逐位相同**。
 差距不在 RRF 或 fact 侧处理，就是 LIKE 噪音——探针不跑 LIKE，实现跑。
