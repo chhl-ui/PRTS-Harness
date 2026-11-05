@@ -17,6 +17,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { MemoryStore } from 'file:///C:/prts-system/src/memory/index.ts'
+import { SkillStore } from 'file:///C:/prts-system/src/skills/index.ts'
+import { PersonaStore } from 'file:///C:/prts-system/src/persona/index.ts'
 
 const results = []
 const check = (id, name, ok, detail) => {
@@ -130,6 +132,48 @@ try {
     check('V1-15b', '5 个「没有记录」的查询返回空（模型才有「不编造」的空间）',
       absent.every((n) => n === 0), `各有 ${absent.join('/')} 条 fact 命中`)
     m.close()
+  }
+
+  // ---------- V1-09：进化（经验→候选→评估→采用）+ 回退演练 ----------
+  {
+    const s = SkillStore.open(join(dir, 'skills.sqlite'))
+    const owner = { kind: 'owner' }
+    const id = s.propose(owner, {
+      title: '检索验收前先确认数据不同构',
+      trigger: '检索验收不达标时',
+      steps: ['检查测试数据是否共享前缀', '改用互不重叠的主题词'],
+      pitfalls: ['把数据构造问题误判成产品缺陷'],
+      sourceRefs: ['2026-11-05 V1-06 验收'],
+    })
+    const p1 = s.get(id)
+    check('V1-09a', '提出后进入 candidate', p1?.phase === 'candidate', `phase=${p1?.phase}`)
+
+    const p2 = s.evaluate(owner, { id, revision: p1.revision }, { verdict: 'adopt', basis: '实测 10/10 可检索' })
+    check('V1-09b', '评估记录成功（仍在 candidate）', p2.phase === 'candidate', `phase=${p2.phase}`)
+
+    const p3 = s.adopt(owner, { id, revision: p2.revision })
+    check('V1-09c', '采用后进入 active', p3.phase === 'active', `phase=${p3.phase}`)
+
+    const p4 = s.retire(owner, { id, revision: p3.revision }, '回退演练')
+    check('V1-09d', '回退后进入 retired', p4.phase === 'retired', `phase=${p4.phase}`)
+
+    const p5 = s.restore(owner, { id, revision: p4.revision }, '恢复演练')
+    check('V1-09e', '恢复后回到 active', p5.phase === 'active', `phase=${p5.phase}`)
+    check('V1-09f', '技能链完整', s.verifyChain().ok, '')
+    s.close()
+
+    // 判据第三句：人格核心设定未经确认不能被改动。
+    const ps = PersonaStore.open(join(dir, 'persona.sqlite'))
+    const CORE0 = '原始核心设定：不得由模型改写。'
+    ps.define({ kind: 'owner' }, { preset: 'guard-test', core: CORE0, style: '原始风格' })
+    let modelDenied = false
+    try {
+      ps.setCore({ kind: 'model', sessionId: 's-guard' }, { preset: 'guard-test', revision: 1 }, '被模型改掉的核心')
+    } catch { modelDenied = true }
+    const coreAfter = ps.get('guard-test')?.core
+    check('V1-09g', '模型不能改人格核心（写入被拒且内容不变）',
+      modelDenied && coreAfter === CORE0, `拒绝=${modelDenied}，核心未变=${coreAfter === CORE0}`)
+    ps.close()
   }
 } finally {
   // Windows 上 SQLite 句柄释放慢于 close()，rmSync 可能 EPERM——清理失败不该中断验收。
