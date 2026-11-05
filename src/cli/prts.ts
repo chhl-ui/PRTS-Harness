@@ -8,6 +8,7 @@ import { generateManifest } from '../integrity/manifest.ts'
 import type { Manifest, ProtectedSpec } from '../integrity/manifest.ts'
 import { IntegrityError } from '../integrity/errors.ts'
 import { initCoreDb } from '../core/init.ts'
+import { emotionCommand } from './emotion.ts'
 import { startupCheck } from '../core/startup-check.ts'
 import { AuditLog } from '../audit/index.ts'
 import { memoryCommand, memoryEmbedVectors, memoryExtractFacts } from './memory.ts'
@@ -166,8 +167,9 @@ try {
         : memoryCommand(args.slice(1))
   }
   else if (args[0] === 'archive') code = archiveCommand(args.slice(1))
+  else if (args[0] === 'emotion') code = emotionCommand(args.slice(1))
   else {
-    console.error('usage: prts upgrade ... | prts memory <stats|consolidate|retire|restore> ... | prts archive <export|import> ...')
+    console.error('usage: prts upgrade ... | prts memory <stats|consolidate|retire|restore> ... | prts archive <export|import> ... | prts emotion <get|set> ...')
     code = 2
   }
   process.exit(code)
