@@ -40,7 +40,13 @@ const CSID = deriveAppContainerSid(appContainerProfileName())
 const prtsYml = fileURLToPath(new URL('../../config/prts.yml', import.meta.url))
 const created: string[] = []
 const hex = () => randomBytes(3).toString('hex')
-after(() => { for (const d of created) rmSync(d, { recursive: true, force: true }) })
+after(() => {
+  for (const d of created) {
+    // ACL 残留会让 rm 抛 EPERM（实测 T2 的 t2 目录）：清理失败不得把整个文件标记为红，
+    // 真正的失败由具体用例的断言表达。残留目录由系统临时目录清理。
+    try { rmSync(d, { recursive: true, force: true }) } catch { /* 已知形态：ACL 持有 */ }
+  }
+})
 
 const newWs = (name: string, withGit = true): string => {
   const p = `C:\\prts-test-acl-${name}-${hex()}`
@@ -58,12 +64,22 @@ const dataRoot = (): string => {
 }
 const icacls = (p: string): string => sh(`icacls "${p}"`)
 
-async function transcript(dr: string): Promise<string> {
-  const sessDir = join(dr, 'dsh-home', 'sessions'); let text = ''
+async function transcript(dr: string, expectResults = 1): Promise<string> {
+  const sessDir = join(dr, 'dsh-home', 'sessions')
+  let text = ''
+  // 等到期望条数的 tool/result 再返回：只等「第一条出现」会在多命令用例里
+  // 拿到半截日志（实测 T2/T3 的 r[3] 偶发为空串——5 条命令只落盘了 3 条）。
+  // 每轮重新读全部文件，不要累加：累加会让同一行被重复计数、提前 break。
   for (let i = 0; i < 40; i++) {
-    if (existsSync(sessDir)) for (const f of readdirSync(sessDir, { recursive: true }) as string[])
-      try { text += readFileSync(join(sessDir, f), 'utf8') } catch { /* dir */ }
-    if (text.includes('tool/result')) break
+    let current = ''
+    if (existsSync(sessDir)) {
+      for (const f of readdirSync(sessDir, { recursive: true }) as string[]) {
+        try { current += readFileSync(join(sessDir, f), 'utf8') } catch { /* dir */ }
+      }
+    }
+    text = current
+    const count = (text.match(/"tool\/result"/g) ?? []).length
+    if (count >= expectResults) break
     await new Promise(r => setTimeout(r, 250))
   }
   return text
@@ -96,12 +112,16 @@ test('T1 local: 无预授权的 C:\\ ws 自动 WO，pwsh 写区内成功/区外�
   let out: Awaited<ReturnType<typeof runOps>> | undefined
   try { out = await withBackend('local', () => runOps(ws, [`Set-Content "${ws}\\t1.txt" t1`, `Set-Content "${outside}\\o.txt" o`], 'local')) }
   finally { console.warn = ow; console.error = oe }
-  results(await transcript(out!.dr))
-  assert.equal(existsSync(join(ws, 't1.txt')), true, '区内文件应写出')
-  assert.equal(existsSync(join(outside, 'o.txt')), false, '区外应被拒')
-  assert.equal(warns.some(w => w.includes('起不了 shell')), false, '旧误报横幅应消失')
-  assert.equal(errs.filter(e => e.includes('WRITE_OWNER')).length, 1, 'WO 留痕应恰一次')
-  await out!.app.dispose()
+  try {
+    results(await transcript(out!.dr, 2))
+    assert.equal(existsSync(join(ws, 't1.txt')), true, '区内文件应写出')
+    assert.equal(existsSync(join(outside, 'o.txt')), false, '区外应被拒')
+    assert.equal(warns.some(w => w.includes('起不了 shell')), false, '旧误报横幅应消失')
+    assert.equal(errs.filter(e => e.includes('WRITE_OWNER')).length, 1, 'WO 留痕应恰一次')
+  } finally {
+    // 断言失败也必须 dispose：持久 pwsh 不关会让测试子进程不退出（全量无汇总挂起）。
+    await out!.app.dispose()
+  }
   const errs2: string[] = []
   const oe2 = console.error; console.error = (...a: unknown[]) => { errs2.push(a.join(' ')); oe2(...a) }
   try {
@@ -120,12 +140,16 @@ test('T2 local: .git DENY 保护 + 二次启动 already 且无重复 ACE', { tim
       'Set-Content .git\\x.txt x', 'Add-Content .git\\HEAD junk', 'Rename-Item .git g2',
       'Get-Content .git\\HEAD', 'Set-Content root.txt ok',
     ], 'local')
-    const r = results(await transcript(out.dr))
-    assert.match(r[0] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
-    assert.match(r[1] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
-    assert.match(r[2] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
-    assert.match(r[3] ?? '', /ref: refs\/heads/)
-    await out.app.dispose()
+    try {
+      const r = results(await transcript(out.dr, 5))
+      assert.match(r[0] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
+      assert.match(r[1] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
+      assert.match(r[2] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
+      assert.match(r[3] ?? '', /ref: refs\/heads/)
+    } finally {
+      // 同 T1：断言失败也必须 dispose，否则 pwsh 泄漏导致进程不退出。
+      await out.app.dispose()
+    }
     assert.equal(readFileSync(join(ws, '.git', 'HEAD'), 'utf8'), head0)
     assert.equal(existsSync(join(ws, '.git', 'x.txt')), false)
     assert.equal(existsSync(join(ws, 'g2')), false)
@@ -157,7 +181,7 @@ test('T3 appcontainer: .git 只读授 RX + 二次启动 already + dispose 后无
     // 测试文件子进程不退出，全量 runner 会无汇总挂住（本段实测的挂死形态：
     // 测试全部跑完、报告已出、进程不退）。
     try {
-      const r = results(await transcript(out.dr))
+      const r = results(await transcript(out.dr, 5))
       assert.match(r[0] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
       assert.match(r[1] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
       assert.match(r[2] ?? '', /访问被拒绝|Access is denied|exit code: 1/i)

@@ -136,8 +136,14 @@ export async function spawnSubtask(
     }))
     const settled = await waitIdle(handle.agent, deps.timeoutMs ?? 120_000)
     if (!settled) throw new Error('subtask: 子会话未在时限内收敛')
-    const { text } = assistantAfterSeq(deps.dataRoot, plan.sessionId, 0)
-    return { sessionId: plan.sessionId, summary: text }
+    // 摘要落盘晚于回合收敛（实测全量并发下 waitIdle 返回后日志仍可能为空）：
+    // 轮询读，最多 3s。worker 合法地不产出文本时，超时后仍返回空串，不制造假摘要。
+    let summary = assistantAfterSeq(deps.dataRoot, plan.sessionId, 0).text
+    for (let i = 0; i < 30 && summary.trim() === ''; i += 1) {
+      await new Promise((r) => setTimeout(r, 100))
+      summary = assistantAfterSeq(deps.dataRoot, plan.sessionId, 0).text
+    }
+    return { sessionId: plan.sessionId, summary }
   } finally {
     try { await handle.dispose() } catch { /* dispose 失败不掩盖主错误 */ }
     deps.authority.releaseSession(plan.sessionId)

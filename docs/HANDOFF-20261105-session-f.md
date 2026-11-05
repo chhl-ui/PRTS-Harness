@@ -64,6 +64,29 @@
 7. 串行全量本身（`--test-concurrency=1`）同样会挂——**并发不是原因**；
    它会停在同一个文件之后（716 pass / 2 fail 时停住）。
 
+### 第二次定位（2026-11-05，本轮修复）
+
+单文件连跑 `workspace-acl.test.ts` 复现：**10 次里第 8 次挂住（exit=124）**。现场三链：
+
+1. **T2/T3 的 `r[3]` 偶发空串**：`transcript()` 只要出现**任意一条** `tool/result` 就返回，
+   5 条命令的用例会拿到半截日志（`Get-Content .git\HEAD` 那条还没落盘）。
+   且旧实现每轮 `text += 读整个文件` 不重置，会让计数虚高、更早 break。
+2. **T1/T2 的 dispose 在断言之后**（与 T3 同族）：任一条断言失败 → 跳过 `dispose()` →
+   持久 pwsh 不关 → 测试子进程不退出 → runner 无汇总等待。
+3. **after 钩子的 `rmSync` 遇 ACL 残留抛 EPERM** → 整个文件被标记为红。
+
+修复（`workspace-acl.test.ts`）：
+- `transcript(dr, expectResults)` 按期望条数等待，每轮重新读、不累加；
+- T1/T2 的 `dispose` 移入 `try/finally`；
+- `after` 的 rm 包 try/catch（清理失败不把文件标红）。
+
+另修一处**产品时序**（`src/runtime/subtask.ts`）：`spawnSubtask` 在 `waitIdle` 返回后
+立即读摘要，全量并发下日志可能还没落盘（实测偶发空串）——改为轮询最多 3s，
+worker 合法无产出时仍返回空串。
+
+验证：单文件 10 连跑 **0 挂起**；全量 5 连跑 **0 挂起**（4 次 796 全绿、1 次 1 fail 即
+上述 subtask 时序问题），修复后全量 3 连跑 **796/796 全绿**。
+
 ---
 
 ## 四、未做清单
