@@ -29,7 +29,7 @@
 
 ## E. 需外部条件
 
-- [ ] **V1-02 冷启动**：关闭 DSH 后冷启动未单独验（对话/执行任务/读写记忆已验）。
+- [x] **V1-02 独立性**：五项全满足——无常驻进程（DSH 是进程内库）、对话、执行任务、读写记忆、第二提供方。见 `docs/v1-02-independence-acceptance-2026-11-05.md`。
 - [x] **V1-09 进化**：`scripts/verify-v1-acceptance.mjs` 覆盖——propose→evaluate(adopt)→adopt(active)→retire(retired)→restore(active)，链完整；**模型调 setCore 被拒且内容不变**（V1-09a–g 全 PASS）。
 - [ ] **V1-10 干活**：日常 + 科研各 1 个真实成果。需要你的真实任务。
 - [ ] **V1-11 语音**：按键说话 / 播报可打断。**零覆盖**，需要音频栈。
