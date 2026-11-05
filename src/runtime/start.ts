@@ -116,6 +116,39 @@ const createAppReady = () => {
   }
 }
 
+/**
+ * boot 失败时把 `cause.errors` 里的插件明细挪到顶层 message。
+ *
+ * 为什么需要：DSH 抛的顶层错误只有一句 `1 required plugin did not activate`——用户
+ * 看到这句只知道「有插件没起来」，不知道改 config 的哪一行。而真正的明细就在
+ * `cause.errors`（`AggregateError`）里，逐条带包名与失败原因：
+ *
+ * ```
+ * Failed plugins (1):
+ *   include (required)
+ *     Package: cordis:i
+ * ```
+ *
+ * 只在 `cause.errors` 非空时包装；其他错误原样抛出，不改变既有错误类型与调用方判断。
+ */
+async function bootWithDiagnostics<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error))
+    const items = (err as { cause?: { errors?: unknown[] } }).cause?.errors
+    if (!Array.isArray(items) || items.length === 0) throw err
+    const lines = items.slice(0, 5).map((x) => {
+      const msg = String((x as { message?: unknown })?.message ?? x)
+      return `  - ${msg.split('\n')[0]}`
+    })
+    const more = items.length > 5 ? `\n  …另有 ${items.length - 5} 条` : ''
+    const wrapped = new Error(`${err.message}\n失败插件（${items.length}）：\n${lines.join('\n')}${more}`)
+    ;(wrapped as { cause?: unknown }).cause = err
+    throw wrapped
+  }
+}
+
 export async function startRuntime(o: StartRuntimeOptions): Promise<{
   /** 记忆库句柄（打不开时为 undefined）。 */
   memory?: MemoryStore
@@ -221,7 +254,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   process.env.DSH_HOME = join(o.dataRoot, 'dsh-home')
   process.env.PRTS_WORKSPACE = o.workspace
   const appReady = createAppReady()
-  const ctx = await boot('prts', o.configPath, bootPatches as never, async (hostCtx: Context) => {
+  const ctx = await bootWithDiagnostics(() => boot('prts', o.configPath, bootPatches as never, async (hostCtx: Context) => {
     provideCmdline(hostCtx as never, {
       args: [],
       exit: (code: number) => {
@@ -259,7 +292,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
           ? { value: o.credentials.DEEPSEEK_API_KEY }
           : undefined,
     })
-  })
+  }))
 
   // K2a 接线：DSH `tools.guard` 是唯一的单调拒绝点——返回理由串即拒绝，且没有
   // guard 能强制放行被另一个 guard 拒绝的调用（dsh-tools/lib/types/index.d.ts:515-517、:656）。
