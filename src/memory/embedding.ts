@@ -83,6 +83,72 @@ export class OllamaEmbedder implements Embedder {
   }
 }
 
+export interface OpenAiCompatibleEmbedderOptions {
+  /** 默认 `http://127.0.0.1:11435`（llama.cpp `llama-server --embedding`）。 */
+  baseUrl?: string
+  /** 默认 `bge-m3`。维度由模型决定（bge-m3 = 1024）。 */
+  model?: string
+  /** 单次请求超时，默认 30s。**超时要抛错**，不能静默返回零向量。 */
+  timeoutMs?: number
+  fetchImpl?: typeof fetch
+}
+
+/**
+ * OpenAI 兼容后端（llama.cpp / vLLM 等）。
+ *
+ * 与 `OllamaEmbedder` 的差别只有两处：路径 `/v1/embeddings`、响应形状
+ * `{data: [{embedding}]}`。维度由模型决定——实测 llama.cpp 下 bge-m3 仍为
+ * **1024 维**，与 Ollama 侧一致，所以换后端不需要重算向量表。
+ *
+ * 为什么要它（2026-11-05）：`OllamaEmbedder` 打的是 Ollama 专有端点
+ * `{base}/api/embed`，模型提供方一旦不是 Ollama（NInfer / Strata 都没有
+ * embedding 端点，实测 404），向量路就没有后端可用。
+ */
+export class OpenAiCompatibleEmbedder implements Embedder {
+  readonly model: string
+  private readonly baseUrl: string
+  private readonly timeoutMs: number
+  private readonly fetchImpl: typeof fetch
+
+  constructor(opts: OpenAiCompatibleEmbedderOptions = {}) {
+    this.model = opts.model ?? 'bge-m3'
+    this.baseUrl = (opts.baseUrl ?? 'http://127.0.0.1:11435').replace(/\/+$/, '')
+    this.timeoutMs = opts.timeoutMs ?? 30_000
+    this.fetchImpl = opts.fetchImpl ?? fetch
+  }
+
+  async embed(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return []
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), this.timeoutMs)
+    try {
+      const res = await this.fetchImpl(`${this.baseUrl}/v1/embeddings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: this.model, input: texts }),
+        signal: ctrl.signal,
+      })
+      if (!res.ok) {
+        throw new Error(`memory: embedding HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
+      }
+      const j = await res.json() as { data?: unknown }
+      const rows = j.data
+      if (!Array.isArray(rows) || rows.length !== texts.length) {
+        throw new Error(`memory: embedding 返回形状不对，期望 ${texts.length} 条`)
+      }
+      const out: number[][] = []
+      for (const row of rows) {
+        const v = (row as { embedding?: unknown })?.embedding
+        if (!Array.isArray(v) || v.length === 0) throw new Error('memory: embedding 返回空向量')
+        out.push(v as number[])
+      }
+      return out
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+}
+
 /** float32 小端 BLOB 编码。用 DataView 显式定序，不依赖平台字节序。 */
 export function encodeVector(v: ArrayLike<number>): Uint8Array {
   const out = new Uint8Array(v.length * 4)

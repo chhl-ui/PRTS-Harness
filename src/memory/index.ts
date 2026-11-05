@@ -6,7 +6,7 @@ export { applyMemoryEvent } from './fold.ts'
 export { parseTime } from './time.ts'
 export { tokenize } from './tokenize.ts'
 export {
-  OllamaEmbedder, cosineSimilarity, decodeVector, encodeVector, type Embedder,
+  OllamaEmbedder, OpenAiCompatibleEmbedder, cosineSimilarity, decodeVector, encodeVector, type Embedder,
 } from './embedding.ts'
 export { extractEntities, normalizeKey, type EntityKind, type ExtractedEntity } from './extract.ts'
 export {

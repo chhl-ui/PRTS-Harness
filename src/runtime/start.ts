@@ -34,7 +34,7 @@ import { openCostStore, priceFromEnv, priceOf, type CostStore } from '../cost/in
 import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
-import { MemoryStore, OllamaEmbedder, OllamaGenerator } from '../memory/index.ts'
+import { MemoryStore, OllamaEmbedder, OpenAiCompatibleEmbedder, OllamaGenerator } from '../memory/index.ts'
 import { SkillStore } from '../skills/index.ts'
 import { PersonaStore } from '../persona/index.ts'
 import { EmotionStore } from '../emotion/index.ts'
@@ -761,11 +761,25 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   }
   const ollamaUrl = process.env.PRTS_OLLAMA_URL ?? 'http://127.0.0.1:11434'
   const ollamaProbe = createOllamaProbe({ baseUrl: ollamaUrl })
+  // 后端选择（2026-11-05）：`PRTS_EMBED_BACKEND=openai` 走 OpenAI 兼容端点
+  // （llama.cpp `llama-server --embedding`），默认仍是 ollama 保持既有行为。
+  // 换后端不需要重算向量表：实测 bge-m3 在 llama.cpp 下同为 1024 维。
+  // openai 模式不做探活——llama-server 没有 `/api/tags`；失败时由 embed 抛错，
+  // 各调用点各自降级为纯字面检索（与 ollama 侧同一降级路径）。
+  const embedBackend = process.env.PRTS_EMBED_BACKEND ?? 'ollama'
+  const embedModel = process.env.PRTS_EMBED_MODEL ?? 'bge-m3'
+  const embedUrl = process.env.PRTS_EMBED_URL
+    ?? (embedBackend === 'openai' ? 'http://127.0.0.1:11435' : ollamaUrl)
   const embedderResolver = (process.env.PRTS_EMBED !== '1')
     ? undefined
-    : async () => (await ollamaProbe())
-      ? new OllamaEmbedder({ baseUrl: ollamaUrl, model: process.env.PRTS_EMBED_MODEL ?? 'bge-m3' })
-      : undefined
+    : async () => {
+      if (embedBackend === 'openai') {
+        return new OpenAiCompatibleEmbedder({ baseUrl: embedUrl, model: embedModel })
+      }
+      return (await ollamaProbe())
+        ? new OllamaEmbedder({ baseUrl: ollamaUrl, model: embedModel })
+        : undefined
+    }
 
   // 交叉编码器精排（可选）：`PRTS_RERANK=1` 开启。
   //
