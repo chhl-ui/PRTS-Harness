@@ -7,6 +7,7 @@ import { boot } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import type { Context } from '@deepseek-ai/cordis'
 import { attachErrorReporter } from './error-report.ts'
+import { createEmotionOnError } from './emotion-trigger.ts'
 import { AppContainerSandboxProvider, appContainerProfileName } from '../sandbox/provider.ts'
 import { ensureWorkspaceWriteOwner, protectSubpathLocal, protectSubpathAppContainer } from '../sandbox/workspace-acl.ts'
 import { deriveAppContainerSid } from '../sandbox/appcontainer.ts'
@@ -1101,7 +1102,11 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       warn: (message: string) => console.warn(message),
     },
   )
-  const detachErrorReporter = attachErrorReporter(ctx)
+  // V1-05 系统侧生产者：轮次失败 → 写一条负面情绪（带 10 分钟节流）。
+  // `emotion` 是可选的（打不开时只是没有情绪层），所以没有它就不接 onReport。
+  const detachErrorReporter = attachErrorReporter(ctx, emotion === undefined
+    ? {}
+    : { onReport: createEmotionOnError({ store: emotion }) })
   if (ctx.get('loader') !== undefined) appReady.commit()
   return {
     ctx,
