@@ -36,6 +36,8 @@ const data = JSON.parse(readFileSync(SRC, 'utf8'))
 const store = MemoryStore.open(DB)
 
 const perType = new Map()
+/** 逐题耗时的原始值——V1-16 的判据是 P95，只留 per-type 均值会把尾部掩掉。 */
+const allMs = []
 let n = 0
 let skipped = 0
 const t0 = Date.now()
@@ -83,6 +85,7 @@ for (const q of data) {
   row.all32 += all32 ? 1 : 0
   row.mrr += rr
   row.ms += ms
+  allMs.push(ms)
   perType.set(type, row)
 }
 store.close()
@@ -124,6 +127,17 @@ console.log(
   + String(Math.round(MS / N)).padStart(9),
 )
 
+// V1-16 的判据是 P95（不是均值）：均值会掩掉尾部。排序后就地取分位。
+const sortedMs = [...allMs].sort((a, b) => a - b)
+const percentile = (p) => {
+  if (sortedMs.length === 0) return 0
+  const idx = Math.min(sortedMs.length - 1, Math.max(0, Math.ceil((p / 100) * sortedMs.length) - 1))
+  return sortedMs[idx]
+}
+const p50 = percentile(50)
+const p95 = percentile(95)
+console.log(`延迟分位（检索层，${sortedMs.length} 题）：p50 ${p50}ms / p95 ${p95}ms / max ${sortedMs[sortedMs.length - 1] ?? 0}ms`)
+
 if (OUT !== null) {
   writeFileSync(OUT, JSON.stringify({
     src: SRC,
@@ -136,6 +150,7 @@ if (OUT !== null) {
     all32: L32 / N,
     mrr: MRR / N,
     msPerQuestion: MS / N,
+    latency: { p50, p95, max: sortedMs[sortedMs.length - 1] ?? 0 },
     totalMs,
     types: Object.fromEntries(rows),
   }, null, 2))

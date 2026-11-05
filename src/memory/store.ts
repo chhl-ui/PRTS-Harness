@@ -1350,9 +1350,17 @@ export class MemoryStore {
     }
 
     // ---- 路 2：LIKE 兜底（中文 2 字等短 token；FTS 颗粒无收时用全部 token 再兜一次）----
-    const likeTokens = shortTokens.length > 0
-      ? shortTokens
-      : (fused.size === 0 && longTokens.length > 0 ? tokens : [])
+    // LIKE 兜底的存在理由只有一个：trigram 对中文 2 字恒为 0（设计意图见
+    // test/memory/hybrid-search.test.ts 文件头）。判据必须按这个理由写，不能按
+    // 「字符数 < 3」——实测（2026-11-05，24.6 万行基准库）：`up` / `am` / `5k` / `gm`
+    // 这类英文短词会触发一次全表 LIKE，单条 886–948ms、命中 4.5k–12.2 万行，
+    // 而召回价值为零（`up` 命中 87,837 行）。它们把 single-session-assistant 的
+    // 996ms/题、preference 的 902ms/题 拖成纯 FTS 题型的 3–5 倍。
+    // 英文短词只在 FTS 颗粒无收时兜底：`AI` / `5k` 这类缩写 trigram 同样搜不到。
+    const cjkShort = shortTokens.filter((t) => /[\u4e00-\u9fff]/.test(t))
+    const likeTokens = cjkShort.length > 0
+      ? cjkShort
+      : (fused.size === 0 && tokens.length > 0 ? tokens : [])
     if (likeTokens.length > 0) {
       const pats = likeTokens.map((t) => `%${escapeLike(t)}%`)
       // fact 的可检索口径 = subject + predicate + body + slot（与 FTS 建索引的

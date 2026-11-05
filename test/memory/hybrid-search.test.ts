@@ -154,3 +154,44 @@ test('H7 旧库升级自愈：FTS 为空但投影有数据时，打开即重建�
     t.cleanup(m)
   }
 })
+
+test('H7 英文短词不得在 FTS 已命中时再跑 LIKE 兜底（V1-16 延迟回归）', () => {
+  const t = makeTmp('prts-mem-hybrid-')
+  const m = MemoryStore.open(t.db('memory.sqlite'))
+  try {
+    m.recordTurn({
+      actor: 'system', sessionId: 's1', turnIndex: 0, speaker: 'user',
+      text: 'I set up the ledger module',
+    })
+    m.recordTurn({
+      actor: 'system', sessionId: 's2', turnIndex: 0, speaker: 'user',
+      text: 'the backup battery is dead',
+    })
+    // 'up' 是 2 字符英文词（不在停用词表里），trigram 索引不到；LIKE '%up%' 在
+    // 24.6 万行的基准库上要 914ms、命中 87,837 行（实测）。FTS 既然已用 'ledger'
+    // 命中目标，这条 LIKE 只会把无关记录（backup）带进结果并吃掉一题 60% 的时间。
+    const hits = m.search({ text: 'ledger up' })
+    assert.equal(hits.length, 1, "'up' 不得在 FTS 已命中时把无关记录带进来")
+    assert.equal(hits[0]?.recallPath, 'fts-trigram')
+  } finally {
+    t.cleanup(m)
+  }
+})
+
+test('H8 纯短词查询在 FTS 颗粒无收时仍走 LIKE 兜底（英文 2 字符缩写）', () => {
+  const t = makeTmp('prts-mem-hybrid-')
+  const m = MemoryStore.open(t.db('memory.sqlite'))
+  try {
+    m.recordTurn({
+      actor: 'system', sessionId: 's1', turnIndex: 0, speaker: 'user',
+      text: 'the AI paper is on my desk',
+    })
+    // 'AI' 只有 2 字符，trigram 搜不到；FTS 无结果时必须回落到 LIKE，
+    // 否则 2 字符缩写类查询会静默检索不到任何东西。
+    const hits = m.search({ text: 'AI' })
+    assert.equal(hits.length, 1)
+    assert.equal(hits[0]?.recallPath, 'like')
+  } finally {
+    t.cleanup(m)
+  }
+})
