@@ -17,7 +17,7 @@
 | ≥8 个功能以插件形式加载 | ✅ | `config/prts.yml` 声明 **30+ 个 DSH 插件**（llm / tools / agent / session / sandbox / terminal…） |
 | **禁用任一插件后仍能启动** | ✅ | 给 `attachment-local` 加 `disabled: true`（2 空格缩进）→ **启动成功** |
 | 禁用时「给出明确提示」 | ⚠️ 未验证 | 启动成功；是否有「某插件已禁用」的提示没单独捕获（DSH 日志通道未探） |
-| **配置写错时启动报错** | ❌ **不满足** | 把 `dsh-token-meter` 改成不存在的包名 → **系统正常启动**，只有 `compaction-basic` 打印 `pending (waiting for service: tokenMeter)`，无报错、无失败退出 |
+| **配置写错时启动报错** | ✅ **已修（d1253ec）** | 修前：写错包名静默启动，只有 `compaction-basic` 打一行 `pending`。修后：启动时按名列出无法解析的插件（默认警告，`PRTS_STRICT_PLUGINS=1` 升级为启动失败）。回归 `test/runtime/plugin-resolve-check.test.ts` 2 项 |
 
 ## 剩下的真问题：写错包名会静默启动
 
