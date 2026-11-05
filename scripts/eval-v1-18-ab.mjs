@@ -12,13 +12,24 @@
  * 库准备：复制 `memory-s.sqlite` 到临时 dataRoot 并把 `origin` 改成 `live`——
  * 生产检索只读 live（设计稿 §6.4），基准数据默认不进生产检索；这是探针的既有口径。
  *
+ * 本地端点（零 API key）：`LOCAL=1` 时被测模型与判分都走本机 NInfer
+ * （`ninfer-kvmem-server`，同时提供 Anthropic `/v1/messages` 与 OpenAI
+ * `/v1/chat/completions`，默认端口 18200）。地址与模型用 `LOCAL_BASE` / `LOCAL_MODEL`
+ * 覆盖。2026-11-05 起本地端点由 Ollama 换为 NInfer——Ollama 变量不再读取。
+ *
+ * 断点续跑：每题完成即追加到 `<RUN_DIR>/progress.jsonl`；中断后用同一 `RUN_DIR`
+ * 重跑会跳过已完成题（带 `error` 的题重试）。`hyp-<mode>.jsonl` 与判分器写出的
+ * `eval-results-*` 都落在 RUN_DIR（不是临时目录），跑完不会被回收。
+ *
  * 用法：
- *   N=3  node --disable-warning=ExperimentalWarning scripts/eval-v1-18-ab.mjs   # 冒烟
- *   N=10 node --disable-warning=ExperimentalWarning scripts/eval-v1-18-ab.mjs
- *   OUT=C:/prts-benchmark/v1-18-2026-11-05.json node --disable-warning=ExperimentalWarning scripts/eval-v1-18-ab.mjs
+ *   LOCAL=1 N=3  node --disable-warning=ExperimentalWarning scripts/eval-v1-18-ab.mjs   # 冒烟
+ *   LOCAL=1 N=100 RUN_DIR=C:/prts-benchmark/v1-18-n100-2026-11-05 \
+ *     node --disable-warning=ExperimentalWarning scripts/eval-v1-18-ab.mjs
+ *   OUT=... 覆盖 summary 路径（默认 <RUN_DIR>/summary.json）
  */
 import {
-  readFileSync, writeFileSync, mkdtempSync, copyFileSync, existsSync, readdirSync, statSync, rmSync,
+  readFileSync, writeFileSync, appendFileSync, mkdtempSync, mkdirSync, copyFileSync,
+  existsSync, readdirSync, statSync, rmSync,
 } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -32,30 +43,41 @@ const FULL_DB = 'C:/prts-benchmark/memory-s.sqlite'
 const CONFIG = 'C:/prts-system/config/prts.yml'
 const PROJECT = 'C:/prts-system'
 const N = Number(process.env.N ?? '3')
-const OUT = process.env.OUT ?? null
 
-/** LOCAL=1：被测模型与判分都走本地 Ollama（零 API key）。 */
+/** LOCAL=1：被测模型与判分都走本机 NInfer（零 API key）。 */
 const LOCAL = process.env.LOCAL === '1'
-const OLLAMA_BASE = process.env.OLLAMA_BASE ?? 'http://127.0.0.1:11434'
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'q38-gsq-iq3s'
+const LOCAL_BASE = process.env.LOCAL_BASE ?? 'http://127.0.0.1:18200'
+const LOCAL_MODEL = process.env.LOCAL_MODEL ?? 'qwen3.8-27b-gsq-iq3s'
+
+const today = new Date()
+const stamp = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`
+  + `-${String(today.getDate()).padStart(2, '0')}`
+const RUN_DIR = process.env.RUN_DIR ?? join('C:/prts-benchmark', `v1-18-n${N}-${stamp}`)
+const OUT = process.env.OUT ?? join(RUN_DIR, 'summary.json')
+const PROGRESS_PATH = join(RUN_DIR, 'progress.jsonl')
 
 const keyFile = 'C:/prts-data/secrets/deepseek.key'
 const apiKey = LOCAL
-  ? 'ollama-local'
+  ? 'ninfer-local'
   : (process.env.DEEPSEEK_API_KEY
     ?? (existsSync(keyFile) ? readFileSync(keyFile, 'utf8').trim() : undefined))
 if (apiKey === undefined || apiKey === '') {
-  console.error('需要 DEEPSEEK_API_KEY 或 C:/prts-data/secrets/deepseek.key（或 LOCAL=1 走本地 Ollama）')
+  console.error('需要 DEEPSEEK_API_KEY 或 C:/prts-data/secrets/deepseek.key（或 LOCAL=1 走本机 NInfer）')
   process.exit(2)
 }
 if (LOCAL) {
-  process.env.DEEPSEEK_BASE_URL = OLLAMA_BASE
-  process.env.PRTS_LLM_MODEL = OLLAMA_MODEL
+  process.env.DEEPSEEK_BASE_URL = LOCAL_BASE
+  process.env.PRTS_LLM_MODEL = LOCAL_MODEL
   process.env.DEEPSEEK_API_KEY = apiKey
-  // 本地模型实际窗口 32k（Ollama 默认 num_ctx）；不设会让 PRTS 按 1M 预算注入后被静默截断。
-  process.env.DSH_CONTEXT_WINDOW = process.env.DSH_CONTEXT_WINDOW ?? '32768'
-  console.log(`LOCAL 模式：base=${OLLAMA_BASE} model=${OLLAMA_MODEL}`)
+  // 模型真实窗口 262144（/v1/models 的 context_length）；不设会让 PRTS 按配置默认
+  // 1e6 算注入预算，超出模型能力。KVMem 的 KV 预算 36,864 token 是换页阈值，
+  // 不是窗口上限——本轮每题输入约 9k token，不触发换页。
+  process.env.DSH_CONTEXT_WINDOW = process.env.DSH_CONTEXT_WINDOW ?? '262144'
+  console.log(`LOCAL 模式：base=${LOCAL_BASE} model=${LOCAL_MODEL} window=${process.env.DSH_CONTEXT_WINDOW}`)
 }
+
+mkdirSync(RUN_DIR, { recursive: true })
+console.log(`RUN_DIR=${RUN_DIR}`)
 
 const all = JSON.parse(readFileSync(SRC, 'utf8'))
 const byType = new Map()
@@ -131,7 +153,39 @@ function statsFor(root, sessionId) {
   return { recall }
 }
 
+/** 读回已完成题：`Map<mode, Map<qid, row>>`。 */
+function loadProgress() {
+  const byMode = new Map()
+  if (!existsSync(PROGRESS_PATH)) return byMode
+  for (const line of readFileSync(PROGRESS_PATH, 'utf8').split('\n')) {
+    if (!line.trim()) continue
+    let entry
+    try { entry = JSON.parse(line) } catch { continue }
+    const mode = entry?.mode
+    const row = entry?.row
+    if (typeof mode !== 'string' || typeof row?.qid !== 'string') continue
+    if (!byMode.has(mode)) byMode.set(mode, new Map())
+    byMode.get(mode).set(row.qid, row)
+  }
+  return byMode
+}
+
+function appendProgress(mode, row) {
+  appendFileSync(PROGRESS_PATH, `${JSON.stringify({ mode, row })}\n`)
+}
+
 async function runMode(mode) {
+  const doneMap = loadProgress().get(mode) ?? new Map()
+  // 带 error 的行不算完成：重跑该题（多为端点临时抖动）。
+  const pending = picks.filter((q) => {
+    const done = doneMap.get(q.question_id)
+    return done === undefined || done.error !== undefined
+  })
+  const results = new Map(doneMap)
+  console.log(`[${mode}] 已完成 ${picks.length - pending.length}/${picks.length}，本次跑 ${pending.length} 题`)
+  if (pending.length === 0) {
+    return picks.map((q) => results.get(q.question_id)).filter((row) => row !== undefined)
+  }
   const saved = process.env.PRTS_MEMORY_INJECT_BUDGET
   if (mode === 'self') process.env.PRTS_MEMORY_INJECT_BUDGET = '0'
   else delete process.env.PRTS_MEMORY_INJECT_BUDGET
@@ -153,9 +207,11 @@ async function runMode(mode) {
     usageIn += chunk.usage.inputTokens ?? 0
     usageOut += chunk.usage.outputTokens ?? 0
   })
-  const rows = []
+  // 端点崩溃时 runChat 不会抛错，只会把每道题跑成空回复（每题还要等一次超时）。
+  // 连续 3 题无回复就中止本轮——已完成的题在 progress.jsonl 里，重启服务后续跑。
+  let consecutiveErrors = 0
   try {
-    for (const q of picks) {
+    for (const q of pending) {
       const sessionId = `v18-${mode}-${q.question_id}`
       const t0 = Date.now()
       const inBefore = usageIn
@@ -174,21 +230,39 @@ async function runMode(mode) {
         })
       } catch (error) {
         console.error(`[${mode}] ${q.question_id} 失败：${error instanceof Error ? error.message : String(error)}`)
-        rows.push({
+        const row = {
           qid: q.question_id, type: q.question_type, question: q.question,
           hypothesis: '', recallCalls: 0, inputTokens: 0, outputTokens: 0,
           ms: Date.now() - t0, error: String(error),
-        })
+        }
+        results.set(row.qid, row)
+        appendProgress(mode, row)
+        consecutiveErrors += 1
+        if (consecutiveErrors >= 3) {
+          throw new Error('连续 3 题无回复（端点不可达？）——中止本轮，重启服务后用同一 RUN_DIR 续跑')
+        }
         continue
       }
       const text = r.replies.join('\n').trim()
       const st = statsFor(dataRoot, sessionId)
-      rows.push({
+      const row = {
         qid: q.question_id, type: q.question_type, question: q.question,
         hypothesis: text, recallCalls: st.recall,
         inputTokens: usageIn - inBefore, outputTokens: usageOut - outBefore,
         ms: Date.now() - t0,
-      })
+        // 空回复 = 这轮没拿到答案（端点报错时 runChat 不抛，只记 agent error）。
+        // 标 error 让续跑重试，也避免把「零回复」当成模型答错写进准确率。
+        ...(text === '' ? { error: 'empty reply' } : {}),
+      }
+      results.set(row.qid, row)
+      appendProgress(mode, row)
+      // 空回复同样算「这一题没拿到结果」。它和直接抛错的区别只是 runChat 不抛，
+      // 所以计数必须在这里也递增——否则端点崩了以后每道题都「成功」返回空串，
+      // 计数器被重置，中止条件永远不会触发（实测白跑了 15 题，每题等 20s）。
+      consecutiveErrors = row.error === undefined ? 0 : consecutiveErrors + 1
+      if (consecutiveErrors >= 3) {
+        throw new Error('连续 3 题无回复（端点不可达？）——中止本轮，重启服务后用同一 RUN_DIR 续跑')
+      }
       console.log(
         `[${mode}] ${q.question_id} ${q.question_type} turns=${r.turns}`
         + ` recall=${st.recall} in=${usageIn - inBefore} out=${usageOut - outBefore} ${Date.now() - t0}ms`,
@@ -200,29 +274,42 @@ async function runMode(mode) {
   }
   if (saved === undefined) delete process.env.PRTS_MEMORY_INJECT_BUDGET
   else process.env.PRTS_MEMORY_INJECT_BUDGET = saved
-  return rows
+  return picks.map((q) => results.get(q.question_id)).filter((row) => row !== undefined)
+}
+
+/** 找判分器刚写出的逐题结果文件（文件名带 model / sample / ref 标签）。 */
+function evalResultsPath(tag) {
+  const prefix = `hyp-${tag}.jsonl.eval-results-`
+  let found = null
+  try {
+    for (const e of readdirSync(RUN_DIR)) {
+      if (e.startsWith(prefix)) found = join(RUN_DIR, e)
+    }
+  } catch { /* RUN_DIR 必然存在，读失败按没找到处理 */ }
+  return found
 }
 
 function judge(rows, tag) {
-  const hypPath = join(dataRoot, `hyp-${tag}.jsonl`)
+  const hypPath = join(RUN_DIR, `hyp-${tag}.jsonl`)
   writeFileSync(hypPath, rows.map((r) => JSON.stringify({
     question_id: r.qid, hypothesis: r.hypothesis,
   })).join('\n') + '\n')
   const judgeArgs = ['scripts/eval-longmemeval.py', '--hyp', hypPath, '--ref', SRC]
-  if (LOCAL) judgeArgs.push('--model', OLLAMA_MODEL)
+  if (LOCAL) judgeArgs.push('--model', LOCAL_MODEL)
   const res = spawnSync('python', judgeArgs, {
     cwd: PROJECT,
     encoding: 'utf8',
     env: {
       ...process.env,
       DEEPSEEK_API_KEY: apiKey,
-      ...(LOCAL ? { DEEPSEEK_API_BASE: `${OLLAMA_BASE}/v1` } : {}),
+      ...(LOCAL ? { DEEPSEEK_API_BASE: `${LOCAL_BASE}/v1` } : {}),
     },
-    timeout: 1800000,
+    // 每题一次判分调用：本地 27B 每题数秒，N=100 需要 20-50 分钟。
+    timeout: Math.max(1800000, rows.length * 60000),
   })
   const out = `${res.stdout ?? ''}${res.stderr ?? ''}`
   const m = out.match(/Accuracy: ([\d.]+)/)
-  return { acc: m ? Number(m[1]) : null, log: out.slice(-1200) }
+  return { acc: m ? Number(m[1]) : null, log: out.slice(-2000), evalResults: evalResultsPath(tag) }
 }
 
 const hostRows = await runMode('host')
@@ -233,8 +320,9 @@ const selfJudge = judge(selfRows, 'self')
 const avg = (xs) => (xs.length === 0 ? 0 : xs.reduce((s, x) => s + x, 0) / xs.length)
 const summary = {
   n: picks.length,
-  route: LOCAL ? `local:${OLLAMA_MODEL}@${OLLAMA_BASE}` : 'deepseek-official:deepseek-chat',
-  judge: LOCAL ? `local:${OLLAMA_MODEL}` : 'deepseek-reasoner',
+  route: LOCAL ? `local-ninfer:${LOCAL_MODEL}@${LOCAL_BASE}` : 'deepseek-official:deepseek-chat',
+  judge: LOCAL ? `local-ninfer:${LOCAL_MODEL}` : 'deepseek-reasoner',
+  runDir: RUN_DIR,
   host: {
     accuracy: hostJudge.acc,
     recallCalls: avg(hostRows.map((r) => r.recallCalls)),
@@ -249,12 +337,11 @@ const summary = {
     outputTokens: avg(selfRows.map((r) => r.outputTokens)),
     msPerQuestion: avg(selfRows.map((r) => r.ms)),
   },
+  evalResults: { host: hostJudge.evalResults, self: selfJudge.evalResults },
   rows: { host: hostRows, self: selfRows },
   judgeLogs: { host: hostJudge.log, self: selfJudge.log },
 }
 console.log(JSON.stringify({ n: summary.n, host: summary.host, self: summary.self }, null, 2))
-if (OUT !== null) {
-  writeFileSync(OUT, JSON.stringify(summary, null, 2))
-  console.log('saved', OUT)
-}
+writeFileSync(OUT, JSON.stringify(summary, null, 2))
+console.log('saved', OUT)
 rmSync(dataRoot, { recursive: true, force: true })
