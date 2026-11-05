@@ -1,7 +1,8 @@
 /** 运行时组装：boot('prts', configPath, patches, prepare) + 最小 credentials 服务 + K2a 守卫接线。 */
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import type { Context } from '@deepseek-ai/cordis'
@@ -149,6 +150,36 @@ async function bootWithDiagnostics<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * config 里声明了、但模块解析不到的插件。
+ *
+ * 为什么需要：DSH 对「插件 resolve 失败」是**静默的**——写错一个包名，系统照常启动，
+ * 只有依赖它的下游插件打一行 `pending`。功能安静地缺失，而配置里看不出来。
+ * （2026-11-05 实测：`dsh-token-meter` 写成不存在的包名，启动零报错。）
+ *
+ * 默认只警告不阻断：`require.resolve` 对某些只导出 ESM 的包可能误报，
+ * 「误报导致起不来」比「少一个功能」更糟。`PRTS_STRICT_PLUGINS=1` 才升级为失败。
+ */
+function unrunnablePlugins(configPath: string): string[] {
+  let text: string
+  try {
+    text = readFileSync(resolve(configPath), 'utf8')
+  } catch {
+    return [] // 读不到就交给 boot 报错，不在这里抢先
+  }
+  const names = [...text.matchAll(/^\s*name:\s*'([^']+)'/gm)].map((m) => m[1])
+  const req = createRequire(pathToFileURL(resolve(configPath)))
+  const missing: string[] = []
+  for (const name of names) {
+    try {
+      req.resolve(name)
+    } catch {
+      missing.push(name)
+    }
+  }
+  return missing
+}
+
 export async function startRuntime(o: StartRuntimeOptions): Promise<{
   /** 记忆库句柄（打不开时为 undefined）。 */
   memory?: MemoryStore
@@ -251,6 +282,15 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     })
   }
   if (backend === 'appcontainer') bootPatches.push({ id: 'sandbox', disabled: true })
+  // 插件名写错时 DSH 是静默的（照常启动，只让下游 pending），这里提前说出来。
+  const missingPlugins = unrunnablePlugins(o.configPath)
+  if (missingPlugins.length > 0) {
+    const detail = `prts: config 声明了 ${missingPlugins.length} 个无法解析的插件：\n  ${missingPlugins.join('\n  ')}`
+    if (process.env.PRTS_STRICT_PLUGINS === '1') {
+      throw new Error(`${detail}\n（PRTS_STRICT_PLUGINS=1，按配置错误处理）`)
+    }
+    console.warn(`${detail}\n（这些插件不会激活，对应功能将缺失；设 PRTS_STRICT_PLUGINS=1 可让启动直接失败）`)
+  }
   process.env.DSH_HOME = join(o.dataRoot, 'dsh-home')
   process.env.PRTS_WORKSPACE = o.workspace
   const appReady = createAppReady()
