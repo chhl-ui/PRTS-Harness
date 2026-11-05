@@ -518,7 +518,12 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
     ? await agents.create({
       sessionId,
       meta: { cwd: deps.cwd },
-      agentOptions: { provider: 'deepseek-official', model: 'deepseek-chat' },
+      agentOptions: {
+        provider: 'deepseek-official',
+        // 模型路由可覆盖：本地 Ollama（q38-gsq-iq3s）等通过 PRTS_LLM_MODEL 指定；
+        // provider 名保持 deepseek-official（DSH 的 provider id），baseURL 由 DEEPSEEK_BASE_URL 覆盖。
+        model: process.env.PRTS_LLM_MODEL ?? 'deepseek-chat',
+      },
     })
     : { agent: existing }
   let agent = createdAgent
@@ -770,7 +775,12 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
           created = await agents.create({
             sessionId: newId,
             meta: { cwd: deps.cwd },
-            agentOptions: { provider: 'deepseek-official', model: 'deepseek-chat' },
+            agentOptions: {
+        provider: 'deepseek-official',
+        // 模型路由可覆盖：本地 Ollama（q38-gsq-iq3s）等通过 PRTS_LLM_MODEL 指定；
+        // provider 名保持 deepseek-official（DSH 的 provider id），baseURL 由 DEEPSEEK_BASE_URL 覆盖。
+        model: process.env.PRTS_LLM_MODEL ?? 'deepseek-chat',
+      },
           })
         } catch (error) {
           // create 失败要释放刚注册的身份，不留幽灵会话；原会话保持不变。

@@ -34,12 +34,27 @@ const PROJECT = 'C:/prts-system'
 const N = Number(process.env.N ?? '3')
 const OUT = process.env.OUT ?? null
 
+/** LOCAL=1：被测模型与判分都走本地 Ollama（零 API key）。 */
+const LOCAL = process.env.LOCAL === '1'
+const OLLAMA_BASE = process.env.OLLAMA_BASE ?? 'http://127.0.0.1:11434'
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'q38-gsq-iq3s'
+
 const keyFile = 'C:/prts-data/secrets/deepseek.key'
-const apiKey = process.env.DEEPSEEK_API_KEY
-  ?? (existsSync(keyFile) ? readFileSync(keyFile, 'utf8').trim() : undefined)
+const apiKey = LOCAL
+  ? 'ollama-local'
+  : (process.env.DEEPSEEK_API_KEY
+    ?? (existsSync(keyFile) ? readFileSync(keyFile, 'utf8').trim() : undefined))
 if (apiKey === undefined || apiKey === '') {
-  console.error('需要 DEEPSEEK_API_KEY 或 C:/prts-data/secrets/deepseek.key')
+  console.error('需要 DEEPSEEK_API_KEY 或 C:/prts-data/secrets/deepseek.key（或 LOCAL=1 走本地 Ollama）')
   process.exit(2)
+}
+if (LOCAL) {
+  process.env.DEEPSEEK_BASE_URL = OLLAMA_BASE
+  process.env.PRTS_LLM_MODEL = OLLAMA_MODEL
+  process.env.DEEPSEEK_API_KEY = apiKey
+  // 本地模型实际窗口 32k（Ollama 默认 num_ctx）；不设会让 PRTS 按 1M 预算注入后被静默截断。
+  process.env.DSH_CONTEXT_WINDOW = process.env.DSH_CONTEXT_WINDOW ?? '32768'
+  console.log(`LOCAL 模式：base=${OLLAMA_BASE} model=${OLLAMA_MODEL}`)
 }
 
 const all = JSON.parse(readFileSync(SRC, 'utf8'))
@@ -193,11 +208,17 @@ function judge(rows, tag) {
   writeFileSync(hypPath, rows.map((r) => JSON.stringify({
     question_id: r.qid, hypothesis: r.hypothesis,
   })).join('\n') + '\n')
-  const res = spawnSync('python', ['scripts/eval-longmemeval.py', '--hyp', hypPath, '--ref', SRC], {
+  const judgeArgs = ['scripts/eval-longmemeval.py', '--hyp', hypPath, '--ref', SRC]
+  if (LOCAL) judgeArgs.push('--model', OLLAMA_MODEL)
+  const res = spawnSync('python', judgeArgs, {
     cwd: PROJECT,
     encoding: 'utf8',
-    env: { ...process.env, DEEPSEEK_API_KEY: apiKey },
-    timeout: 600000,
+    env: {
+      ...process.env,
+      DEEPSEEK_API_KEY: apiKey,
+      ...(LOCAL ? { DEEPSEEK_API_BASE: `${OLLAMA_BASE}/v1` } : {}),
+    },
+    timeout: 1800000,
   })
   const out = `${res.stdout ?? ''}${res.stderr ?? ''}`
   const m = out.match(/Accuracy: ([\d.]+)/)
@@ -212,6 +233,8 @@ const selfJudge = judge(selfRows, 'self')
 const avg = (xs) => (xs.length === 0 ? 0 : xs.reduce((s, x) => s + x, 0) / xs.length)
 const summary = {
   n: picks.length,
+  route: LOCAL ? `local:${OLLAMA_MODEL}@${OLLAMA_BASE}` : 'deepseek-official:deepseek-chat',
+  judge: LOCAL ? `local:${OLLAMA_MODEL}` : 'deepseek-reasoner',
   host: {
     accuracy: hostJudge.acc,
     recallCalls: avg(hostRows.map((r) => r.recallCalls)),
