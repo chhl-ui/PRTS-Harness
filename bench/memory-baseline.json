@@ -1,0 +1,75 @@
+{
+  "src": "C:/prts-benchmark/longmemeval/longmemeval_s_cleaned.json",
+  "db": "C:/prts-benchmark/memory-s.sqlite",
+  "n": 479,
+  "skipped": 21,
+  "any8": 0.4509394572025052,
+  "all8": 0.27139874739039666,
+  "any32": 0.5782881002087683,
+  "all32": 0.3653444676409186,
+  "mrr": 0.2805589855892628,
+  "msPerQuestion": 420.1043841336117,
+  "latency": {
+    "p50": 375,
+    "p95": 853,
+    "max": 1329
+  },
+  "totalMs": 201263,
+  "types": {
+    "temporal-reasoning": {
+      "n": 132,
+      "any8": 52,
+      "all8": 17,
+      "any32": 72,
+      "all32": 31,
+      "mrr": 26.92017884649464,
+      "ms": 49906
+    },
+    "multi-session": {
+      "n": 125,
+      "any8": 37,
+      "all8": 8,
+      "any32": 60,
+      "all32": 17,
+      "mrr": 21.914609380435216,
+      "ms": 44839
+    },
+    "knowledge-update": {
+      "n": 72,
+      "any8": 51,
+      "all8": 29,
+      "any32": 58,
+      "all32": 41,
+      "mrr": 38.10113315078251,
+      "ms": 24159
+    },
+    "single-session-user": {
+      "n": 64,
+      "any8": 29,
+      "all8": 29,
+      "any32": 38,
+      "all32": 38,
+      "mrr": 16.788090029486025,
+      "ms": 20007
+    },
+    "single-session-assistant": {
+      "n": 56,
+      "any8": 46,
+      "all8": 46,
+      "any32": 47,
+      "all32": 47,
+      "mrr": 30.361111111111107,
+      "ms": 43023
+    },
+    "single-session-preference": {
+      "n": 30,
+      "any8": 1,
+      "all8": 1,
+      "any32": 2,
+      "all32": 1,
+      "mrr": 0.3026315789473684,
+      "ms": 19296
+    }
+  },
+  "establishedAt": "2026-11-05T17:11:18.182Z"
+}
