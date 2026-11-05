@@ -25,6 +25,14 @@ const ARCHIVE_FORMAT = 1
 /** 需要核对条数的表。缺表时不报错（不同版本装的库表不完全一样），记为 -1。 */
 const MEMORY_TABLES = ['mem_turns', 'mem_facts', 'mem_intents', 'mem_profiles', 'mem_summaries', 'mem_vectors']
 const CORE_TABLES = ['ledger_events', 'audit_events', 'tasks']
+/**
+ * 人格库的表。为什么必须进归档：运行时的人格前缀取的是
+ * `PersonaStore.renderPrefix()`（`src/runtime/start.ts` 用它覆盖 DSH 的
+ * personaPrefix），不是 profile 里的 `cordis.patch.yml`——后者只是快照。
+ * 不搬这个库，博士一旦定义过预设，「导出→全新安装」就会丢人格，
+ * 而归档自己的核对完全看不出来（它只核对它搬了的东西）。
+ */
+const PERSONA_TABLES = ['persona_presets', 'persona_events', 'persona_active']
 
 /**
  * 人格设定的快照。
@@ -140,6 +148,14 @@ export function exportArchive(input: {
     for (const t of CORE_TABLES) counts[t] = countIn(dest, t)
   }
 
+  const personaDbSrc = join(input.dataRoot, 'persona.sqlite')
+  if (existsSync(personaDbSrc)) {
+    const dest = join(input.outDir, 'persona.sqlite')
+    vacuumInto(personaDbSrc, dest)
+    sha256['persona.sqlite'] = sha256File(dest)
+    for (const t of PERSONA_TABLES) counts[t] = countIn(dest, t)
+  }
+
   // 人格快照：整份 profile 文件复制进归档。人设嵌在其中的 agent-preset.persona 里，
   // 单独抽出来需要 YAML 解析 + 回写，格式一漂移人设就失效；整份存 + 哈希比对更稳。
   let persona: PersonaSnapshot | null = null
@@ -240,6 +256,20 @@ export function importArchive(input: {
       }
     }
   }
+  // 人格库：与 memory/core 同一口径——条数逐项核对。文件本身已由
+  // `manifest.sha256` 的循环复制落地（导出时已把 persona.sqlite 写进 sha256）。
+  const personaDbDest = join(input.dataRoot, 'persona.sqlite')
+  if (existsSync(personaDbDest)) {
+    for (const t of PERSONA_TABLES) {
+      const got = countIn(personaDbDest, t)
+      counts[t] = got
+      const want = manifest.counts[t]
+      if (want !== undefined && want >= 0 && want !== got) {
+        throw new Error(`导入后核对失败：${t} 期望 ${want} 条，实际 ${got} 条`)
+      }
+    }
+  }
+
   // 人格：全新安装（目标不存在）才写；已存在且内容不同则拒绝，除非显式 forcePersona。
   // 这里刻意不做「合并」——YAML 合并的语义复杂，改错了人设会静默变形。
   let personaResult: { written: boolean; path: string } | null = null
