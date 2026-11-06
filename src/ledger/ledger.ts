@@ -120,8 +120,13 @@ const STOPPED: ReadonlySet<string> = new Set(['cancelled', 'stopped-by-owner'])
 /** model 经自由 actor 参数允许的操作；owner 全可；system 一律 FORBIDDEN。 */
 const MODEL_OPS = new Set([
   'create', 'note', 'setResume', 'beginStep', 'endStep', 'addEvidence',
-  'claimDone', 'block', 'unblock', 'pause', 'resume', 'bindSession',
+  'claimDone', 'block', 'unblock', 'pause', 'resume',
 ])
+
+// 注意：**不含 `bindSession`**。「模型永不绑定」要的不只是工具面不暴露——
+// 库层也必须拒 model actor，否则任何新工具或内部调用走到 `bindSession` 就会
+// 静默失去这条不变量（工具面的负向断言验的是工具名，验不到这里）。
+// 回归：test/ledger/task-binding.test.ts 的「model actor 不能 bindSession」用例。
 
 /** 模型侧未结任务上限（draft / active / paused / blocked）。owner 通道不受限。 */
 const MODEL_TASK_LIMIT = 4

@@ -51,7 +51,7 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 - **actor 固定发生在工具内部**：`execute` 里写死 `{ kind: 'model', sessionId }`，`sessionId` 取 `exec.agent?.session?.id`；参数 schema 没有 actor 字段，模型无从传入。
 - **固定 actor 通道没有工具封装**：`verify` / `ownerAccept` / `ownerReject` / `setBudget` / `stopByOwner` / `resumeFromStop` / `chargeUsage` / `recoverOnStartup` 在工具面不存在入口，它们由库内常量 actor 驱动（`src\ledger\ledger.ts` 的 `OWNER` / `VERIFIER` / `BUDGET` / `STOP` / `RECOVERY`）。
 - **第二道闸在库层**：`MODEL_OPS`（`ledger.ts:121`）是 model actor 的白名单，`perm()`（`ledger.ts:304`）对 model 只放名单内的 op、其余抛 `FORBIDDEN`，对 `system` 一律 `FORBIDDEN`（system 只能走固定 actor 路径），owner 全放。名单外的方法即使日后被工具包起来，model 调用也会被库拒。
-- **已知缺口：「模型永不绑定」只在工具面成立**：`MODEL_OPS` 里仍有 `bindSession`（`ledger.ts:123`）——工具面没暴露它，但库层允许 model actor 绑定，任何新工具或内部调用走到那里就会静默失去这条不变量。收紧方案是从白名单删掉并补库层负向断言（工具面已有负向①断言工具名不含 bind 语义，那验的是工具面，不是库层）。**本轮未做，记为遗留。**
+- **「模型永不绑定」在工具面与库层两侧都成立（2026-11-06 收紧）**：`MODEL_OPS`（`ledger.ts:121`）已删掉 `bindSession`——此前只在工具面成立，库层允许 model actor 绑定，任何新工具或内部调用走到那里就会静默失去这条不变量。现在 model 调它经 `perm`（`ledger.ts:309`）抛 `FORBIDDEN`，owner 通道不受影响；回归见 `test/ledger/task-binding.test.ts` 的「model actor 不能 bindSession」用例（先红后绿）。
 
 ### AppContainer 沙箱（U3 读隔离层，`src/sandbox/`）
 

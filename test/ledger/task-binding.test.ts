@@ -81,3 +81,29 @@ test('W2: 绑定能随导出文档重放——kind 不是孤事件', () => {
     } finally { td.cleanup() }
   } finally { c.cleanup() }
 })
+
+/**
+ * 「模型永不绑定」这条不变量此前只在工具面成立：`prts_task_*` 没暴露绑定，
+ * 但库层 `MODEL_OPS` 里有 `bindSession`（`ledger.ts:123`）。任何新工具或内部
+ * 调用只要用 model actor 走到这里，不变量就静默失效。
+ *
+ * 本用例钉库层这一侧：model 调 bindSession 必须 FORBIDDEN，owner 通道不受影响。
+ */
+test('W2: model actor 不能 bindSession——不变量在库层也成立', () => {
+  const c = openTmp()
+  try {
+    const l = c.ledger
+    const t = mk(l, model(), 'M')
+
+    expectCode(
+      () => l.bindSession(model(), { id: t.id, revision: l.get(t.id).revision }, 'sess-model'),
+      'FORBIDDEN',
+    )
+    assert.equal(l.taskForSession('sess-model'), undefined, 'model 的绑定竟然落库了')
+
+    // owner 通道照旧可用：收紧只针对 model，不伤所有者
+    const bound = l.bindSession(owner, { id: t.id, revision: l.get(t.id).revision }, 'sess-owner')
+    assert.equal(bound.id, t.id)
+    assert.equal(l.taskForSession('sess-owner')?.id, t.id)
+  } finally { c.cleanup() }
+})

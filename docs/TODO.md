@@ -75,6 +75,8 @@
 
 ## H. 已闭环（本会话）
 
+- [x] **「模型永不绑定」收紧到库层**：`MODEL_OPS` 删掉 `bindSession`（`ledger.ts:121`），model 调用抛 `FORBIDDEN`；补库层负向断言（`test/ledger/task-binding.test.ts`，先红后绿）；owner 通道不受影响
+
 - [x] **沙箱三档 `/sandbox view|edit|full`**：confine → runner `--mode` → appcontainer 授 RX / RX,W，fs 侧守卫拒写删；`prts-chat.cmd` 切 `appcontainer`（`d3a7d80`）
 - [x] **工具活动推送 M3**：`attachToolFeed` 把 tools/execute·result 翻成 `type:'tool'` 推给客户端（`6b85a61`）；README 修正 local 后端档位语义（`861f69d`）
 - [x] 全量 **833 pass / 0 fail**，`tsc -p .` exit=0
