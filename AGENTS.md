@@ -149,6 +149,18 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 - **账本工具排除名单**：`task-tools.ts` 的 `LEDGER_TOOL_NAMES`（显式集合，每项要写排除理由）+ `isLedgerTool()`；`start.ts` 的 `tools\execute` 钩子进门第一件事是 `if (typeof exec.name === 'string' && isLedgerTool(exec.name)) return next()`。存在理由：账本工具自身要写 K1，它的调用若再被自动记账，stepNo 序列会被「模型调了几次任务工具」驱动，模型显式 `step_begin` 还会与钩子自动发号撞同一 `stepNo`。名字带 `prts_task_` 前缀但漏登记仍按前缀排除，但该名字首次出现会打一条 stderr——这是防名单静默漂移的告警，**不是许可：加了工具必须补登记**。
 - **active 相位门**：`start.ts` 钩子仅在 `task.phase === 'active'` 时 `beginStep`；库层另有 `checkStepGate`（`ledger.ts:328`）兜底——非 active 抛 `INVALID_TRANSITION`，`cancelled` / `stopped-by-owner` 抛 `TASK_STOPPED`，`beginStep` 与 `retryUnknownStep` 都过它。理由：step 是「模型在 active 任务上的执行痕迹」，`draft` 期没有执行权。**代价已显式化**：非 active 的调用不入账，但按 `(taskId, phase)` 打一次 `console.warn`（`warnedPhaseSkips`）——账本从「拒绝记录」退化成「无记录」时不能无声。放宽为「记录 paused-work step」属未做项。
 
+### 人格预设：切换入口与生效边界（2026-11-06）
+
+- **入口**：`/persona` 查当前预设，`/persona <名>` 切换（`src\cli\chat.ts` 的 `runPersona`，owner 通道）。
+  此前 chat 侧零入口——`grep -c persona src\cli\chat.ts` 为 0，而库层 `switchTo`（`persona\store.ts:185`）
+  早已存在，于是「每次启动都是普瑞赛斯、想换回 prts 却没有入口」长期无法自解；V1-03 盲评的前置也卡在这里。
+- **生效边界**：`renderPrefix()` 只在 `start.ts:292` 启动时调用一次，结果作为 `personaPrefix`
+  section 在 `dsh-system-prompt` 构造时读入（`lib\index.js:236`）。所以运行中切换**不改变当前会话的
+  system prompt**，必须重启 `prts chat`——命令输出里明写了这一点，不说清用户会以为切坏了。
+  要做到热切换得在切换后用同名 section 重新注册覆盖（`section()` 返回 disposer），属后续增强，当前未做。
+- **未知预设必须失败**：`switchTo` 对不存在的预设抛 `NOT_FOUND`，不静默降级成「没有人格」。
+  回归：`test\cli\persona-command.test.ts`（P1 查看 / P2 切换 + 重启提示 + 库内 active 真的变了 / P3 未知预设不改 active）。
+
 ### 绑定归属：只由 owner 通道建立，模型永不绑定
 
 - **绑定的唯一建立点是 owner 通道**。当前 `/task` 走 `create(owner) → activate(owner) → bindSession(owner, …, sessionId)`（`src\cli\chat.ts` 的 `runTaskCommand`）；`/task-approve`（`runTaskApprove`）只 `activate`、**不绑定**——模型 draft 批准后是「active 但不属于会话」，后续工具调用不会被记 step（`start.ts` 的 `taskForSession` 查不到）。复核方式：`grep -rn bindSession src`，非测试调用点以它为准，文档过时算文档输。

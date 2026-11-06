@@ -24,6 +24,7 @@ import { listSessions, renderSessionLine } from '../runtime/session-table.ts'
 import { dispatchTasks } from '../runtime/dispatcher.ts'
 import { probeSessions, purgeSessions } from '../memory/session-purge.ts'
 import { AuditLog } from '../audit/audit.ts'
+import { PersonaStore } from '../persona/index.ts'
 import type { Authority } from '../authority/index.ts'
 import type { ApprovalBridge } from '../runtime/start.ts'
 
@@ -623,6 +624,44 @@ async function runSandbox(
   deps.onIdle?.()
 }
 
+/**
+ * `/persona [预设名]`：查看 / 切换当前人格预设（owner 通道）。
+ *
+ * 为什么需要它：切换能力在库层已有（`PersonaStore.switchTo`，`persona/store.ts:185`），
+ * 但 chat 侧此前零入口——「每次启动都是普瑞赛斯，想换回 prts 却没有现成的入口」
+ * 就是这么来的，而 V1-03 盲评的前置正是「先切回 prts 预设」。
+ *
+ * 生效边界必须说清：`renderPrefix()` 只在 `start.ts:292` 启动时调一次，装配进
+ * DSH 的 `personaPrefix` section（`dsh-system-prompt/lib/index.js:236` 在构造时读入），
+ * 所以运行中切换**不改变当前会话的 system prompt**，必须重启 `prts chat`。
+ * 输出里明写这一点，否则用户会以为切坏了。
+ */
+async function runPersona(deps: ChatDeps, arg: string): Promise<void> {
+  const dbPath = process.env.PRTS_PERSONA_DB ?? join(deps.dataRoot, 'persona.sqlite')
+  let store: PersonaStore | undefined
+  try {
+    store = PersonaStore.open(dbPath)
+    const current = store.activePreset()
+    if (arg === '') {
+      deps.out(`[prts] 当前人格预设：${current ?? '（无，沿用 config 的 personaPrefix）'}\n`)
+      deps.out('[prts] 用法：/persona <预设名>；切换后需重启 prts chat 才生效\n')
+      return
+    }
+    if (arg === current) {
+      deps.out(`[prts] 已经是 ${arg}，无需切换\n`)
+      return
+    }
+    const now = store.switchTo({ kind: 'owner' }, arg)
+    deps.out(`[prts] 已切到 ${now}（原：${current ?? '无'}）\n`)
+    deps.out('[prts] 人格在启动时装配，**重启 prts chat 后生效**\n')
+  } catch (error) {
+    deps.out(`[prts] 人格切换失败：${error instanceof Error ? error.message : String(error)}\n`)
+  } finally {
+    store?.close()
+    deps.onIdle?.()
+  }
+}
+
 export async function runChat(deps: ChatDeps): Promise<ChatResult> {
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const ctx = deps.ctx as any
@@ -845,6 +884,11 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
           for (const r of rows) deps.out(renderSessionLine(r) + '\n')
         }
         deps.onIdle?.()
+        continue
+      }
+      // ---- 人格预设查看/切换（owner 通道；重启后生效）----
+      if (line === '/persona' || line.startsWith('/persona ')) {
+        await runPersona(deps, line.slice('/persona'.length).trim())
         continue
       }
       // ---- 沙箱三档切换（仅可查看 / 工作区内修改 / 完全权限）----

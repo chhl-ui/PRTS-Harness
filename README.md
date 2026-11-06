@@ -24,7 +24,7 @@ PRTS_DATA_ROOT=C:\prts-data PRTS_WORKSPACE=C:\prts-workspace \
 PRTS_CONFIG=C:\prts-system\config\prts.yml npm run chat
 ```
 
-输入消息开始对话，`/exit` 退出，Ctrl-C 中断当前轮次。工作区外的越界操作会弹审批提示（见「E3 审批」）。
+输入消息开始对话，`/exit` 退出，Ctrl-C 中断当前轮次。`/persona [预设名]` 查看/切换人格预设（切换后需重启 `prts chat` 才生效——人格在启动时装配）。工作区外的越界操作会弹审批提示（见「E3 审批」）。
 
 **API key 存哪**——按「被随手读到的门槛」从高到低取第一个可用的：
 

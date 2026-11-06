@@ -37,7 +37,7 @@
 
 ## B. 等博士（判据是主观认定，无法代做）
 
-- [ ] **V1-03 盲评**：20 段 ≥17 段「像 PRTS」+ 5 道陷阱题。**前置**：先切回 `prts` 预设（当前是 `priestess`）
+- [ ] **V1-03 盲评**：20 段 ≥17 段「像 PRTS」+ 5 道陷阱题。**前置已解除**：`/persona prts` 可切换（2026-11-06 加入口），切换后需重启 `prts chat`；当前 active 仍是 `priestess`
 - [ ] **V1-04 盲评**：20 段 ≥17 段「像普瑞赛斯」。`priestess` 已激活，正常使用即积累
 - [ ] **V1-05 打分**：10 情境 ≥8 得体 + 事实不变项。材料 `C:/prts-benchmark/v1-05-scenarios.json`，
   摘要见 `docs/v1-05-scenario-run-2026-11-05.md`。S10 已定位为 `waitIdle` 120s 超时（实测 123470ms），非崩溃
@@ -74,6 +74,8 @@
   作为 V1-01 插件机制的首个真实用例——它能把「可选功能插件化」从判据变成实践
 
 ## H. 已闭环（本会话）
+
+- [x] **人格切换入口 `/persona`**：chat 侧此前零入口（`grep -c persona src\cli\chat.ts` = 0），库层 `switchTo` 早已存在；现加查看/切换命令，切换后显式提示重启（`renderPrefix` 只在启动装配）；V1-03 的前置由此解除
 
 - [x] **「模型永不绑定」收紧到库层**：`MODEL_OPS` 删掉 `bindSession`（`ledger.ts:121`），model 调用抛 `FORBIDDEN`；补库层负向断言（`test/ledger/task-binding.test.ts`，先红后绿）；owner 通道不受影响
 
