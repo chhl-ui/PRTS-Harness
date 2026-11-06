@@ -107,3 +107,84 @@ test('接线：appcontainer 后端下，真实 confine 产出的 argv 能跑且�
     rmSync(ws, { recursive: true, force: true })
   }
 })
+
+// ---------------------------------------------------------------- pwsh 覆盖
+//
+// 上面那条用 `cmd.exe`：它验证的是「链路通 + 隔离生效」，但**不是模型实际用的
+// shell**——PRTS 的工具名就叫 `pwsh`，`appcontainer.ts` 的设计前提也写着
+// 「pwsh 7 含 `-File` 可用」。cmd 能跑不代表 pwsh 能跑：pwsh 在 AppContainer 里
+// 需要加载自己的程序集，权限面比 cmd 宽。
+//
+// 本机实测（2026-11-06，pwsh 7.6.9）：起得来、写工作区成功、越界写与读密钥
+// 都返回 access denied。未装 pwsh 7 的机器 skip 而不是 fail——这是可选覆盖，
+// 不是所有环境都该有。
+
+/** 模型侧 shell 的真实路径；`PRTS_PWSH` 可覆盖（装在别处时用）。 */
+const PWSH = process.env.PRTS_PWSH ?? 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'
+/** pwsh 用例独立的越界落脚点，不与 cmd 用例共用（避免并发/残留互扰）。 */
+const OUTSIDE_PWSH = 'C:\\Users\\Administrator\\prts-live-pwsh-write.txt'
+
+test('pwsh：模型真实 shell 在容器里能跑、能写工作区、越界与读密钥被拦', {
+  timeout: 180000,
+  skip: existsSync(PWSH) ? false : `未找到 ${PWSH}（用 PRTS_PWSH 指定）`,
+}, async () => {
+  const ws = join('C:\\', `prts-pwsh-${process.pid}-${Date.now()}`)
+  mkdirSync(ws, { recursive: true })
+  const dataRoot = join(ws, '_data')
+  mkdirSync(dataRoot, { recursive: true })
+
+  const prev = process.env.PRTS_SANDBOX_BACKEND
+  process.env.PRTS_SANDBOX_BACKEND = 'appcontainer'
+  const app = await startRuntime({
+    configPath: prtsYml,
+    dataRoot,
+    workspace: ws,
+    mode: 'normal',
+    patches: PATCHES,
+  })
+
+  try {
+    assert.equal(app.sandboxBackend, 'appcontainer', '开关没生效')
+    const sandbox = app.ctx.get('sandbox') as {
+      confine?: (a: readonly string[], p: unknown) => Promise<{ argv: string[] }>
+    } | undefined
+    assert.ok(typeof sandbox?.confine === 'function', 'ctx.sandbox 必须提供 confine')
+    const confine = sandbox.confine.bind(sandbox)
+
+    const runPwsh = async (psCommand: string): Promise<RunOut> => {
+      const wrapped = await confine(
+        [PWSH, '-NoProfile', '-NonInteractive', '-Command', psCommand],
+        { mode: 'workspace-write', workspaceRoot: ws, sessionId: 'sess-live-pwsh' },
+      )
+      return collect(wrapped.argv)
+    }
+
+    // ---- 1) 起得来，且真是 7.x ----
+    const ver = await runPwsh('$PSVersionTable.PSVersion.ToString()')
+    assert.equal(ver.code, 0, `pwsh 在容器里起不来，输出 ${JSON.stringify(ver.out.slice(0, 300))}`)
+    assert.match(ver.out, /^7\./m, `版本不是 7.x：${JSON.stringify(ver.out.slice(0, 80))}`)
+
+    // ---- 2) 写工作区内：可以 ----
+    const wrote = await runPwsh("Set-Content -Path 'in-pwsh.txt' -Value 'ok'; Get-Content 'in-pwsh.txt'")
+    assert.equal(wrote.code, 0, `pwsh 写工作区内失败，输出 ${JSON.stringify(wrote.out.slice(0, 300))}`)
+    assert.equal(existsSync(join(ws, 'in-pwsh.txt')), true, '文件没落盘')
+
+    // ---- 3) 写工作区外：被拦 ----
+    const outside = await runPwsh(`Set-Content -Path '${OUTSIDE_PWSH}' -Value 'x'`)
+    assert.notEqual(outside.code, 0, 'pwsh 越界写必须失败')
+    assert.equal(existsSync(OUTSIDE_PWSH), false, '越界文件竟然被创建——沙箱没管住 pwsh')
+
+    // ---- 4) 读密钥：被拦且不泄漏 ----
+    if (!existsSync(KEY)) assert.fail(`密钥文件不存在（${KEY}），读隔离无法验证——这不是通过`)
+    const readKey = await runPwsh(`Get-Content '${KEY}'`)
+    assert.notEqual(readKey.code, 0, 'pwsh 读密钥必须失败')
+    assert.doesNotMatch(readKey.out, /sk-|^[A-Za-z0-9_-]{30,}$/m,
+      `输出里疑似有密钥内容：${JSON.stringify(readKey.out.slice(0, 120))}`)
+  } finally {
+    process.env.PRTS_SANDBOX_BACKEND = prev ?? ''
+    if (prev === undefined) delete process.env.PRTS_SANDBOX_BACKEND
+    await app.dispose()
+    try { rmSync(OUTSIDE_PWSH, { force: true }) } catch { /* 未被创建 */ }
+    rmSync(ws, { recursive: true, force: true })
+  }
+})

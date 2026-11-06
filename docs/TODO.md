@@ -44,7 +44,7 @@
 
 ## C. 可自动化，尚未做
 
-- [ ] **appcontainer 后端三档真机 e2e**：以 `PRTS_SANDBOX_BACKEND=appcontainer` 起 `prts chat`，切 `/sandbox view` 后让模型写文件，期望守卫拒绝且审计留痕。单元层已绿（`test\runtime\guard-wiring.test.ts`、`test\cli\sandbox-command.test.ts`），**真机未复现**（`d3a7d80` 交付时的遗留）
+- [ ] **appcontainer 三档端到端**：**confine 层已有真机证据**——`mode: 'read-only'` 下 pwsh 写工作区被 OS 拒（`test\sandbox\live-wiring.test.ts` 新增 pwsh 用例；pwsh 7.6.9 实测：版本可读、workspace-write 能写、越界写与读密钥 denied）。**未验**的是 `/sandbox view` → `sandbox/mode` 事件 → `sandboxPolicy.resolve` 回读这条端到端（命令本身有 fake ctx 单元覆盖）。原判据：起 `prts chat` 切 view 后让模型写文件，期望守卫拒绝且审计留痕
 - [ ] **V1-08 上下文**：超模型窗口 3 倍仍答对开头 5 个约束；跨天新会话说出未完成事项（成本最高）
 - [ ] **V1-06 的提炼质量**：链路已验（`e86742c`），但用的是 stub generator；真实模型抽得准不准未验
   （要真实模型 + 标注集，属 LongMemEval 的 fact 抽取范畴）
