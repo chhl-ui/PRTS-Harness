@@ -14,6 +14,7 @@ import {
   listProfiles,
   profileEnv,
   readProfile,
+  readProfileIfPresent,
   resolveProfile,
   writeProfile,
 } from '../../src/runtime/model-profile.ts'
@@ -105,4 +106,15 @@ test('MP8 预设清单稳定（两个，id 不重复）', () => {
   const ids = listProfiles().map((p) => p.id)
   assert.deepEqual(ids, ['deepseek', 'strata'])
   assert.equal(MODEL_PROFILES.length, 2)
+})
+
+test('MP9 readProfileIfPresent：文件不存在返回 undefined（不接管 env）', () => {
+  // 这条保证手动启动（`DEEPSEEK_BASE_URL=... node src/cli/chat-serve.ts`）不会被
+  // 默认预设默默覆盖。端到端已用真 serve 验过：无 profile 文件时启动日志不打模型行。
+  const t = makeTmp('prts-model-profile-')
+  try {
+    assert.equal(readProfileIfPresent(t.dir), undefined, '没有 profile 文件时不得接管环境变量')
+    writeProfile(t.dir, 'strata')
+    assert.equal(readProfileIfPresent(t.dir)?.id, 'strata', '文件存在时应返回选择')
+  } finally { t.cleanup() }
 })

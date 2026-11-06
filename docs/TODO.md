@@ -72,6 +72,16 @@
 
 ## H. 已闭环（本会话）
 
+- [x] **模型后端切换**（`5cece79` + 桌面端 `f654e59`）：侧栏「模型后端」磁贴 / 终端 `/model`，
+  写 `<dataRoot>\model-profile.json`，`chat-serve` 启动时读并覆盖 env。
+  **必须重启 serve 才生效**——provider id 硬编码 `deepseek-official`
+  （`dsh-llm-deepseek-api-key\lib\index.js:47`），同进程注册两个会互相覆盖；
+  上下文窗口也在启动期定（`config\prts.yml:20` + `start.ts:1027`）。
+  端到端实测三种：strata → 「本地 Strata（256K）（窗口 262144）」、
+  deepseek → 「官方（1M）（窗口 1000000）」、**没有 profile 文件 → 不接管**（保留手动 env）。
+  ⚠️ Strata 的 256K 来自口述，`docs\v1-02-second-provider-strata-2026-11-05.md` 实测是 `32768`——
+  以实测为准，profile 文件支持 `contextWindow` 覆盖，别把默认值当已知事实。
+
 - [x] **桌面端二级页面读通道**（`a39a545` + 桌面仓 `c651b3b`）：所有者通道 `query` 协议实装
   （`owner-protocol` 词表 / `owner-query` 取数层 / `terminal-server` 旁路注入点 / `chat-serve`
   延迟绑定）。tasks / sessions / intents / memory / sandbox 五类；未知 `what` 回 `query.result`
