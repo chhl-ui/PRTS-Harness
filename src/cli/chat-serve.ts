@@ -30,6 +30,7 @@ import type { QueryRequest, QueryResultPush } from '../runtime/owner-protocol.ts
 import { createTerminalServer, attachToolFeed } from '../runtime/terminal-server.ts'
 import { createOwnerQuery } from '../runtime/owner-query.ts'
 import type { QueryAgentRegistry } from '../runtime/owner-query.ts'
+import { profileEnv, readProfileIfPresent } from '../runtime/model-profile.ts'
 
 const dataRoot = process.env.PRTS_DATA_ROOT
 const workspace = process.env.PRTS_WORKSPACE
@@ -37,6 +38,17 @@ const configPath = process.env.PRTS_CONFIG
 if (!dataRoot || !workspace || !configPath) {
   console.error('prts chat:serve: 需要 PRTS_DATA_ROOT / PRTS_WORKSPACE / PRTS_CONFIG 三个环境变量')
   process.exit(2)
+}
+
+// 模型后端 profile（桌面端可切）：**只在 profile 文件存在时**接管环境变量。
+// 手动调试（`DEEPSEEK_BASE_URL=... node src/cli/chat-serve.ts`）不会被默认预设默默覆盖。
+const activeProfile = readProfileIfPresent(dataRoot)
+if (activeProfile !== undefined) {
+  for (const [name, value] of Object.entries(profileEnv(activeProfile))) {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+  }
+  console.error(`prts chat:serve — 模型：${activeProfile.label}（窗口 ${activeProfile.contextWindow}）`)
 }
 
 const loaded = loadApiKey({

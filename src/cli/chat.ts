@@ -25,6 +25,7 @@ import { dispatchTasks } from '../runtime/dispatcher.ts'
 import { probeSessions, purgeSessions } from '../memory/session-purge.ts'
 import { AuditLog } from '../audit/audit.ts'
 import { PersonaStore } from '../persona/index.ts'
+import { listProfiles, readProfile, writeProfile } from '../runtime/model-profile.ts'
 import type { Authority } from '../authority/index.ts'
 import type { ApprovalBridge } from '../runtime/start.ts'
 
@@ -632,6 +633,39 @@ async function runSandbox(
 }
 
 /**
+ * `/model [预设名]`：查看 / 切换模型后端预设（owner 通道；重启 serve 后生效）。
+ *
+ * 为什么必须重启而不是热切：`dsh-llm-deepseek-api-key` 把 provider id 硬编码为
+ * `deepseek-official`（`lib/index.js:47`），同一进程注册两个会互相覆盖；上下文窗口
+ * 也在启动期求值（`config/prts.yml:20` + `start.ts:1027`，`agentOptions` 里没有该字段）。
+ *
+ * 所以这里只写 `<dataRoot>/model-profile.json`，由 `chat-serve` 下次启动时读
+ * （`readProfileIfPresent`）并落进环境变量。**换后端连带换 256K/1M 的装配预算**，
+ * 这正是这个按钮存在的理由——不重启就没有真正切过去。
+ */
+async function runModel(deps: ChatDeps, arg: string): Promise<void> {
+  const current = readProfile(deps.dataRoot)
+  if (arg === '') {
+    deps.out(`[prts] 当前模型预设：${current.label}（窗口 ${current.contextWindow}）\n`)
+    for (const p of listProfiles()) {
+      deps.out(`[prts]   ${p.id === current.id ? '*' : ' '} ${p.id} — ${p.label}\n`)
+    }
+    deps.out('[prts] 用法：/model <预设名>；切换后需重启 serve 才生效（窗口在启动期定）\n')
+    deps.onIdle?.()
+    return
+  }
+  try {
+    const next = writeProfile(deps.dataRoot, arg)
+    deps.out(`[prts] 已切换模型预设：${next.label}（窗口 ${next.contextWindow}）\n`)
+    deps.out('[prts] 需要重启 serve 才生效——provider 与上下文窗口都是启动期定的。\n')
+  } catch (error) {
+    deps.out(`[prts] ${error instanceof Error ? error.message : String(error)}\n`)
+    deps.out('[prts] 用法：/model <预设名>\n')
+  }
+  deps.onIdle?.()
+}
+
+/**
  * `/persona [预设名]`：查看 / 切换当前人格预设（owner 通道）。
  *
  * 为什么需要它：切换能力在库层已有（`PersonaStore.switchTo`，`persona/store.ts:185`），
@@ -897,6 +931,11 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
       // ---- 人格预设查看/切换（owner 通道；重启后生效）----
       if (line === '/persona' || line.startsWith('/persona ')) {
         await runPersona(deps, line.slice('/persona'.length).trim())
+        continue
+      }
+      // ---- 模型后端预设（owner 通道；重启 serve 后生效）----
+      if (line === '/model' || line.startsWith('/model ')) {
+        await runModel(deps, line.slice('/model'.length).trim())
         continue
       }
       // ---- 沙箱三档切换（仅可查看 / 工作区内修改 / 完全权限）----
