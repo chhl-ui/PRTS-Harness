@@ -18,7 +18,7 @@
 | V1-02 独立性 | ✅ | ✅ | 无常驻进程；对话/执行任务/读写记忆/第二提供方全实测 |
 | V1-03 PRTS 人格 | ✅ | ❌ | 需博士盲评 20 段 + 5 道陷阱题（前置：切回 `prts` 预设） |
 | V1-04 普瑞赛斯 | ✅ | ❌ | `priestess` 已激活，需博士盲评 20 段 |
-| V1-05 情感 | ✅ | ✅（机制） | 系统侧生产者已补（`e46da94`）：轮次失败自动写「受挫」，10 分钟节流，写失败不拖垮上报；owner 入口 `prts emotion`；10 情境 9/10 有回复，**博士打分未做** |
+| V1-05 情感 | ✅ | ✅（机制） | 系统侧生产者已补（`e46da94`）：轮次失败自动写「受挫」，10 分钟节流，写失败不拖垮上报；**接线段已有 live 测试**（`test/runtime/emotion-wiring.test.ts`，摘掉 `start.ts` 的 `onReport` 即红）；owner 入口 `prts emotion`；10 情境 9/10 有回复，**博士打分未做** |
 | V1-06 记忆 | ✅ | ✅（链路） | 机制层 10/10；**真实链路已验**（`e86742c`）：10 条对话 turn → `consolidateFacts` → 重启后 ≥9 可检索，含反证（stub 返回空则测试红）。提炼**质量**（真模型抽得准不准）未验 |
 | V1-07 主动回忆 | ✅ | ❌ | 7 天试用 ≥70% 恰当（需真实使用） |
 | V1-08 上下文 | ✅ | ❌ | 超窗口 3 倍 + 跨天未完成事项（成本最高的自动化项） |
@@ -48,9 +48,6 @@
 - [ ] **V1-08 上下文**：超模型窗口 3 倍仍答对开头 5 个约束；跨天新会话说出未完成事项（成本最高）
 - [ ] **V1-06 的提炼质量**：链路已验（`e86742c`），但用的是 stub generator；真实模型抽得准不准未验
   （要真实模型 + 标注集，属 LongMemEval 的 fact 抽取范畴）
-- [ ] **V1-05 的接线未单独验**：`startRuntime` 里 `onReport` 那 3 行靠 tsc + 代码审阅
-  （`error-report.ts:124` 明确调 `options.onReport?.(entry)`），**没写 live 测试**——
-  `ctx.events.emit` 的 API 名未确认，不猜。按 V1-07 的教训，这条应该补上
 
 ## D. 冻结
 
@@ -75,13 +72,19 @@
 
 ## H. 已闭环（本会话）
 
+- [x] **V1-05 接线段 live 测试**：`test/runtime/emotion-wiring.test.ts` 用真实 `startRuntime` +
+  空脚本 LLM 制造 `agent/error`（`dsh-agent-loop` 的 `throwError()` emit，`:880`），断言
+  EmotionStore 落盘「受挫」；E3 连续两轮失败 `revision` 仍为 1（节流是单实例，不是每轮新建）。
+  反证：摘掉 `start.ts:1142` 的 `onReport` 两条即红。顺带修正此前误述——消费方是
+  `ctx.events.on`（`error-report.ts:122`），不是 `emit`
+
 - [x] **人格切换入口 `/persona`**：chat 侧此前零入口（`grep -c persona src\cli\chat.ts` = 0），库层 `switchTo` 早已存在；现加查看/切换命令，切换后显式提示重启（`renderPrefix` 只在启动装配）；V1-03 的前置由此解除
 
 - [x] **「模型永不绑定」收紧到库层**：`MODEL_OPS` 删掉 `bindSession`（`ledger.ts:121`），model 调用抛 `FORBIDDEN`；补库层负向断言（`test/ledger/task-binding.test.ts`，先红后绿）；owner 通道不受影响
 
 - [x] **沙箱三档 `/sandbox view|edit|full`**：confine → runner `--mode` → appcontainer 授 RX / RX,W，fs 侧守卫拒写删；`prts-chat.cmd` 切 `appcontainer`（`d3a7d80`）
 - [x] **工具活动推送 M3**：`attachToolFeed` 把 tools/execute·result 翻成 `type:'tool'` 推给客户端（`6b85a61`）；README 修正 local 后端档位语义（`861f69d`）
-- [x] 全量 **833 pass / 0 fail**，`tsc -p .` exit=0
+- [x] 全量 **843 pass / 0 fail**（2026-11-06 实测，49.8s），`tsc -p .` exit=0
 
 - [x] V1-14 4 项 / V1-06 3 项 / V1-15 2 项 / V1-09 7 项 → `scripts/verify-v1-acceptance.mjs` **16 项全 PASS**（`47ed24a`、`27a154e`）
 - [x] **V1-06 真实链路**：10 条对话 turn → `consolidateFacts` → 重启后 ≥9 可检索；含反证（stub 返回空则测试红）与解析失败不污染（`e86742c`）
