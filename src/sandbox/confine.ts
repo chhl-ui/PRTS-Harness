@@ -145,7 +145,15 @@ export function confineArgv(argv: readonly string[], opts: ConfineOptions): Conf
   }
 }
 
-/** 只读模式目前与 workspace-write 同构（容器本身就不给写），保留参数以便将来收紧。 */
+/**
+ * 类型守卫：上游 `policy.mode` 是否落在本 runner 支持的两档内。
+ *
+ * 两档**已不同构**（2026-11-06 收紧）：`read-only` 时 `runner.ts` 传
+ * `writable: false`，`appcontainer.ts` 对工作区只授 `(OI)(CI)(RX)`（读写档为
+ * `(OI)(CI)(RX,W)`）。pwsh 真机实测：read-only 档下写工作区被 OS 拒
+ * （`test\sandbox\live-wiring.test.ts`）。旧注释「与 workspace-write 同构、
+ * 容器本身就不给写」描述的是收紧前的状态，已不成立。
+ */
 export function isConfinedMode(mode: string): mode is ConfinedMode {
   return mode === 'read-only' || mode === 'workspace-write'
 }
