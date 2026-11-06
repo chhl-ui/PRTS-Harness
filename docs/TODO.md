@@ -1,6 +1,6 @@
 # PRTS 待办清单
 
-> 详细判据与恢复命令见 `docs/PENDING-2026-11-05.md`。最后更新：2026-11-05
+> 详细判据与恢复命令见 `docs/PENDING-2026-11-05.md`。最后更新：2026-11-06（第二轮）
 
 ## 0. 初版范围变更
 
@@ -44,6 +44,7 @@
 
 ## C. 可自动化，尚未做
 
+- [ ] **appcontainer 后端三档真机 e2e**：以 `PRTS_SANDBOX_BACKEND=appcontainer` 起 `prts chat`，切 `/sandbox view` 后让模型写文件，期望守卫拒绝且审计留痕。单元层已绿（`test\runtime\guard-wiring.test.ts`、`test\cli\sandbox-command.test.ts`），**真机未复现**（`d3a7d80` 交付时的遗留）
 - [ ] **V1-08 上下文**：超模型窗口 3 倍仍答对开头 5 个约束；跨天新会话说出未完成事项（成本最高）
 - [ ] **V1-06 的提炼质量**：链路已验（`e86742c`），但用的是 stub generator；真实模型抽得准不准未验
   （要真实模型 + 标注集，属 LongMemEval 的 fact 抽取范畴）
@@ -57,8 +58,7 @@
 
 ## E. 可选决策
 
-- [ ] **K2b 默认后端是否切 `appcontainer`**：现状默认 `local`（exec 无文件系统边界）；切了有 OS 边界，
-  但要评估性能、icacls 非管理员环境的失败回退。README 已如实写明现状，不是隐瞒
+- [ ] **K2b 默认后端是否切 `appcontainer`**：代码默认仍是 `local`，但 `prts-chat.cmd` 已设 `PRTS_SANDBOX_BACKEND=appcontainer`（2026-11-06：部署层已切、代码默认未改）。待评估：性能（`live-wiring` 实测 895ms / 995ms）、icacls 非管理员环境的失败回退
 - [ ] **`PRTS_STRICT_PLUGINS` 是否默认开**：现在默认只警告，设 1 才阻断启动
 - [ ] **`.rivet/` 是否入库**：`knowledge/` `plans/` `meridian.db` 等工具产物目前 untracked
   （`.rivet/artifacts|cache|checkpoints|scratch` 已忽略）
@@ -74,6 +74,10 @@
   作为 V1-01 插件机制的首个真实用例——它能把「可选功能插件化」从判据变成实践
 
 ## H. 已闭环（本会话）
+
+- [x] **沙箱三档 `/sandbox view|edit|full`**：confine → runner `--mode` → appcontainer 授 RX / RX,W，fs 侧守卫拒写删；`prts-chat.cmd` 切 `appcontainer`（`d3a7d80`）
+- [x] **工具活动推送 M3**：`attachToolFeed` 把 tools/execute·result 翻成 `type:'tool'` 推给客户端（`6b85a61`）；README 修正 local 后端档位语义（`861f69d`）
+- [x] 全量 **833 pass / 0 fail**，`tsc -p .` exit=0
 
 - [x] V1-14 4 项 / V1-06 3 项 / V1-15 2 项 / V1-09 7 项 → `scripts/verify-v1-acceptance.mjs` **16 项全 PASS**（`47ed24a`、`27a154e`）
 - [x] **V1-06 真实链路**：10 条对话 turn → `consolidateFacts` → 重启后 ≥9 可检索；含反证（stub 返回空则测试红）与解析失败不污染（`e86742c`）
