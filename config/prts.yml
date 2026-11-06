@@ -120,6 +120,13 @@
 - id: tools
   name: '@deepseek-ai/dsh-tools'
 
+# 工具执行器（0.2.2 起必须显式装配）：0.2.1 里执行器是 dsh-tools 的隐式部分，
+# 0.2.2 把它拆成独立 provider，缺了它每个真实回合都会以
+# TOOL_EXECUTOR_UNAVAILABLE 失败（不报启动错，只在跑 agent 时炸）。
+# native 直出可见能力；PTC 走 run_code + 生成 SDK，PRTS 不需要。
+- id: tool-executor-native
+  name: '@deepseek-ai/dsh-tool-executor-native'
+
 - id: mcp-resources
   name: '@deepseek-ai/dsh-mcp-resources'
 
