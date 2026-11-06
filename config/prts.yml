@@ -26,6 +26,12 @@
 - id: filesystem
   name: '@deepseek-ai/dsh-fs-local'
 
+# 写前必读：`write` 新建文件不限，但覆盖**会话没读过的已存在文件**会被拒（FS_NOT_OBSERVED），
+# `edit` 必须先读，读到旧版本后文件被改会报 FS_STALE_VERSION。不写任何代码，只听 `fs/*` 意图槽。
+# 装配位置是硬约束：backend → 本策略 → tool-fs，且本策略必须是 `fs/*` 槽的**第一个**裁决者。
+- id: fs-observation-policy
+  name: '@deepseek-ai/dsh-fs-observation-policy'
+
 - id: attachment-local
   name: '@deepseek-ai/dsh-attachment-local'
 
@@ -63,6 +69,14 @@
 
 - id: subprocess
   name: '@deepseek-ai/dsh-subprocess-local'
+
+# 文件发现：`glob` / `grep`（ripgrep 后端，包自带 @vscode/ripgrep）。依赖上面的 subprocess 后端。
+# `sampleOverCapGlobResults` 是必填项且无默认：false = 超 cap 时保留修改时间序的头部，
+# 不采样（采样会把不同目录的结果混在一起，对「找我刚改过的文件」这种用法是噪声）。
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
 
 - id: pty
   name: '@deepseek-ai/dsh-terminal'

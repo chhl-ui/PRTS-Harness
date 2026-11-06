@@ -58,7 +58,8 @@ test/           106 例；test/support/ 是驱动、脚本化模型替身、临�
 模型能调的工具 = DSH 插件提供的 + PRTS 自己注册的。下面只是索引，权威清单看代码：
 
 - **PRTS 自有工具**：经 `tools.register` 注册在 `src\runtime\start.ts` 与 `src\runtime\task-tools.ts`。起点是 `prts_task_create`——提一个 `draft` 任务，不能自己批准、不能自己激活；D2 在同一文件补齐 `prts_task_note` / `step_begin` / `step_end` / `add_evidence` / `claim_done`。权威清单：`grep -rn "name: 'prts_task_" src`，不要抄文档。
-- **DSH 插件工具**（`config\prts.yml`）：`read` / `read_image` / `write` / `edit`（`tool-fs`，经 K2a 守卫）、`working_directory`（只切会话 cwd，不产生能力）、`pwsh`（win32）/ `bash`（非 win32，两者互斥）。`pwsh`/`bash` 不归 K2a 也不归 E3——命令体内的写删识别不了，归 K2b。
+- **DSH 插件工具**（`config\prts.yml`）：`read` / `read_image` / `write` / `edit`（`tool-fs`，经 K2a 守卫）、`glob` / `grep`（`tool-fs-search`，ripgrep 后端，包自带二进制）、`working_directory`（只切会话 cwd，不产生能力）、`pwsh`（win32）/ `bash`（非 win32，两者互斥）。`pwsh`/`bash` 不归 K2a 也不归 E3——命令体内的写删识别不了，归 K2b。
+- **写前必读**（`dsh-fs-observation-policy`）：`write` 新建放行；覆盖**会话从未接触过的已存在文件**被拒（`FS_NOT_OBSERVED`）；`edit` 必须先读；读过之后文件被外部改动会报 `FS_STALE_VERSION`。注意「刚写成功的文件」也算已观察——同一会话写完立刻覆盖是允许的。回归：`test\runtime\fs-tools.test.ts`。
 - **模型侧不接受 actor 入参**：actor 在工具内部写死为 `{ kind: 'model', sessionId }`；账本里属于 owner/system 的固定通道（`verify` / `ownerAccept` / `ownerReject` / `setBudget` / `stopByOwner` / `resumeFromStop` / `chargeUsage` / `recoverOnStartup`）没有任何工具封装。工具面与授权层的逐条对应见 `AGENTS.md` 的「工具层接线事实」。
 
 ## 必须守住的不变量（细节见 AGENTS.md）

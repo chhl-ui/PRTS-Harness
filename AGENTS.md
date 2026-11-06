@@ -47,7 +47,7 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 
 ### 工具面 ↔ `MODEL_OPS`：谁能做什么，闸在哪一层
 
-- **注册点**：PRTS 自有工具经 `tools.register` 注册——`src\runtime\start.ts`（`prts_task_create`）与 `src\runtime\task-tools.ts`（D2 起收拢 `prts_task_*` 工具集）。权威清单是 `grep -rn "name: 'prts_task_" src`，不抄文档。其余工具全部来自 DSH 插件（`config\prts.yml`：`tool-fs` 的 `read`/`read_image`/`write`/`edit`、`working_directory`、`pwsh`（win32）/`bash`（非 win32，两者互斥））。
+- **注册点**：PRTS 自有工具经 `tools.register` 注册——`src\runtime\start.ts`（`prts_task_create`）与 `src\runtime\task-tools.ts`（D2 起收拢 `prts_task_*` 工具集）。权威清单是 `grep -rn "name: 'prts_task_" src`，不抄文档。其余工具全部来自 DSH 插件（`config\prts.yml`：`tool-fs` 的 `read`/`read_image`/`write`/`edit`、`tool-fs-search` 的 `glob`/`grep`、`working_directory`、`pwsh`（win32）/`bash`（非 win32，两者互斥））。`fs-observation-policy` 不是工具，是 `fs/*` 意图槽的第一个裁决者：`edit` 未读即拒（`FS_NOT_OBSERVED`），`write` 覆盖「会话从未接触过的已存在文件」被拒——注意写成功本身也会记录观察，同一会话写完再覆盖是允许的。
 - **actor 固定发生在工具内部**：`execute` 里写死 `{ kind: 'model', sessionId }`，`sessionId` 取 `exec.agent?.session?.id`；参数 schema 没有 actor 字段，模型无从传入。
 - **固定 actor 通道没有工具封装**：`verify` / `ownerAccept` / `ownerReject` / `setBudget` / `stopByOwner` / `resumeFromStop` / `chargeUsage` / `recoverOnStartup` 在工具面不存在入口，它们由库内常量 actor 驱动（`src\ledger\ledger.ts` 的 `OWNER` / `VERIFIER` / `BUDGET` / `STOP` / `RECOVERY`）。
 - **第二道闸在库层**：`MODEL_OPS`（`ledger.ts:121`）是 model actor 的白名单，`perm()`（`ledger.ts:304`）对 model 只放名单内的 op、其余抛 `FORBIDDEN`，对 `system` 一律 `FORBIDDEN`（system 只能走固定 actor 路径），owner 全放。名单外的方法即使日后被工具包起来，model 调用也会被库拒。
