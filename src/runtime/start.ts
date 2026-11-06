@@ -218,6 +218,13 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   memoryScheduler?: MemoryScheduler
   /** 本次实际生效的 shell 沙箱后端（`PRTS_SANDBOX_BACKEND` 的解析结果）。 */
   sandboxBackend: 'local' | 'appcontainer'
+  /**
+   * 会话对象的沙箱档位（owner 只读查询用）。
+   *
+   * 复用内部的 `resolveSandboxMode`：解析失败、服务缺失、会话缺失一律返回
+   * undefined，由调用方决定怎么表达「没有档位」——不在这里编一个默认值。
+   */
+  sandboxModeFor(session: unknown): string | undefined
   dispose(): Promise<void>
 }> {
   // 沙箱后端开关：默认仍是 dsh-sandbox-local（既有行为不变）。切到 appcontainer
@@ -1157,6 +1164,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     /** 后台巩固调度器（未启用时为 undefined）：诊断可读 stats()，测试可 runOnce()。 */
     memoryScheduler,
     sandboxBackend: backend,
+    sandboxModeFor: (session) => resolveSandboxMode(ctx, session),
     dispose: async () => {
       detachGuard()
       offPreExecute()

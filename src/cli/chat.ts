@@ -185,6 +185,13 @@ export interface ChatDeps {
    */
   draftTaskForSession?: (sessionId: string) => unknown
   /**
+   * 会话切换通知（`/switch` `/new`，两者共用 applySwitch）。
+   *
+   * `sessionId` 是 runChat 的局部可变量，切换会整体替换它；宿主（chat-serve 的只读查询）
+   * 要跟踪「当前是哪个会话」只能靠回调——启动时传进来的值是死的。
+   */
+  onSessionChange?: (sessionId: string) => void
+  /**
    * D2：模型文本增量分流口。只承载模型回复的 text-delta——审批提示、宿主命令
    * 回显、命令报错仍只走 out，两者不混。未提供时行为不变（out 照写）。
    */
@@ -747,6 +754,7 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
     deps.approvalBridge?.dropSession(sessionId)
     agent = next
     sessionId = target
+    deps.onSessionChange?.(target)
     // 上一条回复的中间态与旧日志 seq 都属于旧会话，不能带进新会话。
     streamed = ''
     attemptText = ''

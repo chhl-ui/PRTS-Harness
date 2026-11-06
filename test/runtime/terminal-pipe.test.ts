@@ -18,8 +18,10 @@ import { fileURLToPath } from 'node:url'
 import { startRuntime } from '../../src/runtime/start.ts'
 import { runChat, describeOpenTasks } from '../../src/cli/chat.ts'
 import { createTerminalServer, attachToolFeed } from '../../src/runtime/terminal-server.ts'
-import { ownerTermPipeName, pipeConnect, lineParser, encode } from '../../src/runtime/owner-protocol.ts'
-import type { OwnerPush } from '../../src/runtime/owner-protocol.ts'
+import { createOwnerQuery } from '../../src/runtime/owner-query.ts'
+import { ownerTermPipeName, pipeConnect, lineParser, encode, queryErrorPush } from '../../src/runtime/owner-protocol.ts'
+import type { OwnerPush, QueryRequest, QueryResultPush } from '../../src/runtime/owner-protocol.ts'
+import type { QueryAgentRegistry } from '../../src/runtime/owner-query.ts'
 import { scriptedLlmPlugin } from '../support/scripted-llm.ts'
 import { prtsYml, PATCHES } from '../support/composition.ts'
 import type { ScriptedStep } from '../support/scripted-llm.ts'
@@ -43,7 +45,14 @@ async function rig(dataRoot: string, ws: string, script: ScriptedStep[]): Promis
   mkdirSync(dataRoot, { recursive: true })
   mkdirSync(ws, { recursive: true })
   const pipeName = ownerTermPipeName()
-  const term = createTerminalServer(pipeName)
+  // 与 chat-serve 同构：处理器在 runtime 就绪之前一律回 unavailable，而不是回 error——
+  // 客户端把无 id 的 error 判成「服务端不支持 query」并永久停用。
+  let handleQuery: ((req: QueryRequest) => Promise<QueryResultPush>) | undefined
+  const term = createTerminalServer(pipeName, {
+    onQuery: (req) => handleQuery === undefined
+      ? Promise.resolve(queryErrorPush(req.id, req.what, 'unavailable', '运行时尚未就绪'))
+      : handleQuery(req),
+  })
   const app = await startRuntime({
     configPath: prtsYml,
     dataRoot,
@@ -52,6 +61,17 @@ async function rig(dataRoot: string, ws: string, script: ScriptedStep[]): Promis
     patches: PATCHES,
   })
   scriptedLlmPlugin(script).apply(app.ctx as Context)
+  // 与 chat-serve 同构：处理器在 runtime 起来后绑定。当前会话可变（`/switch` `/new`），
+  // 所以传取值函数而不是字符串。
+  const currentSessionId = 'pipe-test-session'
+  handleQuery = createOwnerQuery({
+    ledger: app.ledger,
+    memory: app.memory,
+    sessionsRoot: join(dataRoot, 'dsh-home', 'sessions'),
+    agents: app.ctx.get('agents') as QueryAgentRegistry | undefined,
+    currentSessionId: () => currentSessionId,
+    sandboxModeFor: app.sandboxModeFor,
+  })
   // 与 chat-serve.ts 同构：工具活动推送经 attachToolFeed 上通道。
   const detachFeed = attachToolFeed(app.ctx, term)
 
@@ -409,6 +429,111 @@ test('⑧ 断开重连：同一 runtime 下第二个客户端继续对话，agen
     term.close()
     await serve.catch(() => 0)
     await app.dispose()
+    t.cleanup()
+  }
+})
+
+test('⑩ 只读查询：tasks / sessions / intents / sandbox 的形状与当前会话绑定', { timeout: 180000 }, async () => {
+  const t = makeTmp('pipe-query-')
+  const dataRoot = join(t.dir, 'data')
+  const ws = join(t.dir, 'ws')
+  const r = await rig(dataRoot, ws, [{ text: '收到。' }])
+  const c = await connect(r.pipeName)
+  try {
+    await c.waitFor((p) => p.type === 'status')
+    // 先聊一轮：agent 建好之后 sandbox 才解析得到档位（查询本身不建 agent）。
+    c.send({ type: 'prompt', text: '你好' })
+    await c.waitFor((p) => p.type === 'event' && p.kind === 'turn-end')
+
+    c.send({ type: 'query', id: 'q-tasks', what: 'tasks' })
+    const tasks = await c.waitFor((p) => p.type === 'query.result' && p.id === 'q-tasks') as unknown as
+      { ok: boolean; data: { currentSessionId: string; boundTaskId: string | null; tasks: unknown[] } }
+    assert.equal(tasks.ok, true, 'tasks 查询应成功')
+    assert.equal(tasks.data.currentSessionId, 'pipe-test-session')
+    assert.equal(tasks.data.boundTaskId, null, '未绑定任务时 boundTaskId 应为 null')
+    assert.ok(Array.isArray(tasks.data.tasks), 'tasks 应是数组（空账本也给 []）')
+
+    c.send({ type: 'query', id: 'q-sessions', what: 'sessions' })
+    const sessions = await c.waitFor((p) => p.type === 'query.result' && p.id === 'q-sessions') as unknown as
+      { ok: boolean; data: { currentSessionId: string; sessions: Array<{ sessionId: string; live: boolean }> } }
+    assert.equal(sessions.data.currentSessionId, 'pipe-test-session')
+    assert.ok(
+      sessions.data.sessions.some((s) => s.sessionId === 'pipe-test-session' && s.live),
+      '当前会话应作为 live 会话出现在表里',
+    )
+
+    c.send({ type: 'query', id: 'q-intents', what: 'intents' })
+    const intents = await c.waitFor((p) => p.type === 'query.result' && p.id === 'q-intents') as unknown as
+      { ok: boolean; data: { intents: unknown[] } }
+    assert.equal(intents.ok, true)
+    assert.ok(Array.isArray(intents.data.intents))
+
+    c.send({ type: 'query', id: 'q-sandbox', what: 'sandbox' })
+    const sandbox = await c.waitFor((p) => p.type === 'query.result' && p.id === 'q-sandbox') as unknown as
+      { ok: boolean; data: { mode: string | null } }
+    assert.equal(sandbox.ok, true)
+    // 拿不到档位时必须是 null 而不是缺字段——客户端要能区分「没有档位」与「响应残缺」。
+    assert.ok('mode' in sandbox.data, 'sandbox 响应必须带 mode 字段（无档位时为 null）')
+  } finally {
+    c.end()
+    await r.close()
+    t.cleanup()
+  }
+})
+
+test('⑪ 查询的拒绝路径与相位：未知 what / memory 缺 query / 审批期可查且不推 status', { timeout: 180000 }, async () => {
+  const t = makeTmp('pipe-query-neg-')
+  const dataRoot = join(t.dir, 'data')
+  const ws = join(t.dir, 'ws')
+  const r = await rig(dataRoot, ws, [{ text: 'ok' }])
+  const c = await connect(r.pipeName)
+  try {
+    await c.waitFor((p) => p.type === 'status')
+
+    // 未知 what：回 query.result 且带 id。回无 id 的 error 会让客户端判成
+    // 「服务端不支持 query」并在本次连接内永久停用——字段写错不该放大成链路不可用。
+    c.send({ type: 'query', id: 'q-bad', what: 'nope' })
+    const bad = await c.waitFor((p) => p.type === 'query.result' && p.id === 'q-bad') as unknown as
+      { ok: boolean; error: { code: string } }
+    assert.equal(bad.ok, false)
+    assert.equal(bad.error.code, 'bad-request')
+
+    c.send({ type: 'query', id: 'q-mem', what: 'memory' })
+    const mem = await c.waitFor((p) => p.type === 'query.result' && p.id === 'q-mem') as unknown as
+      { ok: boolean; error: { code: string } }
+    assert.equal(mem.error.code, 'bad-request', 'what=memory 缺 args.query 应回 bad-request')
+
+    // 审批期可查：查询走旁路，不经过 runChat 的输入迭代器。
+    const asked = r.term.requestApproval({
+      callId: 'call-q', tool: 'write', capabilities: ['fs.write:C:\\outside'], reason: 'query-during-approval',
+    })
+    await c.waitFor((p) => p.type === 'approval.request' && p.callId === 'call-q')
+    // 基线在进入审批态之后采：requestApproval 自己会推一条 status，算进去会误判。
+    const statusBefore = c.pushes.filter((p) => p.type === 'status').length
+    c.send({ type: 'query', id: 'q-during', what: 'tasks' })
+    const during = await c.waitFor((p) => p.type === 'query.result' && p.id === 'q-during') as unknown as { ok: boolean }
+    assert.equal(during.ok, true, '审批期也必须能查询')
+
+    await new Promise((res) => setTimeout(res, 200))
+    assert.equal(
+      c.pushes.filter((p) => p.type === 'status').length,
+      statusBefore,
+      '查询不该推 status',
+    )
+    c.send({ type: 'status' })
+    await new Promise((res) => setTimeout(res, 200))
+    const statuses = c.pushes.filter((p) => p.type === 'status')
+    assert.equal(
+      (statuses[statuses.length - 1] as unknown as { phase: string }).phase,
+      'awaiting-approval',
+      '查询不该改变相位',
+    )
+
+    c.send({ type: 'approval.answer', callId: 'call-q', allow: false })
+    assert.equal(await asked, false)
+  } finally {
+    c.end()
+    await r.close()
     t.cleanup()
   }
 })

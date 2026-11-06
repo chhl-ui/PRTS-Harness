@@ -25,8 +25,11 @@ import { join } from 'node:path'
 import { loadApiKey } from './secret.ts'
 import { startRuntime } from '../runtime/start.ts'
 import { runChat, describeOpenTasks } from './chat.ts'
-import { OWNER_ENDPOINT_FILE, ownerTermPipeName } from '../runtime/owner-protocol.ts'
+import { OWNER_ENDPOINT_FILE, ownerTermPipeName, queryErrorPush } from '../runtime/owner-protocol.ts'
+import type { QueryRequest, QueryResultPush } from '../runtime/owner-protocol.ts'
 import { createTerminalServer, attachToolFeed } from '../runtime/terminal-server.ts'
+import { createOwnerQuery } from '../runtime/owner-query.ts'
+import type { QueryAgentRegistry } from '../runtime/owner-query.ts'
 
 const dataRoot = process.env.PRTS_DATA_ROOT
 const workspace = process.env.PRTS_WORKSPACE
@@ -50,7 +53,14 @@ const tmpPath = `${endpointPath}.tmp`
 const pipeName = ownerTermPipeName()
 
 // 1) 先监听。listen 失败（如偶然撞名）直接抛错退出——不重试到悄悄改名。
-const term = createTerminalServer(pipeName)
+// 只读查询的处理器要等 runtime 起来才有数据源，所以先留槽：就绪前一律回
+// unavailable（不是 error——客户端会把无 id 的 error 判成「不支持 query」并永久停用）。
+let handleQuery: ((req: QueryRequest) => Promise<QueryResultPush>) | undefined
+const term = createTerminalServer(pipeName, {
+  onQuery: (req) => handleQuery === undefined
+    ? Promise.resolve(queryErrorPush(req.id, req.what, 'unavailable', '运行时尚未就绪'))
+    : handleQuery(req),
+})
 
 // 2) 再原子发布。写 .tmp 再 rename，读方要么看不到文件、要么看到完整内容。
 mkdirSync(dataRoot, { recursive: true })
@@ -73,6 +83,18 @@ const detachToolFeed = attachToolFeed(app.ctx, term)
 
 // 服务端会话 id 固定：重连沿用同一个会话与 agent，而不是每次连上都开新会话。
 const serveSessionId = process.env.PRTS_SESSION_ID ?? `prts-serve-${process.pid}`
+// 只读查询（桌面端任务 / 会话 / 记忆 / 意图页）：处理器与 terminal-pipe 的 rig 共用
+// 同一实现（owner-query.ts）——「测试与入口同构」靠共用代码保证，不靠两边对齐。
+// 当前会话可变（`/switch` `/new` 经 runChat 回调），所以传取值函数而不是值。
+let currentSessionId = serveSessionId
+handleQuery = createOwnerQuery({
+  ledger: app.ledger,
+  memory: app.memory,
+  sessionsRoot: join(dataRoot, 'dsh-home', 'sessions'),
+  agents: app.ctx.get('agents') as QueryAgentRegistry | undefined,
+  currentSessionId: () => currentSessionId,
+  sandboxModeFor: app.sandboxModeFor,
+})
 // 进程信号才整体退出；客户端断开不是退出理由（客户端寿命与运行时寿命解耦）。
 process.on('SIGINT', () => term.close())
 process.on('SIGTERM', () => term.close())
@@ -96,6 +118,8 @@ try {
       authority: app.authority,
       approvalBridge: app.approvalBridge,
       draftTaskForSession: app.draftTaskForSession,
+      // 只读查询的 boundTaskId 要跟着当前会话走。
+      onSessionChange: (id) => { currentSessionId = id },
       // Wave 3 分派器：/dispatch 用。worker 与主会话同一 provider/model（与
       // start.ts 的 createSubtaskTool 取法一致），派生目录落在 workspace 下。
       dispatch: {

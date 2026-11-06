@@ -47,7 +47,33 @@ export interface StatusRequest {
   type: 'status'
 }
 
-export type OwnerRequest = PromptRequest | ApprovalAnswerRequest | StatusRequest
+/**
+ * 只读查询（桌面端任务 / 会话 / 记忆 / 意图页面的数据源）。
+ *
+ * 只读是硬边界：查询不写账本、不写会话事件、不落记忆 turn、不进审计；所有写操作
+ * （验收、驳回、取消、批准、切档、遗忘、更正、切会话）继续走 `/` 命令，owner 通道的
+ * 写路径与审计链原样不动。
+ *
+ * `id` 由客户端生成、响应原样带回——管道上没有请求-响应配对关系，靠它区分
+ * 「这一条结果对应哪一次查询」。
+ */
+export interface QueryRequest {
+  type: 'query'
+  id: string
+  what: QueryWhat
+  args?: QueryArgs
+}
+
+export type QueryWhat = 'tasks' | 'sessions' | 'intents' | 'memory' | 'sandbox'
+
+export interface QueryArgs {
+  /** `what='memory'` 必填：检索词。 */
+  query?: string
+  /** `what='intents'`：true = 含已触发 / 已取消（缺省只看 pending）。 */
+  all?: boolean
+}
+
+export type OwnerRequest = PromptRequest | ApprovalAnswerRequest | StatusRequest | QueryRequest
 
 // ---------------------------------------------------------------- 推送（服务端 → 客户端）
 
@@ -78,6 +104,21 @@ export interface StatusPush {
   type: 'status'
   phase: OwnerPhase
 }
+
+/**
+ * 只读查询的回执。
+ *
+ * `bad-request` 包含「`what` 未知」与「`memory` 缺 `query`」；它走 `query.result`
+ * 而不是 `error`，是因为客户端按 id 配对结果——收到没有 id 的 `error` 会判成
+ * 「服务端不支持 query」并在本次连接内永久停用查询，那会把一个字段打错
+ * 变成整条链路不可用。`unavailable` = 对应数据源未配置（没有 ledger、记忆库打不开）。
+ * `internal` = 查询处理器自身抛错。
+ */
+export type QueryErrorCode = 'bad-request' | 'unavailable' | 'internal'
+
+export type QueryResultPush =
+  | { type: 'query.result'; id: string; what: string; ok: true; data: unknown }
+  | { type: 'query.result'; id: string; what: string; ok: false; error: { code: QueryErrorCode; message: string } }
 
 /**
  * `stale-approval` —— 应答的 callId 与 pending 不符，或当前根本没有待审批请求（不结算）；
@@ -113,7 +154,7 @@ export interface ToolPush {
   isError?: boolean
 }
 
-export type OwnerPush = EventPush | ApprovalRequestPush | StatusPush | ErrorPush | ToolPush
+export type OwnerPush = EventPush | ApprovalRequestPush | StatusPush | ErrorPush | ToolPush | QueryResultPush
 
 // ---------------------------------------------------------------- 推送构造器
 
@@ -148,6 +189,19 @@ export function errorPush(code: OwnerErrorCode, message: string): ErrorPush {
   return { type: 'error', code, message }
 }
 
+export function queryResultPush(id: string, what: string, data: unknown): QueryResultPush {
+  return { type: 'query.result', id, what, ok: true, data }
+}
+
+export function queryErrorPush(
+  id: string,
+  what: string,
+  code: QueryErrorCode,
+  message: string,
+): QueryResultPush {
+  return { type: 'query.result', id, what, ok: false, error: { code, message } }
+}
+
 // ---------------------------------------------------------------- 入站校验
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -169,6 +223,23 @@ export function decodeOwnerRequest(msg: unknown): OwnerRequest | null {
         : null
     case 'status':
       return { type: 'status' }
+    case 'query': {
+      if (typeof msg.id !== 'string' || msg.id === '') return null
+      if (typeof msg.what !== 'string' || msg.what === '') return null
+      const rawArgs = isObject(msg.args) ? msg.args : undefined
+      const args: QueryArgs = {}
+      if (typeof rawArgs?.query === 'string') args.query = rawArgs.query
+      if (typeof rawArgs?.all === 'boolean') args.all = rawArgs.all
+      // `what` 只校验「是非空字符串」，合法性交给服务端处理器回 `bad-request`——
+      // 解码层返回 null 会让调用方回无 id 的 `error`，客户端据此判成
+      // 「服务端不支持 query」并永久停用（见 QueryResultPush 注释）。
+      return {
+        type: 'query',
+        id: msg.id,
+        what: msg.what as QueryWhat,
+        ...(Object.keys(args).length === 0 ? {} : { args }),
+      }
+    }
     default:
       return null
   }

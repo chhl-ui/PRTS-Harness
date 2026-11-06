@@ -44,10 +44,11 @@ import {
   eventPush,
   lineParser,
   listenPipe,
+  queryErrorPush,
   statusPush,
   toolPush,
 } from './owner-protocol.ts'
-import type { OwnerPhase, OwnerPush } from './owner-protocol.ts'
+import type { OwnerPhase, OwnerPush, QueryRequest, QueryResultPush } from './owner-protocol.ts'
 
 export interface ApprovalAskInfo {
   callId: string
@@ -89,7 +90,22 @@ export interface TerminalServer {
   close(): void
 }
 
-export function createTerminalServer(pipeName: string): TerminalServer {
+export interface TerminalServerOptions {
+  /**
+   * 只读查询处理器。
+   *
+   * 未注入时一切 `query` 回 `unavailable`——**而不是回 `error`**：客户端把无 id 的
+   * `error{bad-request}` 判成「服务端不支持 query」并永久停用，回 `error` 会把
+   * 「这一版没开查询」误报成协议不支持。处理器抛错由本层兜成 `internal`，
+   * 一个查询不能把管道带崩。
+   */
+  onQuery?: (req: QueryRequest) => Promise<QueryResultPush>
+}
+
+export function createTerminalServer(
+  pipeName: string,
+  options: TerminalServerOptions = {},
+): TerminalServer {
   let closed = false
   let client: Socket | undefined
   let current: Connection | undefined
@@ -170,6 +186,21 @@ export function createTerminalServer(pipeName: string): TerminalServer {
     }
     if (req.type === 'status') {
       push(statusPush(phase))
+      return
+    }
+    if (req.type === 'query') {
+      // 查询走旁路：不进 runChat 的输入迭代器，所以**任何相位都可查**（含
+      // awaiting-approval），也不改 phase、不推 status——它是观测，不是对话。
+      const handle = options.onQuery
+      if (handle === undefined) {
+        push(queryErrorPush(req.id, req.what, 'unavailable', '本服务端未启用只读查询'))
+        return
+      }
+      void handle(req).then(
+        (res) => push(res),
+        (error) => push(queryErrorPush(req.id, req.what, 'internal',
+          error instanceof Error ? error.message : String(error))),
+      )
       return
     }
     if (req.type === 'approval.answer') {
