@@ -92,7 +92,7 @@ test/           106 例；test/support/ 是驱动、脚本化模型替身、临�
 - **`/sandbox <view|edit|full>`**（owner 命令，`src\cli\chat.ts` 的 `runSandbox`）：映射上游 `dsh-sandbox-policy` 三档 `read-only` / `workspace-write` / `danger-full-access`，写 `sandbox/mode` 会话事件（per-session、随会话日志回放重建），部署默认仍是 `workspace-write`。切档会先 kill 活 PTY——持久 pwsh 只在起 shell 时 confine 一次，不换 shell 档位不生效。
   - `view`：fs 侧由 `tools.guard` 直接拒 `fs.write:`/`fs.delete:`（`src\runtime\start.ts` 的 `resolveSandboxMode`）；shell 侧由 runner `--mode read-only` 只授 `(OI)(CI)(RX)`——此前 read-only 与 workspace-write 同构、容器仍授写，2026-11-06 收紧才名副其实。
   - `full`：上游 `spawnArgv` 绕过 confine，shell 不进容器；fs 仍走 K2a 授权，档位不绕过 owner 审批。
-  - 后端差异：`local` 后端（WRITE_RESTRICTED token）连工作区都写不了，三档在 shell 侧无差别；要真正区分需 `PRTS_SANDBOX_BACKEND=appcontainer`（`prts-chat.cmd` 已设）。
+  - 后端差异：两个后端都消费 `--mode`——`local` 走上游 `dsh-sandbox-local`（`lib/index.js:34/322/359` 按 `policy.mode` 选 runner 与授权，Windows 上再委托 `dsh-sandbox-windows-acl` 的 runner，其 `lib/runner.js:144` 在 read-only 时 `writableDirs: []`）；`appcontainer` 走本仓 runner → `appcontainer.ts:352` 授 `(OI)(CI)(RX,W)` 或 `(OI)(CI)(RX)`。前者在本机实测下连 workspace-write 档都写不了工作区（见下条「已知限制」），所以实际能拿到 workspace 写权限的是 appcontainer 后端（`prts-chat.cmd` 已设）。
 - **工具活动推送（M3）**：`attachToolFeed`（`src\runtime\terminal-server.ts`）把 `tools/execute`/`tools/result` 翻成 `type:'tool'` 推送（call 带参数截断，result 只在出错时带错误摘要）；`chat:remote` 与桌面客户端据此渲染活动流水。纯观测，绝不否决工具执行。
 
 ## 已知限制
