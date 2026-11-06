@@ -9,26 +9,33 @@
 
 | 项 | 值 | 证据 |
 |---|---|---|
-| HEAD | `9db6320` | `git log --oneline -1` |
-| 全量测试 | **847 pass / 0 fail**（见下方 flaky 说明） | 第 2 次全量跑 |
+| HEAD | `9db6320` 之后 | `git log --oneline -1` |
+| 全量测试 | **848 pass / 0 fail × 5 连跑** | `/tmp/flaky-1..5.log` |
 | typecheck | `tsc -p .` exit 0 | `/tmp/final-tc.log` |
 | 工作树 | tracked 干净；untracked 只有 `.rivet/`（工具产物） | `git status --short` |
 
 测试命令：`node --disable-warning=ExperimentalWarning --test "test/**/*.test.ts" > /tmp/all.log 2>&1; echo "TEST_EXIT=$?"`。
 
-### ⚠️ 已知 flaky：DP5（不要当成「全绿」）
+### DP5 flaky：已定位并修复（2026-11-06）
 
-`test/runtime/dispatcher.test.ts:185` 的 **DP5 摘要归属**在全量并发下偶发失败：
+`test/runtime/dispatcher.test.ts` 的 **DP5 摘要归属**曾在全量并发下偶发失败
+（`r[1].summary` 得 `''`，期望 `'摘要 d2'`；修复前 2 次全量里 1 次红）。
 
-| 跑法 | 结果 |
-|---|---|
-| 全量第 1 次 | **846/847**，DP5 红（`r[1].summary` 得 `''`，期望 `'摘要 d2'`） |
-| 全量第 2 次 | 847/847 绿 |
-| 单文件 `dispatcher.test.ts` | 6/6 绿 |
+**根因**（探针实测，不是推断）：`waitIdle`（`src/cli/chat.ts:114`）有约 **410ms 的固定下限**——
+`setTimeout(150)` 起步 → 循环里 `Date.now()-t0 > 200` 才肯相信 idle → 再加 50ms 轮询粒度，
+实测单次 **411–414ms**。而 `env()` 给的是 `timeoutMs: 600`，**余量只有 ~190ms**。
+全量并行时 setTimeout 抖动越界 → `waitIdle` 返回 false → `spawnSubtask` 抛
+「未在时限内收敛」→ `runOne` 的 catch 返回 `summary: ''`。DP5 只断言 summary，
+所以症状表现为「摘要归属错了」，把真正的「超时」藏了起来。
 
-**未定位根因。** 方向：`spawnSubtask` 读子会话摘要是**轮询落盘**（3s 上限），全量高并发时
-落盘可见性可能晚于状态推进——与记忆里 `dsh-session-persistence` 那条同族
-（「DSH public status 在任务结算前就可能停在 idle」）。下一次再红按这条查，不要直接重跑当没发生。
+**修复**（`test/runtime/dispatcher.test.ts`）：
+
+1. `env()` 的 `timeoutMs` 600 → **2000**（余量 190ms → ~1590ms）；
+2. DP5 补 `ok` 断言，失败时把 `error` 打出来——下次再红能直接看到原因；
+3. 新增 **DP7**：钉住「分派预算必须覆盖 waitIdle 的 ~410ms 下限（≥1500ms）」，
+   防止将来又被调回贴着下限的值。
+
+**注意**：`waitIdle` 是 PRTS 自己的代码，**DSH 升级到 0.2.2-rc.1 不会修掉这个 flaky**。
 
 ---
 
@@ -103,5 +110,5 @@ npm run typecheck
 for i in 1 2 3; do node --disable-warning=ExperimentalWarning --test "test/**/*.test.ts" > /tmp/t$i.log 2>&1; echo "run $i exit=$?"; grep -E "^ℹ (tests|pass|fail)" /tmp/t$i.log; done
 ```
 
-期望：typecheck 0 错误；全量 **847 左右**。**如果 DP5 再红，不要当噪声**——按 §一的 flaky 方向
-（`spawnSubtask` 摘要轮询 vs 落盘可见性）定位，别直接重跑。
+期望：typecheck 0 错误；全量 **848 左右**。DP5 已定位并修复（见 §一）。
+若它再红，读 DP5 的 `ok` 断言输出——现在会把 `error` 打出来，不用再猜。

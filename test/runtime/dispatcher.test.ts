@@ -108,7 +108,9 @@ function env(opts: { barrier?: boolean; failTaskIds?: Set<string> } = {}) {
       parentSessionId: 'main-1',
       provider: 'p',
       model: 'm',
-      timeoutMs: 600,
+      // 2000ms 而不是 600：`waitIdle` 有约 410ms 的固定下限（见 DP7），
+      // 600ms 只留 190ms 余量——全量并行时 setTimeout 抖动越界，DP5 会偶发 summary 空。
+      timeoutMs: 2000,
     },
     cleanup() { auth.close(); t.cleanup() },
   }
@@ -191,7 +193,9 @@ test('DP5 摘要归属：每个结果只带自己会话的摘要', async () => {
       { task: 'a', taskId: 'd1' },
       { task: 'b', taskId: 'd2' },
     ], { concurrency: 2 })
+    assert.equal(r[0]!.ok, true, `worker d1 应成功：${r[0]!.ok ? '' : r[0]!.error ?? ''}`)
     assert.equal(r[0]!.summary, '摘要 d1')
+    assert.equal(r[1]!.ok, true, `worker d2 应成功：${r[1]!.ok ? '' : r[1]!.error ?? ''}`)
     assert.equal(r[1]!.summary, '摘要 d2')
   } finally { e.cleanup() }
 })
@@ -202,4 +206,26 @@ test('DP6 planDispatch 为未给 taskId 的任务分配确定的 id', () => {
   assert.match(p.tasks[0]!.taskId, /^[A-Za-z0-9_-]{1,64}$/)
   assert.notEqual(p.tasks[0]!.taskId, p.tasks[1]!.taskId, '自动 id 不得重复')
   assert.equal(p.concurrency, 3, '默认并发 3')
+})
+
+test('DP7 分派预算必须覆盖 waitIdle 的固定下限', () => {
+  // `waitIdle`（`src/cli/chat.ts:114`）的实现有约 410ms 的**固定下限**，与本测试的
+  // fake agent 快慢无关：`setTimeout(150)` 起步 → 循环里 `Date.now()-t0 > 200` 才肯
+  // 相信 idle → 50ms 轮询粒度。实测（.rivet 探针）单次 411–414ms。
+  //
+  // 若 env() 的 timeoutMs 贴着这个下限，全量并行时 setTimeout 抖动会把它推过预算 →
+  // waitIdle 返回 false → spawnSubtask 抛「未在时限内收敛」→ runOne 的 catch 返回
+  // `summary: ''`。DP5 的症状（摘要归属错）就是这么来的：它只断言 summary，
+  // 失败时看不出真正的错误是「超时」。
+  //
+  // 修复前这里是 600ms（余量 190ms）；本用例把下限钉住，防止将来又被调回去。
+  const e = env()
+  try {
+    const budget = e.deps.timeoutMs
+    assert.ok(
+      typeof budget === 'number' && budget >= 1500,
+      `分派预算 ${String(budget)}ms 覆盖不了 waitIdle 的 ~410ms 下限，`
+      + '全量并行下会偶发 summary 空（DP5 的失败形态）',
+    )
+  } finally { e.cleanup() }
 })
