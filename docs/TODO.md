@@ -47,6 +47,9 @@
 - [ ] **V1-08 上下文**：超模型窗口 3 倍仍答对开头 5 个约束；跨天新会话说出未完成事项（成本最高）
 - [ ] **V1-06 的提炼质量**：链路已验（`e86742c`），但用的是 stub generator；真实模型抽得准不准未验
   （要真实模型 + 标注集，属 LongMemEval 的 fact 抽取范畴）
+- [ ] **V1-05 的接线未单独验**：`startRuntime` 里 `onReport` 那 3 行靠 tsc + 代码审阅
+  （`error-report.ts:124` 明确调 `options.onReport?.(entry)`），**没写 live 测试**——
+  `ctx.events.emit` 的 API 名未确认，不猜。按 V1-07 的教训，这条应该补上
 
 ## D. 冻结
 
@@ -57,6 +60,8 @@
 - [ ] **K2b 默认后端是否切 `appcontainer`**：现状默认 `local`（exec 无文件系统边界）；切了有 OS 边界，
   但要评估性能、icacls 非管理员环境的失败回退。README 已如实写明现状，不是隐瞒
 - [ ] **`PRTS_STRICT_PLUGINS` 是否默认开**：现在默认只警告，设 1 才阻断启动
+- [ ] **`.rivet/` 是否入库**：`knowledge/` `plans/` `meridian.db` 等工具产物目前 untracked
+  （`.rivet/artifacts|cache|checkpoints|scratch` 已忽略）
 
 ## F. 需外部条件
 
