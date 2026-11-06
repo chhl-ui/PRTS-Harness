@@ -72,6 +72,16 @@
 
 ## H. 已闭环（本会话）
 
+- [x] **桌面端二级页面读通道**（`a39a545` + 桌面仓 `c651b3b`）：所有者通道 `query` 协议实装
+  （`owner-protocol` 词表 / `owner-query` 取数层 / `terminal-server` 旁路注入点 / `chat-serve`
+  延迟绑定）。tasks / sessions / intents / memory / sandbox 五类；未知 `what` 回 `query.result`
+  而不是 `error`（无 id 的 error 会让客户端永久停用查询）。回归 `test\runtime\terminal-pipe.test.ts` ⑩⑪。
+- [x] **glob / grep + 写前必读**（`9db6320`）：补 `dsh-tool-fs-search`（ripgrep）与
+  `dsh-fs-observation-policy`。两个坑记在这里：① 只装 JS 时启动不报错、首次调用才失败，
+  必须同时装 `@vscode/ripgrep-win32-x64`（optionalDependency）；② 写前必读的实际语义是「写成功
+  也算已观察」，同一会话写完立刻覆盖是允许的，只有从未接触过的文件才被拒。回归
+  `test\runtime\fs-tools.test.ts`（F1/F2，含 `disabled: true` 反证）。
+
 - [x] **V1-05 接线段 live 测试**：`test/runtime/emotion-wiring.test.ts` 用真实 `startRuntime` +
   空脚本 LLM 制造 `agent/error`（`dsh-agent-loop` 的 `throwError()` emit，`:880`），断言
   EmotionStore 落盘「受挫」；E3 连续两轮失败 `revision` 仍为 1（节流是单实例，不是每轮新建）。
