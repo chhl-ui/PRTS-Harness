@@ -11,7 +11,7 @@
  * - 同文件 `:1026`：`turn()` 的 catch 在 turn 内任何失败后调用 `throwError`
  *
  * 失败构造：`scriptedLlmPlugin([])` 的 stream 在脚本耗尽时 throw
- * （`test/support/scripted-llm.ts:37`），第一次模型调用即失败 → 进 turn catch。
+ * （`test/support/scripted-llm.ts:41`），第一次模型调用即失败 → 进 turn catch。
  *
  * 基线（摘掉 `start.ts:1142` 的 `onReport` 时）：E2 红——emotion 库文件存在但状态为空。
  */
