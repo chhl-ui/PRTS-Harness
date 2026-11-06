@@ -104,3 +104,22 @@
 - [x] 回合超时可配 + 空回复不静默（`b847439`）；启动报错指名插件（`c7c1dc5`）
 - [x] V1-16 装配延迟 p95 1610→815ms（`2d6a4e0`）；V1-12 导出导入（`f116399`）
 - [x] 向量重排否决（45.0%→40.0%，`dc058a0`）；S10 根因定位（`eef25fe`）
+
+## I. 工具链事实（DSH 升级必读）
+
+2026-11-06 从 `0.2.1-rc.2` 升到 `0.2.2-rc.1` 实测出的三条，下次升级会重踩：
+
+1. **cordis 生态必须同升**：dsh 全线要求 `cordis@~4.1.0`，而旧的
+   `cordis-plugin-include@1.0.10` / `cordis-plugin-timer@1.1.7` 要 `~4.0.5`。
+   实测同升到 include `1.1.0` + timer `1.2.0` 才解冲突（cordis 4.1.0 与
+   loader 1.1.0 随传递依赖上来）。
+2. **tool executor 被拆成独立 provider**：0.2.1 里它是 `dsh-tools` 的隐式部分，
+   0.2.2 缺它则**启动不报错**、跑第一个真实回合才以 `TOOL_EXECUTOR_UNAVAILABLE`
+   失败（第一次全量 46 个测试全红、3 次完全一致）。`config\prts.yml` 的 `tools`
+   之后必须装配 `@deepseek-ai/dsh-tool-executor-native`（PTC 走 `run_code`，PRTS 不用）。
+3. **旧 lock 与已装 node_modules 会挡住解析**：npm 拿 lock 里的旧树当基线，
+   `npm install` 与 `--package-lock-only` 都会报 peer 冲突。必须把旧 lock 与
+   node_modules 移开，从 `package.json` 全新解析。
+
+升级后的验证基线：全量 **848 pass / 0 fail × 3**、`tsc` exit 0、不带 `--force`
+的 `npm install` 也 exit 0（新 lock 自洽）。

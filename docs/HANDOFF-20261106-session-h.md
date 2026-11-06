@@ -9,8 +9,9 @@
 
 | 项 | 值 | 证据 |
 |---|---|---|
-| HEAD | `9db6320` 之后 | `git log --oneline -1` |
-| 全量测试 | **848 pass / 0 fail × 5 连跑** | `/tmp/flaky-1..5.log` |
+| HEAD | `5fd8908`（DSH 升级） | `git log --oneline -1` |
+| 全量测试 | **848 pass / 0 fail × 3 连跑** | `/tmp/up2-1..3.log` |
+| 依赖 | DSH 全线 **0.2.2-rc.1**（含 cordis 4.1.0 / include 1.1.0 / timer 1.2.0） | `package.json` |
 | typecheck | `tsc -p .` exit 0 | `/tmp/final-tc.log` |
 | 工作树 | tracked 干净；untracked 只有 `.rivet/`（工具产物） | `git status --short` |
 
@@ -85,6 +86,19 @@
 向量重排被数据否决（`dc058a0`，45.0%→40.0%）；S10 空回复根因 `waitIdle` 120s 超时
 （`eef25fe`）；回合超时可配且不 push 空串（`b847439`）；embedding 换 llama.cpp CPU
 （`9f218ae`）；`/sandbox` 三档（`d3a7d80`）；工具活动推送 M3（`6b85a61`）。
+
+### 5. DSH 升到 0.2.2-rc.1（`5fd8908`）
+
+**不是改版本号，是一次小型迁移**，三条实测成本记在 `docs\TODO.md` §I：
+
+- cordis 生态必须同升（include 1.1.0 / timer 1.2.0 / cordis 4.1.0）
+- **tool executor 拆成独立 provider**：缺它则启动不报错、第一个真实回合才以
+  `TOOL_EXECUTOR_UNAVAILABLE` 失败（第一次全量 46 个测试全红，3 次完全一致）
+- 旧 lock 与已装 node_modules 会挡住 npm 解析，必须移开重新解析
+
+收益是 0.2.2 的几条运行时修复（上下文前缀缓存复用、普通会话不再被误判为子智能体、
+预设切换后委派工具缺失、sdk-minimal 恢复记录、`~` 路径展开等），但**大头是 DSH
+自己的 GUI**，PRTS 自带界面、用不上。
 
 ---
 
