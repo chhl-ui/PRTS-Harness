@@ -9,8 +9,8 @@
 
 | 项 | 值 | 证据 |
 |---|---|---|
-| HEAD | `5fd8908`（DSH 升级） | `git log --oneline -1` |
-| 全量测试 | **848 pass / 0 fail × 3 连跑** | `/tmp/up2-1..3.log` |
+| HEAD | prts-system `dfc996f`；prts-desktop `756a9c4` | `git log --oneline -1` |
+| 全量测试 | **856 pass / 0 fail**（`5cece79` 时实测；`dfc996f` 之后新增 MP9，未重跑全量） | `/tmp/model-full.log` |
 | 依赖 | DSH 全线 **0.2.2-rc.1**（含 cordis 4.1.0 / include 1.1.0 / timer 1.2.0） | `package.json` |
 | typecheck | `tsc -p .` exit 0 | `/tmp/final-tc.log` |
 | 工作树 | tracked 干净；untracked 只有 `.rivet/`（工具产物） | `git status --short` |
@@ -99,6 +99,38 @@
 收益是 0.2.2 的几条运行时修复（上下文前缀缓存复用、普通会话不再被误判为子智能体、
 预设切换后委派工具缺失、sdk-minimal 恢复记录、`~` 路径展开等），但**大头是 DSH
 自己的 GUI**，PRTS 自带界面、用不上。
+
+### 6. 模型后端切换（`5cece79` / 桌面端 `f654e59` / `dfc996f`）
+
+桌面端侧栏「模型后端」磁贴 + 终端 `/model`：写 `<dataRoot>\model-profile.json`，
+`chat-serve` 启动时读它并覆盖 env。**必须重启 serve 才生效**——provider id 硬编码
+`deepseek-official`（`dsh-llm-deepseek-api-key\lib\index.js:47`），同进程注册两个会互相覆盖；
+上下文窗口也是启动期求值（`config\prts.yml:20` + `start.ts:1027`）。
+
+三种启动实测：`strata` → 「本地 Strata（256K）（窗口 262144）」、`deepseek` →
+「官方（1M）（窗口 1000000）」、**没有 profile 文件 → 不接管**（保留手动 env）。
+
+⚠️ Strata 的 256K 来自博士口述，而 `docs\v1-02-second-provider-strata-2026-11-05.md`
+实测用的是 `DSH_CONTEXT_WINDOW=32768`。首次切过去要看实际表现；profile 文件支持
+`contextWindow` 覆盖（以实测为准）。
+
+### 7. 桌面端「重启服务」按钮（`0b7b34d` / `8e71494` / `756a9c4`）
+
+**博士 2026-11-06 真机确认：切换预设后点「重启服务」能起来。**
+
+最终形态是**单层 `spawn('node', ['--disable-warning=ExperimentalWarning','src/cli/chat-serve.ts'],
+{ cwd, env, detached: true, stdio: 'ignore', windowsHide: true })`**。走到这一步排除了三种：
+
+| 形态 | 结果 |
+|---|---|
+| `cmd /c start <title> cmd /k "cd /d X && npm ..."` | 内部命令不执行 |
+| 重定向到父进程 `openSync` 的 fd | 父进程退出后子进程写 stdout 直接崩 |
+| `cmd /c npm run chat:serve`（三层） | 能起来，但 ~1 分钟内死——`detached` 只作用于最外层 |
+
+**验证纪律（本段最大教训）**：探针若从 Git Bash 启动，`process.env.PATH` 是 MSYS 格式
+（`/c/Program Files/nodejs`），Windows 原生进程解析不了——`spawn('cmd.exe')` 直接 ENOENT。
+必须用 `cmd.exe /c node probe.cjs` 启动，才测得到真实的 Windows 进程行为。
+前两版「根因确认」就是被这个环境差异污染的。
 
 ---
 
