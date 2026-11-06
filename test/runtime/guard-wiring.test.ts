@@ -110,6 +110,54 @@ test('guard: 越界写被拒且留理由，工作区内写正常放行', { timeo
   assert.equal(inside.content, 'guard-probe', '工作区内写内容不符')
 })
 
+/**
+ * /sandbox view（read-only）下 fs 写/删必须被守卫拒——dsh-fs-local 不消费
+ * sandboxPolicy，fs 侧的唯一闸是 K2a 守卫。实测曾漏：切 view 后 write 照写。
+ * 同一测试里再切回 edit，验证档位恢复后写可用（排除「全拒」假绿）。
+ */
+test('guard: /sandbox view 下 fs 写被拒，/sandbox edit 恢复后可写', { timeout: 180000 }, async () => {
+  const t = makeTmp('guard-ro-')
+  const dataRoot = join(t.dir, 'data')
+  const ws = join(t.dir, 'ws')
+  mkdirSync(dataRoot, { recursive: true })
+  mkdirSync(ws, { recursive: true })
+  const roTarget = join(ws, 'ro.txt')
+  const rwTarget = join(ws, 'rw.txt')
+
+  const app = await startRuntime({
+    configPath: prtsYml,
+    dataRoot,
+    workspace: ws,
+    mode: 'normal',
+    patches: [{ id: 'llm-deepseek', disabled: true }],
+  })
+  try {
+    const script: ScriptedStep[] = [
+      { toolCalls: [{ name: 'write', arguments: { file_path: roTarget, content: 'ro' } }] },
+      { text: 'denied as expected' },
+      { toolCalls: [{ name: 'write', arguments: { file_path: rwTarget, content: 'rw' } }] },
+      { text: 'done' },
+    ]
+    scriptedLlmPlugin(script).apply(app.ctx as Context)
+    await runChat({
+      ctx: app.ctx as Context,
+      lines: lines('/sandbox view', 'write ro', '/sandbox edit', 'write rw', '/exit'),
+      out: () => {},
+      cwd: ws,
+      dataRoot,
+      authority: app.authority,
+    })
+    assert.equal(existsSync(roTarget), false, 'read-only 档下 fs 写被放行')
+    assert.equal(existsSync(rwTarget), true, '切回 workspace-write 后写仍被拒')
+    assert.equal(readFileSync(rwTarget, 'utf8'), 'rw')
+    const log = await transcriptAfter(dataRoot, /read-only/)
+    assert.match(log, /read-only/, '会话日志里没有 read-only 拒绝理由')
+  } finally {
+    await app.dispose()
+    t.cleanup()
+  }
+})
+
 /** 读侧：protectedRoots 内的文件不应能被模型读取，内容不得进会话日志。 */
 test('guard: 读取 protectedRoots 内的文件被拒且内容不落日志', { timeout: 180000 }, async () => {
   const t = makeTmp('guard-read-')

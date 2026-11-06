@@ -14,6 +14,8 @@
     { "name": "src/supervisor", "path": "src/supervisor" },
     { "name": "src/chain", "path": "src/chain" },
     { "name": "src/integrity", "path": "src/integrity" },
+    { "name": "src/runtime", "path": "src/runtime" },
+    { "name": "src/sandbox", "path": "src/sandbox" },
     { "name": "src/cli", "path": "src/cli" }
   ]
 }

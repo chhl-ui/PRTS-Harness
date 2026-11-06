@@ -6,6 +6,7 @@ rem If your directories differ, edit the three lines below.
 set "PRTS_DATA_ROOT=C:\prts-data"
 set "PRTS_WORKSPACE=C:\prts-workspace"
 set "PRTS_CONFIG=C:\prts-system\config\prts.yml"
+set "PRTS_SANDBOX_BACKEND=appcontainer"
 
 if not exist "%PRTS_DATA_ROOT%\secrets\deepseek.key" (
   echo [!] Missing %PRTS_DATA_ROOT%\secrets\deepseek.key

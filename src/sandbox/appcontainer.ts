@@ -41,10 +41,16 @@ const koffi = require('koffi') as any
 export interface AppContainerOptions {
   /** profile 名。同名会复用已有 profile（幂等）。 */
   name: string
-  /** 需要读写的工作区，授予 (OI)(CI)(RX,W)。 */
+  /** 需要读写的工作区，授予 (OI)(CI)(RX,W)；`writable: false` 时只授 (OI)(CI)(RX)。 */
   workspace: string
   /** 额外需要的只读目录（如 shell 可执行文件所在目录）。 */
   extraReadPaths?: readonly string[]
+  /**
+   * 工作区是否可写（`/sandbox view` 的 read-only 档 → false）。
+   * 缺省 true：不带标志的调用维持原行为。false 时容器对工作区只读，
+   * 命令仍可执行（cwd 只需 traverse）。
+   */
+  writable?: boolean
 }
 
 export interface SpawnOptions {
@@ -343,7 +349,7 @@ export async function createAppContainer(opts: AppContainerOptions): Promise<App
     granted.push(target)
   }
 
-  await grant(opts.workspace, '(OI)(CI)(RX,W)')
+  await grant(opts.workspace, opts.writable === false ? '(OI)(CI)(RX)' : '(OI)(CI)(RX,W)')
   for (const p of opts.extraReadPaths ?? []) {
     // 额外读权限是增强，不是容器创建的前置。目录可能还不存在（从未 spill 过），
     // 那时 icacls 会以 exit 2「系统找不到指定的文件」失败。让这种情况把整个容器

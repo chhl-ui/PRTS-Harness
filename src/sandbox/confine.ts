@@ -117,6 +117,9 @@ export function confineArgv(argv: readonly string[], opts: ConfineOptions): Conf
       opts.runnerPath,
       '--profile', opts.profile,
       '--workspace', opts.workspaceRoot,
+      // mode 必须透传：read-only 时 runner 建容器不授 workspace 写，
+      // 否则「仅可查看」档下 shell 仍能写区内文件，档位名不副实。
+      '--mode', opts.mode,
       // 必须走 inherit：DSH 的 shell 全部经 dsh-terminal-bash 的 PTY 启动，
       // 它在**启动 shell 进程时**调一次 confine，之后所有命令都在同一进程里跑。
       // 不带 --inherit 时 runner 用 capture 模式把子进程 stdio 接管到自己的管道，

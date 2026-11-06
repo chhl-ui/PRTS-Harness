@@ -516,6 +516,113 @@ async function runTasks(deps: ChatDeps): Promise<void> {
   deps.onIdle?.()
 }
 
+/** `/sandbox` 三档别名 → 上游 `dsh-sandbox-policy` 的 SandboxMode；中文档名与界面一致。 */
+const SANDBOX_MODE_ALIAS: Record<string, 'read-only' | 'workspace-write' | 'danger-full-access'> = {
+  view: 'read-only',
+  read: 'read-only',
+  'read-only': 'read-only',
+  '仅可查看': 'read-only',
+  edit: 'workspace-write',
+  workspace: 'workspace-write',
+  'workspace-write': 'workspace-write',
+  '工作区内修改': 'workspace-write',
+  full: 'danger-full-access',
+  danger: 'danger-full-access',
+  'danger-full-access': 'danger-full-access',
+  '完全权限': 'danger-full-access',
+}
+
+const SANDBOX_MODE_LABEL: Record<string, string> = {
+  'read-only': '仅可查看（read-only）',
+  'workspace-write': '工作区内修改（workspace-write）',
+  'danger-full-access': '完全权限（danger-full-access）',
+}
+
+/**
+ * `/sandbox [档]`：三档文件沙箱切换，写 `sandbox/mode` 会话事件（owner 通道）。
+ *
+ * 生效机制（上游 dsh-sandbox-policy + dsh-terminal-bash）：
+ * - 档位存会话日志里的 `sandbox/mode` 事件，per-session、回放可重建；
+ *   `ctx.sandboxPolicy.resolve({session})` 在每次 shell spawn / fs 调用时
+ *   解析——fs 工具切完立即生效；
+ * - 持久 pwsh 只在**起 shell 那一刻** confine 一次，所以切档前必须先杀掉
+ *   活 PTY：上游 sandboxModeFence 在有活终端时会拒收 mode 事件，留着旧
+ *   shell 档位也不会生效；
+ * - `danger-full-access` 上游 spawnArgv 直接绕过 confine（shell 不受限、
+ *   密钥可读）；`read-only` 由 runner 建容器时不授 workspace 写来落实；
+ * - K2a 授权判定不受档影响：fs.* 能力仍走 Authority 审批/授权链，档位只
+ *   管 OS 沙箱这一层。
+ * 模型没有入口：session 对象不在工具面，事件只能经 owner 通道写。
+ */
+async function runSandbox(
+  deps: ChatDeps,
+  ctx: {
+    get?(name: string): unknown
+    sandboxPolicy?: { resolve?(req: unknown): { mode?: string } }
+  },
+  agent: { session?: { append?(type: string, data: unknown): void } },
+  arg: string,
+): Promise<void> {
+  const label = (m: string | undefined): string => SANDBOX_MODE_LABEL[m ?? ''] ?? `未知（${String(m)}）`
+  const session = agent.session
+  const sandboxPolicy = (ctx.sandboxPolicy ?? ctx.get?.('sandboxPolicy')) as
+    { resolve?(req: unknown): { mode?: string } } | undefined
+  const current = ((): string | undefined => {
+    try { return sandboxPolicy?.resolve?.({ session })?.mode } catch { return undefined }
+  })()
+
+  if (session?.append === undefined) {
+    deps.out('[prts] 当前会话对象不支持 mode 事件，/sandbox 不可用\n')
+    deps.onIdle?.()
+    return
+  }
+  if (arg === '') {
+    deps.out(`[prts] 当前沙箱档位：${label(current)}\n`)
+    deps.out('[prts] 用法：/sandbox <view|edit|full>（仅可查看 / 工作区内修改 / 完全权限）\n')
+    deps.onIdle?.()
+    return
+  }
+  const target = SANDBOX_MODE_ALIAS[arg.toLowerCase()] ?? SANDBOX_MODE_ALIAS[arg]
+  if (target === undefined) {
+    deps.out(`[prts] 未知档位 ${arg}；用法：/sandbox <view|edit|full>\n`)
+    deps.onIdle?.()
+    return
+  }
+  if (target === current) {
+    deps.out(`[prts] 已是 ${label(target)}\n`)
+    deps.onIdle?.()
+    return
+  }
+
+  // 先杀活 PTY：fence 有活终端时拒收 mode 事件；留着旧 shell，切了也不生效。
+  const terminals = ctx.get?.('terminals') as {
+    list?(owner: unknown): Array<{ sessionId?: unknown }>
+    kill?(owner: unknown, id: string, reason: string): Promise<unknown>
+  } | undefined
+  for (const s of terminals?.list?.(agent) ?? []) {
+    if (typeof s.sessionId !== 'string') continue
+    try {
+      await terminals?.kill?.(agent, s.sessionId, `sandbox mode switch to ${target}`)
+    } catch (error) {
+      deps.out(`[prts] 杀旧 shell 失败（${s.sessionId}）：${error instanceof Error ? error.message : String(error)}\n`)
+      deps.onIdle?.()
+      return
+    }
+  }
+  try {
+    session.append('sandbox/mode', { mode: target })
+  } catch (error) {
+    deps.out(`[prts] 切换失败：${error instanceof Error ? error.message : String(error)}\n`)
+    deps.onIdle?.()
+    return
+  }
+  deps.out(`[prts] 已切到 ${label(target)}：fs 工具立即生效，pwsh 下次调用起新受限 shell\n`)
+  if (target === 'danger-full-access') {
+    deps.out('[prts] 警告：完全权限下 shell 不再进容器，密钥与全盘文件对模型可见\n')
+  }
+  deps.onIdle?.()
+}
+
 export async function runChat(deps: ChatDeps): Promise<ChatResult> {
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const ctx = deps.ctx as any
@@ -738,6 +845,11 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
           for (const r of rows) deps.out(renderSessionLine(r) + '\n')
         }
         deps.onIdle?.()
+        continue
+      }
+      // ---- 沙箱三档切换（仅可查看 / 工作区内修改 / 完全权限）----
+      if (line === '/sandbox' || line.startsWith('/sandbox ')) {
+        await runSandbox(deps, ctx, agent as { session?: { append?(type: string, data: unknown): void } }, line.slice('/sandbox'.length).trim())
         continue
       }
       // ---- Wave 3 第二步：会话切换（设计 docs/design-switch-session.md）----

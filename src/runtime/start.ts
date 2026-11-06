@@ -181,6 +181,26 @@ function unrunnablePlugins(configPath: string): string[] {
   return missing
 }
 
+/**
+ * /sandbox 档位解析：`sandboxPolicy` 服务按会话对象取当前档；
+ * 服务或会话缺失、resolve 抛错都当无档（不收紧）——档位收紧是加固不是
+ * 强制点，fail-open 与下方「审批链路出错放行」的取向一致。
+ * `ctx.sandboxPolicy` 直连服务字段（cordis 声明式注入），`ctx.get` 兜底。
+ */
+function resolveSandboxMode(ctx: unknown, session: unknown): string | undefined {
+  const c = ctx as {
+    get?(name: string): unknown
+    sandboxPolicy?: { resolve?(req: { session?: unknown }): { mode?: string } | undefined }
+  }
+  const svc = c.sandboxPolicy ?? (typeof c.get === 'function' ? c.get('sandboxPolicy') : undefined)
+  try {
+    return (svc as { resolve?(req: { session?: unknown }): { mode?: string } | undefined } | undefined)
+      ?.resolve?.({ session })?.mode
+  } catch {
+    return undefined
+  }
+}
+
 export async function startRuntime(o: StartRuntimeOptions): Promise<{
   /** 记忆库句柄（打不开时为 undefined）。 */
   memory?: MemoryStore
@@ -480,6 +500,14 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
         .filter((c) => c.startsWith('fs.read:') || c.startsWith('fs.write:')
           || c.startsWith('fs.delete:') || c.startsWith('net:'))
       if (capabilities.length === 0) return undefined
+      // /sandbox view（read-only）下 fs 写/删一律拒。shell 侧由 runner --mode
+      // 落实同一档；fs 侧只能在这里拦——dsh-fs-local 不消费 sandboxPolicy
+      // （本地后端没有 mode 概念），不拦的话 write/edit 只过 K2a 授权判定，
+      // 「仅可查看」就名不副实（实测：切 view 后 write 照写不误）。
+      if (capabilities.some((c) => c.startsWith('fs.write:') || c.startsWith('fs.delete:'))
+        && resolveSandboxMode(ctx, exec.agent?.session) === 'read-only') {
+        return 'prts: 会话处于仅可查看（read-only）档，fs 写/删不可用（/sandbox edit 恢复）'
+      }
       return authority.guard({
         sessionId: exec.agent?.session?.id ?? '',
         callId: String(exec.callId),
@@ -535,6 +563,11 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
         .filter((c) => c.startsWith('fs.read:') || c.startsWith('fs.write:') || c.startsWith('fs.delete:'))
       // 非文件能力不归 E3（exec/net/system 归 K2b），原样放行。
       if (capabilities.length === 0) return next()
+      // 只读档下的写/删不问人：问了守卫照样拒，白制造一次审批。
+      if (capabilities.some((c) => c.startsWith('fs.write:') || c.startsWith('fs.delete:'))
+        && resolveSandboxMode(ctx, exec.agent?.session) === 'read-only') {
+        return next()
+      }
       const sessionId = exec.agent?.session?.id ?? ''
       const callId = String(exec.callId)
       const decision = authority.decide({ sessionId, callId, tool: exec.name, capabilities })

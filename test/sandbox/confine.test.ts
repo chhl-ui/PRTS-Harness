@@ -35,6 +35,8 @@ test('confine: 产出 runner 形态的 argv，顺序为 exec → runner → 选�
     RUNNER,
     '--profile', 'PRTS.Sandbox',
     '--workspace', WS,
+    // 档位必须透传：read-only 时 runner 不授 workspace 写（/sandbox view）
+    '--mode', 'workspace-write',
     // DSH 的 shell 全走 PTY，confine 必须默认 inherit，否则 PTY 看不到 shell 输出
     '--inherit',
     '--',

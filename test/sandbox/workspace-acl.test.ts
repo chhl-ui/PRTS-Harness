@@ -142,9 +142,11 @@ test('T2 local: .git DENY 保护 + 二次启动 already 且无重复 ACE', { tim
     ], 'local')
     try {
       const r = results(await transcript(out.dr, 5))
-      assert.match(r[0] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
-      assert.match(r[1] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
-      assert.match(r[2] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
+      // 拒绝文本随 PowerShell 版本/语言变：5.1 中文「访问被拒绝」、pwsh 7 英文
+      // "Access to the path … is denied"。只断言有 denied/拒绝，不钉具体措辞。
+      assert.match(r[0] ?? '', /denied|拒绝/i)
+      assert.match(r[1] ?? '', /denied|拒绝/i)
+      assert.match(r[2] ?? '', /denied|拒绝/i)
       assert.match(r[3] ?? '', /ref: refs\/heads/)
     } finally {
       // 同 T1：断言失败也必须 dispose，否则 pwsh 泄漏导致进程不退出。
@@ -182,9 +184,9 @@ test('T3 appcontainer: .git 只读授 RX + 二次启动 already + dispose 后无
     // 测试全部跑完、报告已出、进程不退）。
     try {
       const r = results(await transcript(out.dr, 5))
-      assert.match(r[0] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
-      assert.match(r[1] ?? '', /访问被拒绝|Access is denied|PermissionDenied/i)
-      assert.match(r[2] ?? '', /访问被拒绝|Access is denied|exit code: 1/i)
+      assert.match(r[0] ?? '', /denied|拒绝/i)
+      assert.match(r[1] ?? '', /denied|拒绝/i)
+      assert.match(r[2] ?? '', /denied|拒绝|exit code: 1/i)
       assert.match(r[3] ?? '', /ref: refs\/heads/)
     } finally {
       await out.app.dispose()
