@@ -24,7 +24,7 @@ import { createInterface } from 'node:readline'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Socket } from 'node:net'
-import { OWNER_ENDPOINT_FILE, encode, lineParser, pipeConnect } from '../runtime/owner-protocol.ts'
+import { OWNER_ENDPOINT_FILE, encode, lineParser, pipeConnect, probeEndpointOwner } from '../runtime/owner-protocol.ts'
 import type { OwnerPush } from '../runtime/owner-protocol.ts'
 import { reconnectDelayMs } from '../runtime/reconnect.ts'
 
@@ -142,9 +142,15 @@ for (;;) {
     attempt += 1
     const delay = reconnectDelayMs(attempt)
     const reason = error instanceof Error ? error.message : String(error)
+    // 陈旧端点：serve 被强杀时 finally 没跑到，端点仍指向死 pid，客户端只会看到
+    // ENOENT。探活一次，把「该重启的是 serve」直接说出来（2026-11-06 实测踩过）。
+    const ep = probeEndpointOwner(dataRoot)
+    const hint = ep !== undefined && !ep.alive
+      ? `\n[prts] 端点陈旧：pid ${ep.pid} 已退出——请重启 prts chat:serve（端点：${endpointPath}）`
+      : ''
     process.stdout.write(
       `\n[prts] 连不上服务端（${reason}）；${Math.round(delay / 1000)}s 后重试`
-      + `（第 ${attempt} 次，Ctrl+C 退出）\n`,
+      + `（第 ${attempt} 次，Ctrl+C 退出）${hint}\n`,
     )
     await sleep(delay)
     continue

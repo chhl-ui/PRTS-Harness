@@ -9,6 +9,8 @@
  * 所以它对「读到名称后直接连」零贡献——P2 的安全只有 T1 验的 IL 隔离这一道。
  */
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 export { encode, lineParser, listenPipe, pipeConnect } from '../supervisor/protocol.ts'
 
@@ -169,5 +171,31 @@ export function decodeOwnerRequest(msg: unknown): OwnerRequest | null {
       return { type: 'status' }
     default:
       return null
+  }
+}
+
+/**
+ * 读端点文件并探活它记录的 pid。
+ *
+ * 只用于**诊断提示**，不改变连接语义：`chat-serve.ts` 正常退出会删端点，但进程被
+ * 强杀或崩溃时 finally 不执行，端点残留指向一个死 pid——客户端只会得到
+ * `connect ENOENT`，看不出「该重启的是 serve」（2026-11-06 实测踩过）。
+ *
+ * 读不到文件、坏 JSON、缺 pid 一律返回 undefined，从不抛；pid ≤ 0 也不探活
+ * （`process.kill(0, 0)` 会发给整个进程组）。
+ */
+export function probeEndpointOwner(dataRoot: string): { pid: number; alive: boolean } | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(join(dataRoot, OWNER_ENDPOINT_FILE), 'utf8')) as { pid?: unknown }
+    const pid = typeof raw.pid === 'number' && Number.isInteger(raw.pid) ? raw.pid : undefined
+    if (pid === undefined || pid <= 0) return undefined
+    try {
+      process.kill(pid, 0)
+      return { pid, alive: true }
+    } catch {
+      return { pid, alive: false }
+    }
+  } catch {
+    return undefined
   }
 }
