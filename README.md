@@ -87,10 +87,18 @@ test/           106 例；test/support/ 是驱动、脚本化模型替身、临�
 - **错误曾全程静默（随 O1 一并修掉）**：`agent/error` 是 turn 内失败的唯一上报通道（`throwError()` 先 emit 再 throw，`kick()` 的 catch 只吞异常传播）。此前无订阅方，失败在对话里表现为一直不回复。`src/runtime/error-report.ts` 现将其脱敏后写 stderr，由 `startRuntime()` 挂载、`dispose()` 解绑。
 - 复现脚本 `.scratch/o1-probe.test.ts` 仍自持裸对象调用，可复现原始症状，用于对照。
 
+## 沙箱三档与工具流水（2026-11-06）
+
+- **`/sandbox <view|edit|full>`**（owner 命令，`src\cli\chat.ts` 的 `runSandbox`）：映射上游 `dsh-sandbox-policy` 三档 `read-only` / `workspace-write` / `danger-full-access`，写 `sandbox/mode` 会话事件（per-session、随会话日志回放重建），部署默认仍是 `workspace-write`。切档会先 kill 活 PTY——持久 pwsh 只在起 shell 时 confine 一次，不换 shell 档位不生效。
+  - `view`：fs 侧由 `tools.guard` 直接拒 `fs.write:`/`fs.delete:`（`src\runtime\start.ts` 的 `resolveSandboxMode`）；shell 侧由 runner `--mode read-only` 只授 `(OI)(CI)(RX)`——此前 read-only 与 workspace-write 同构、容器仍授写，2026-11-06 收紧才名副其实。
+  - `full`：上游 `spawnArgv` 绕过 confine，shell 不进容器；fs 仍走 K2a 授权，档位不绕过 owner 审批。
+  - 后端差异：`local` 后端（WRITE_RESTRICTED token）连工作区都写不了，三档在 shell 侧无差别；要真正区分需 `PRTS_SANDBOX_BACKEND=appcontainer`（`prts-chat.cmd` 已设）。
+- **工具活动推送（M3）**：`attachToolFeed`（`src\runtime\terminal-server.ts`）把 `tools/execute`/`tools/result` 翻成 `type:'tool'` 推送（call 带参数截断，result 只在出错时带错误摘要）；`chat:remote` 与桌面客户端据此渲染活动流水。纯观测，绝不否决工具执行。
+
 ## 已知限制
 
 - **K2a 守卫已接线，覆盖 `fs.*` 与 `net.*`**（2026-10-31 初版只覆盖 fs；net 随后纳入，见 `src/runtime/start.ts:406-407`）：`src/runtime/start.ts` 在 boot 返回后挂 `tools.guard`，模型发起的读/写/删/联网先过 `Authority.guard`——越界返回拒绝理由并写 `tool.denied` 审计，工作区内读写正常放行（回归见 `test/runtime/guard-wiring.test.ts`）。
-- **`exec` 的边界由沙箱后端决定，不是"未实现"**（2026-11-05 核实）：默认 `PRTS_SANDBOX_BACKEND=local`，此时 pwsh 没有文件系统边界；切到 `appcontainer` 后，pwsh 进程被 OS 的 AppContainer ACL 限制，**真机实测**：工作区内写成功、工作区外写失败且文件未创建、读密钥被拦（`test/sandbox/live-wiring.test.ts`，本机 895ms 通过）。K2a 对 pwsh 只能整体放行或整体拒绝，而整体拒绝会破坏现有 pwsh 用例且不是真边界——所以判定分工放在 OS 层，`src/runtime/start.ts` 的 guard 显式过滤 `exec`/`tool`/`system` 是**分工而非遗漏**。设计依据见 `docs/k2b-exec-boundary-design-2026-11-05.md`。**这与下面的审批问题是两件事**——审批不可达是 fs backend 的问题，守卫接线是工具流水线的问题，不要互相代替。
+- **`exec` 的边界由沙箱后端决定，不是"未实现"**（2026-11-05 核实，2026-11-06 修正）：默认 `PRTS_SANDBOX_BACKEND=local` 走 `dsh-sandbox-windows-acl` 的 WRITE_RESTRICTED token——`whoami /all` 实测为 **Low Mandatory Level + `BUILTIN\Administrators` deny-only**，读不受限、写只落在 restricting SID 有 ACE 的路径。**本机实测：local 下 pwsh 连 `C:\prts-workspace` 都写不了**（根目录与子目录的 `New-Item` 均报「访问被拒绝」），旧版此处「local 此时 pwsh 没有文件系统边界」的说法与实测相反，已删除。切到 `appcontainer` 后，pwsh 进程被 OS 的 AppContainer ACL 限制，**真机实测**：工作区内写成功、工作区外写失败且文件未创建、读密钥被拦（`test/sandbox/live-wiring.test.ts` 断言 `writeInside.code === 0` / 越界文件不存在 / 读密钥非零，本机 995ms、1 pass）。K2a 对 pwsh 只能整体放行或整体拒绝，而整体拒绝会破坏现有 pwsh 用例且不是真边界——所以判定分工放在 OS 层，`src/runtime/start.ts` 的 guard 显式过滤 `exec`/`tool`/`system` 是**分工而非遗漏**。设计依据见 `docs/k2b-exec-boundary-design-2026-11-05.md`。**这与下面的审批问题是两件事**——审批不可达是 fs backend 的问题，守卫接线是工具流水线的问题，不要互相代替。
 - **请求重试会重复输出片段**：`frame` 带 `attemptId` / `revision`，模型请求失败重试会起新 attempt 从头重发 delta，而已经写进终端的片段撤不回来。`chat.ts` 按 `attemptId` 变化重置游标，但不做终端回滚——重试路径下用户可能看到重复片段。正常对话（无错误、无工具重试）不触发。
 - **E3 审批已实现（2026-10-31），走 K2a 侧而非 DSH 的 fs escalation**。DSH 的 `resolvePolicy` 路径被 K2a 守卫遮蔽——越界写在 `authority.ts:148-152` 就被拒，到不了 `dsh-tool-fs/lib/index.js:1134-1150`。可用的钩子是 `tools/pre-execute`：它是异步 waterfall 且在同步 guards 之前（`dsh-tools/lib/index.js:3321` / `:3337`）。链路：pre-execute 用 `classify(name, arguments)` 算 capabilities → `decide()` 返 `ask` → 按 callId 暂存 → `approval/request` answerer（`src/cli/chat.ts`）弹终端提示 → `recordOwnerDecision({outcome:'allowed-once'})` → 同步 guard 读到 once 放行。回归见 `test/runtime/e3-approval.test.ts`。
 - **三层授权语义**：`protectedRoots` 内 → `deny`（绝对禁止，审批救不了）；工作区外且非 protected → `ask`（可审批）；工作区内 → `allow`。`decide()` 的优先级是 `deny > ask > allow`，所以越界写的 E3 用例必须落在「工作区外、非 protectedRoots」。

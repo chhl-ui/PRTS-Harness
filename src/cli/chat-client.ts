@@ -78,6 +78,16 @@ const onPush = (msg: unknown): void => {
     case 'status':
       // 相位变化不单独铺陈——提示符由本地的行读取循环维持。
       return
+    case 'tool':
+      // 工具活动流水（M3）：call 打出工具名+参数，result 只在出错时多打一行。
+      if (push.phase === 'call') {
+        process.stdout.write(`\n  · ${push.name} ${push.detail}\n`)
+      } else if (push.isError === true) {
+        process.stdout.write(`  ✗ ${push.name} ${push.detail}\n`)
+      } else {
+        process.stdout.write(`  ✓ ${push.name}\n`)
+      }
+      return
     case 'error':
       process.stdout.write(`\n[prts] ${push.code}：${push.message}\n`)
       return

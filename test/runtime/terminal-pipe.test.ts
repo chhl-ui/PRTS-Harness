@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startRuntime } from '../../src/runtime/start.ts'
 import { runChat, describeOpenTasks } from '../../src/cli/chat.ts'
-import { createTerminalServer } from '../../src/runtime/terminal-server.ts'
+import { createTerminalServer, attachToolFeed } from '../../src/runtime/terminal-server.ts'
 import { ownerTermPipeName, pipeConnect, lineParser, encode } from '../../src/runtime/owner-protocol.ts'
 import type { OwnerPush } from '../../src/runtime/owner-protocol.ts'
 import { scriptedLlmPlugin } from '../support/scripted-llm.ts'
@@ -52,6 +52,8 @@ async function rig(dataRoot: string, ws: string, script: ScriptedStep[]): Promis
     patches: PATCHES,
   })
   scriptedLlmPlugin(script).apply(app.ctx as Context)
+  // 与 chat-serve.ts 同构：工具活动推送经 attachToolFeed 上通道。
+  const detachFeed = attachToolFeed(app.ctx, term)
 
   const hint = describeOpenTasks(app.ledger)
   if (hint !== '') term.pushHostOutput(hint + '\n')
@@ -83,6 +85,7 @@ async function rig(dataRoot: string, ws: string, script: ScriptedStep[]): Promis
     app,
     done,
     async close() {
+      detachFeed()
       term.close()
       await done.catch(() => ({ turns: 0 }))
       await app.dispose()
@@ -294,6 +297,34 @@ test('② 真实链路：模型调工作区外 write → pre-execute ask → 管
   }
 })
 
+test('⑨ 工具活动推送：call/result 成对到达，detail 带截断参数', { timeout: 180000 }, async () => {
+  const t = makeTmp('pipe-toolfeed-')
+  const dataRoot = join(t.dir, 'data')
+  const ws = join(t.dir, 'ws')
+  const target = join(ws, 'feed.txt')
+  const r = await rig(dataRoot, ws, [
+    { toolCalls: [{ name: 'write', arguments: { file_path: target, content: 'feed' } }] },
+    { text: 'done' },
+  ])
+  const c = await connect(r.pipeName)
+  try {
+    await c.waitFor((p) => p.type === 'status')
+    c.send({ type: 'prompt', text: 'write it' })
+    const call = await c.waitFor((p) => p.type === 'tool' && p.phase === 'call')
+    assert.equal((call as { name: string }).name, 'write')
+    assert.match((call as { detail: string }).detail, /feed\.txt/, 'call detail 应含截断后的参数')
+    const result = await c.waitFor((p) => p.type === 'tool' && p.phase === 'result')
+    assert.equal((result as { name: string }).name, 'write')
+    assert.notEqual((result as { isError?: boolean }).isError, true, '工作区内写不该标 isError')
+    // call/result 的 callId 必须能对上——UI 靠它把两行粘成一条活动记录
+    assert.equal((result as { callId: string }).callId, (call as { callId: string }).callId)
+  } finally {
+    c.end()
+    await r.close()
+    t.cleanup()
+  }
+})
+
 test('⑧ 断开重连：同一 runtime 下第二个客户端继续对话，agent 复用', { timeout: 180000 }, async () => {
   const t = makeTmp('pipe-reconnect-')
   const dataRoot = join(t.dir, 'data')
@@ -310,6 +341,7 @@ test('⑧ 断开重连：同一 runtime 下第二个客户端继续对话，agen
     patches: PATCHES,
   })
   scriptedLlmPlugin([{ text: '第一轮回复' }, { text: '第二轮回复' }]).apply(app.ctx as Context)
+  const detachFeed = attachToolFeed(app.ctx, term)
 
   // 与 chat-serve 的 accept 循环同构：断开只结束本代，回到 accept 等下一个客户端。
   const serve = (async (): Promise<number> => {
@@ -373,6 +405,7 @@ test('⑧ 断开重连：同一 runtime 下第二个客户端继续对话，agen
     assert.equal(live.length, 1, '重连必须复用同一 agent，而不是新建')
     c2.end()
   } finally {
+    detachFeed()
     term.close()
     await serve.catch(() => 0)
     await app.dispose()

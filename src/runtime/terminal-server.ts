@@ -45,6 +45,7 @@ import {
   lineParser,
   listenPipe,
   statusPush,
+  toolPush,
 } from './owner-protocol.ts'
 import type { OwnerPhase, OwnerPush } from './owner-protocol.ts'
 
@@ -76,6 +77,8 @@ export interface TerminalServer {
   pushHostOutput(text: string): void
   /** 回合结束 → event{kind:'turn-end'}。 */
   pushTurnEnd(text: string): void
+  /** 工具活动 → tool push（call/result）。 */
+  pushTool(phase: 'call' | 'result', callId: string, name: string, detail: string, isError?: boolean): void
   /** 作为 ChatDeps.approvalChannel.ask 的实现。 */
   requestApproval(info: ApprovalAskInfo): Promise<boolean>
   /** 当前是否已有客户端连着（便于测试与日志）。 */
@@ -255,6 +258,9 @@ export function createTerminalServer(pipeName: string): TerminalServer {
       push(eventPush('host', text))
     },
     pushTurnEnd(text: string): void { push(eventPush('turn-end', text)) },
+    pushTool(phase, callId, name, detail, isError): void {
+      push(toolPush(phase, callId, name, detail, isError))
+    },
     requestApproval(info: ApprovalAskInfo): Promise<boolean> {
       return new Promise<boolean>((resolve) => {
         if (closed || client === undefined) {
@@ -300,4 +306,47 @@ export function createTerminalServer(pipeName: string): TerminalServer {
       }
     },
   }
+}
+
+/**
+ * 把工具活动翻译成 tool push 挂到 ctx 上（M3）。
+ *
+ * - `tools/execute`（waterfall，守卫已过、工具未跑）→ phase 'call'；
+ *   **必须调 next()**，cordis waterfall 不调会 veto 整条链。
+ * - `tools/result`（emit）→ phase 'result'，带 isError。
+ *
+ * 全程观测、绝不否决：任何一步抛错都只静默——feed 挂了不能连累工具执行。
+ * chat-serve.ts 与 test/runtime/terminal-pipe.test.ts 的 rig 都要调它
+ * （rig 与入口同构是那条测试文件自己的纪律）。
+ * 返回 detach；ctx 缺 on/events.on 时返回 noop。
+ */
+export function attachToolFeed(ctx: unknown, term: TerminalServer): () => void {
+  const c = ctx as {
+    on?(name: string, fn: (exec: unknown, next: () => unknown) => unknown): () => void
+    events?: { on?(name: string, fn: (exec: unknown, result: unknown) => void): () => void }
+  }
+  const trunc = (v: unknown, n = 160): string => {
+    try {
+      const s = typeof v === 'string' ? v : JSON.stringify(v)
+      return s === undefined ? '' : s.length > n ? s.slice(0, n) + '…' : s
+    } catch { return '' }
+  }
+  const offExecute = c.on?.('tools/execute', (execution: unknown, next: () => unknown) => {
+    try {
+      const exec = execution as { callId?: unknown; name?: unknown; arguments?: unknown }
+      if (typeof exec.name === 'string') {
+        term.pushTool('call', String(exec.callId ?? ''), exec.name, trunc(exec.arguments))
+      }
+    } catch { /* 观测失败不否决 */ }
+    return next()
+  })
+  const offResult = c.events?.on?.('tools/result', (execution: unknown, result: unknown) => {
+    try {
+      const exec = execution as { callId?: unknown; name?: unknown }
+      if (typeof exec.name !== 'string') return
+      const isError = (result as { isError?: boolean }).isError === true
+      term.pushTool('result', String(exec.callId ?? ''), exec.name, isError ? trunc(result) : '', isError)
+    } catch { /* 观测失败不否决 */ }
+  })
+  return () => { offExecute?.(); offResult?.() }
 }

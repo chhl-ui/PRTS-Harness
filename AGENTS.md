@@ -97,6 +97,24 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   （`.scratch/probe-ac-cost.mjs`）。建容器本身很便宜，**但 `icacls (OI)(CI)` 是递归的**——
   大工作区的授权会随树规模增长（`dsh-sandbox-windows-acl` README 记着「tens of seconds on large workspace trees」）。
   所以 runner 要么复用已建的 profile + 已授权的 ACL，要么在授权前先判断 ACL 里是否已有该 SID，别每次全树走一遍。
+- **沙箱三档切换 `/sandbox <view|edit|full>`**（`src\cli\chat.ts` 的 `runSandbox`，owner 通道）：
+  映射上游 `dsh-sandbox-policy` 三档 `read-only` / `workspace-write` / `danger-full-access`，
+  写 `sandbox/mode` 会话事件——per-session、随会话日志回放重建，部署默认仍是 `workspace-write`。
+  生效层次：fs 工具每次调用解析，切完立即生效；持久 pwsh **只在起 shell 时 confine 一次**，
+  所以命令先 kill 活 PTY 再 append——上游 `sandboxModeFence` 在有活终端时**拒收** mode 事件
+  （append 直接抛），且留着旧 shell 档位本来也不会生效。
+  - `danger-full-access`：上游 `spawnArgv` 直接绕过 confine——shell 不进容器、密钥可读、全盘可写；
+  - `read-only`：runner `--mode` 透传 → `createAppContainer` 对 workspace 只授 `(OI)(CI)(RX)`
+    （此前 read-only 与 workspace-write 同构、容器仍授写，2026-11-06 收紧才名副其实）；
+    fs 侧由 `tools.guard` 补齐——`dsh-fs-local` 不消费 sandboxPolicy（本地后端没有
+    mode 概念），不拦的话 `write`/`edit` 只过 K2a 授权判定、read-only 名不副实
+    （2026-11-06 真机 chat 实测漏过：切 view 后 write 照写，随后补守卫拒绝）。
+    实现：`resolveSandboxMode(ctx, session)` 取档，`read-only` 时守卫直接拒
+    `fs.write:`/`fs.delete:`；`tools/pre-execute` 同步跳过审批（问了守卫照样拒）。
+  - `danger-full-access` 下 fs 仍走 K2a：mode 是 OS 沙箱档，Authority 是审批层，
+    full 档只放开 shell 边界，不绕过 owner 授权。
+    runner argv 协议相应扩为 `--mode <read-only|workspace-write>`，缺省按 workspace-write
+    兼容旧 argv；未知值直接 EX_USAGE（fail-closed，不静默当可写）。
 
 ### 所有者通道（P2）：管道、双通道输出、断开语义、E10
 
@@ -108,6 +126,11 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 - **单客户端**：runChat 是单会话长循环，多客户端会争抢同一个输入迭代器，后来者收 `busy` 并被断开。这是会话语义，不是性能限制。
 - **断开语义**：只做两件事——未结算审批按 false 结算（fail-closed），送 EOF。**不中断飞行中的回合**（收敛由 chat.ts 的 `waitIdle` 控制，默认 120s，本层拿不到 agent 句柄）。因此「断开后模型调用数还在涨」是预期行为；衡量「是否停止接新活」的指标是**新回合起始数**，不是模型调用次数——用后者断言会把正确实现判红。
 - **词表无 `cancel`**：`/cancel` 在 chat.ts 是 `ledger.cancel`（账本相位变更），与「中止回合」是两回事。所有 `/` 命令当普通 prompt 文本发，由 chat.ts 解析；中止回合留 P2b。
+- **`type:'tool'` 推送（M3，2026-11-06 加）**：`attachToolFeed(ctx, term)`（terminal-server.ts 尾）
+  把 `tools/execute`（waterfall，守卫已过工具未跑）→ `phase:'call'`、`tools/result`（emit）
+  → `phase:'result'` 翻译成推送，detail 是参数 JSON 截断（call）或错误摘要（result isError）。
+  纯观测、绝不否决（execute 臂必须调 next()）。chat-serve 与 terminal-pipe rig 都要挂它
+  ——rig「与入口同构」是该测试文件自己的纪律。桌面 UI（C:\prts-desktop）靠它渲染活动流水。
 
 ### 账本工具集（D2 落地）与两处未接/取舍
 
@@ -180,6 +203,12 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   `node src/cli/prts.ts upgrade --install-root <d> --manifest <f> --db <f> --spec <f> [--init] [--yes]`
   修改（`--init` 仅首装、`--yes` 原子覆盖+写事件，否则 dry-run 退出码 2）。
   `Supervisor` 配 `integrity` 时校验失败不启动运行时。
+  **本机部署事实（2026-11-06 实测）**：`C:\prts-data` 从未锚定 K5——无 manifest 文件、
+  `core.sqlite` 无 `integrity.*` 事件、生产代码无任何处给 `Supervisor.start` 传
+  `config.integrity`（`prts chat` 不经过 Supervisor）。所以「改 src/ 就要跑 upgrade」
+  在本机是空话——真要启用需先 `--init`（会锚定审计链，此后每次 src/ 改动必须重跑，
+  且要有消费方配 `integrity` 才有校验）。`protected-spec.example.json` 已补
+  `src/runtime`、`src/sandbox` 两棵树（R4 测试 spec 一直含 runtime；U3 是安全敏感面，缺失属陈旧）。
 - 预算：`blocked_json` 记 `by`（owner/model/system）；model 只能 unblock 自己造成的阻塞，
   且 `resume`/`unblock` 时 usage 已超 budget 抛 `BUDGET_EXCEEDED`（判定走 `fold.ts` 的 `usageExceeded`）。
 

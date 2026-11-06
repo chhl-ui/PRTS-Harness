@@ -26,7 +26,7 @@ import { loadApiKey } from './secret.ts'
 import { startRuntime } from '../runtime/start.ts'
 import { runChat, describeOpenTasks } from './chat.ts'
 import { OWNER_ENDPOINT_FILE, ownerTermPipeName } from '../runtime/owner-protocol.ts'
-import { createTerminalServer } from '../runtime/terminal-server.ts'
+import { createTerminalServer, attachToolFeed } from '../runtime/terminal-server.ts'
 
 const dataRoot = process.env.PRTS_DATA_ROOT
 const workspace = process.env.PRTS_WORKSPACE
@@ -66,6 +66,10 @@ const app = await startRuntime({
   mode: 'normal',
   credentials,
 })
+
+// M3：工具活动上通道——UI 侧的活动流水（桌面客户端与 chat:remote 都能看到
+// 模型调用的是哪个工具）。纯观测，不进入守卫/审批路径。
+const detachToolFeed = attachToolFeed(app.ctx, term)
 
 // 服务端会话 id 固定：重连沿用同一个会话与 agent，而不是每次连上都开新会话。
 const serveSessionId = process.env.PRTS_SESSION_ID ?? `prts-serve-${process.pid}`
@@ -111,6 +115,7 @@ try {
 } finally {
   // 3) 退出顺序与启动相反：先撤端点，再关管道。
   try { rmSync(endpointPath, { force: true }) } catch { /* 已被删 */ }
+  detachToolFeed()
   term.close()
   await app.dispose()
 }

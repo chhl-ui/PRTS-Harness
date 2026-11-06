@@ -82,6 +82,11 @@ export interface StatusPush {
  * `bad-request` —— 收到坏行、无法识别的请求，或该状态下不该出现的请求（如审批期内的 prompt）；
  * `busy` —— 已有客户端连着（runChat 是单会话长循环，多客户端会争抢同一个输入迭代器）；
  * `internal` —— 服务端内部错误。
+ *
+ * 另外 `type:'tool'` 是工具活动推送（call/result），由 attachToolFeed 从
+ * tools/execute + tools/result 两个上游事件翻译而来——客户端可把它渲染成
+ * 「模型正在调用 X」的活动流水。旧客户端不认识此 type 会落入 default 分支，
+ * 升级词表时两端的 case 都要补。
  */
 export type OwnerErrorCode = 'stale-approval' | 'bad-request' | 'busy' | 'internal'
 
@@ -91,7 +96,22 @@ export interface ErrorPush {
   message: string
 }
 
-export type OwnerPush = EventPush | ApprovalRequestPush | StatusPush | ErrorPush
+/**
+ * 工具活动推送（M3：把「模型调了哪个工具」放上所有者通道）。
+ * `phase:'call'` 在 tools/execute 发出（守卫已过、工具未跑）；
+ * `phase:'result'` 在 tools/result 发出。
+ * `detail`：call 阶段是参数 JSON 截断串；result 阶段仅在 isError 时给错误摘要。
+ */
+export interface ToolPush {
+  type: 'tool'
+  phase: 'call' | 'result'
+  callId: string
+  name: string
+  detail: string
+  isError?: boolean
+}
+
+export type OwnerPush = EventPush | ApprovalRequestPush | StatusPush | ErrorPush | ToolPush
 
 // ---------------------------------------------------------------- 推送构造器
 
@@ -110,6 +130,16 @@ export function approvalRequestPush(
 
 export function statusPush(phase: OwnerPhase): StatusPush {
   return { type: 'status', phase }
+}
+
+export function toolPush(
+  phase: 'call' | 'result',
+  callId: string,
+  name: string,
+  detail: string,
+  isError?: boolean,
+): ToolPush {
+  return { type: 'tool', phase, callId, name, detail, isError }
 }
 
 export function errorPush(code: OwnerErrorCode, message: string): ErrorPush {

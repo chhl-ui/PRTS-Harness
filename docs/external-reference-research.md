@@ -54,6 +54,15 @@ GitHub 三条路分工不同：
 | agent 运行时与框架 | `Tianshu-harness` `agent-code` `deer-flow` `ruflo` `dsh-superagent-prototype` |
 | 记忆与检索 | `hindsight` `mempalace` `codebase-memory-mcp` **`MRAgent`**（论文，arXiv:2606.06036v1，ICML 2026）**`AMB-agent-memory-benchmark`**（评测框架；**license=None**，仅记录来源、未克隆代码） |
 | 其他 | `ECC` `hallmark` `Understand-Anything` |
+| UI 设计（2026-11-06 新增，服务 `C:\prts-desktop` 改版） | `dsh-skin-prts` `prts-suite` `ArknightsUI-React-Template` |
+
+UI 三仓判定（均为 PRTS/明日方舟同人皮肤仓，蒸馏产物在 `C:\prts-desktop\docs\prts-ui-tokens.md`）：
+
+| 目录 | commit | 四选一 | 理由 |
+|---|---|---|---|
+| `dsh-skin-prts` | `c135e52` | 借鉴设计 | 完整 PRTS 终端设计 token（五层底阶、`#11AFCF` 青、暗红棕品牌色）+ 签名元素 CSS 手法（硬阴影/斜切/菱形标/扫描线），与桌面端聊天壳结构同构；CC BY-SA 只取参数不搬代码 |
+| `prts-suite` | `0f4fcc8` | 借鉴设计 | 环境层元素清单（数据网格/粒子/手套光标/开机动画）；色系是「信息之海」深青变体，未采纳其色板 |
+| `ArknightsUI-React-Template` | `302c1f0` | 借鉴设计 | 字体选型参考（Bahnschrift 已入 token）；React/Tailwind 技术栈与本仓 vanilla 渲染器不同构，只取字体清单 |
 
 记忆与检索那一组已做过代码级对账（2026-11-01，对照架构需求 §5.3 的十三项），
 逐格证据与判定在 `docs/memory-landscape.md`。三家结论：
