@@ -68,3 +68,35 @@ PRTS_NET_ALLOW=api.deepseek.com,*.githubusercontent.com
 **对 PRTS 的直接映照**：模块 2 的「Fast Path 确定性筛选 + Slow Path 模型研判」正是
 `classify` + `Authority` 的分工；模块 5 的外部 Watchdog 对应 `supervisor` + `StopController`。
 PRTS 缺的是模块 1 的 Router 层与模块 4 的状态/计算分离。
+
+## 六、另一条断掉的线：shell 沙箱里根本没有网络（2026-11-07 实测）
+
+这不是「策略收紧了」，是**沙箱内的进程出不去**，且与联网策略无关。
+
+**现象**（模型在 pwsh 里实测）：
+- `Resolve-DnsName` 返回「拒绝访问」
+- `1.1.1.1:443`、`223.5.5.5:53` 直连也都不通
+- `Invoke-WebRequest https://example.com` 超时 15s
+- 环境里没有代理变量
+
+**对照实验**（同一台机器，非沙箱的 Git Bash）：
+
+| 目标 | 非沙箱 | 沙箱内 |
+|---|---|---|
+| `https://1.1.1.1` | HTTP 301，2.5s | 不通 |
+| `223.5.5.5:53` | 通（经代理返回 fake-IP） | 不通 |
+
+**所以网络本身是通的，是沙箱里的进程出不去。** 直连 IP 也不通这一点很关键——它排除了「只是 DNS 解析失败」，说明拦截在更下层。
+
+**根因**：`dsh-sandbox-windows-acl/lib/runner.js` 只做两件事——受限令牌（`CreateRestrictedToken` + `CreateProcessAsUserW`）与文件 ACL 授权。该文件里的 Win32 调用只有 `CreateProcessAsUserW` / `SetConsoleCtrlHandler` / `SetEnvironmentVariableW`，**没有任何 WFP、防火墙或 socket 过滤**。所以拦截来自令牌本身：它移除了 `Authenticated Users` 与 `INTERACTIVE`/`LOCAL`（注释原文：「BOTH modes drop `Authenticated Users` … and `INTERACTIVE`/`LOCAL`」），而这台机器的流量走本地代理，受限令牌下访问代理端点也失败，于是**连直连 IP 都出不去**。
+
+**结论：不修，用别的路径。**
+- `prts_web_search` / `prts_web_fetch`（`src/runtime/web-tools.ts`）跑在 **serve 进程**内，不受沙箱令牌约束；2026-11-07 实测 Firecrawl `/v2/search` 与 `/v2/scrape` 均 HTTP 200。
+- pwsh 侧联网的增量收益是零——同样的需求由上面两个工具覆盖，且带正文提取、超时与大小上限。
+
+**如果以后要修**，问题该报给 DSH 而不是本仓：
+
+> `CreateRestrictedToken` 移除了 `Authenticated Users` 与 `INTERACTIVE`/`LOCAL`，导致沙箱内进程无法访问本地代理端点与 DNS Client 命名管道，**所有出站网络失败（含直连 IP）**。文件写限制与网络可达性应当正交——限制文件写不该顺带切断网络。
+
+**别再重复的弯路**：不要把这诊断成「DNS 配置问题」或「代理变量缺失」。变量确实没有，但补上也没用——失效发生在进程能访问什么，不在它读到什么。唯一还能做实诊断的动作是**在沙箱里跑 `whoami /groups`**，看令牌里到底剩哪些组。
+
