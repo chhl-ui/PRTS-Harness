@@ -138,11 +138,11 @@ test('startupCheck 对不存在文件：normal、events=0、不创建文件', ()
   } finally { t.cleanup() }
 })
 
-test('K1 兼容：a217f34 导出文档在重构后可导入并校验通过', () => {
+test('K1 兼容：827091b 导出文档在重构后可导入并校验通过', () => {
   const t = makeTmp('prts-core-')
   let l: Ledger | undefined
   try {
-    const doc = JSON.parse(readFileSync(new URL('../audit/fixtures/k1-export-a217f34.json', import.meta.url), 'utf8'))
+    const doc = JSON.parse(readFileSync(new URL('../audit/fixtures/k1-export-827091b.json', import.meta.url), 'utf8'))
     l = Ledger.importDoc(t.db('k1.sqlite'), doc)
     const chain = l.verifyChain()
     assert.equal(chain.ok, true)

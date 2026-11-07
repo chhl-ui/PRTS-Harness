@@ -14,12 +14,12 @@
 
 | 项 | 实现 | 验收 | 说明 |
 |---|---|---|---|
-| V1-01 插件机制 | ✅ | ✅ | 30+ DSH 插件；禁用仍启动；写错包名会指名（`d1253ec`） |
+| V1-01 插件机制 | ✅ | ✅ | 30+ DSH 插件；禁用仍启动；写错包名会指名（`60b58b1`） |
 | V1-02 独立性 | ✅ | ✅ | 无常驻进程；对话/执行任务/读写记忆/第二提供方全实测 |
 | V1-03 PRTS 人格 | ✅ | ❌ | 需博士盲评 20 段 + 5 道陷阱题（前置：切回 `prts` 预设） |
 | V1-04 普瑞赛斯 | ✅ | ❌ | `priestess` 已激活，需博士盲评 20 段 |
-| V1-05 情感 | ✅ | ✅（机制） | 系统侧生产者已补（`e46da94`）：轮次失败自动写「受挫」，10 分钟节流，写失败不拖垮上报；**接线段已有 live 测试**（`test/runtime/emotion-wiring.test.ts`，摘掉 `start.ts` 的 `onReport` 即红）；owner 入口 `prts emotion`；10 情境 9/10 有回复，**博士打分未做** |
-| V1-06 记忆 | ✅ | ✅（链路） | 机制层 10/10；**真实链路已验**（`e86742c`）：10 条对话 turn → `consolidateFacts` → 重启后 ≥9 可检索，含反证（stub 返回空则测试红）。提炼**质量**（真模型抽得准不准）未验 |
+| V1-05 情感 | ✅ | ✅（机制） | 系统侧生产者已补（`ea23bcf`）：轮次失败自动写「受挫」，10 分钟节流，写失败不拖垮上报；**接线段已有 live 测试**（`test/runtime/emotion-wiring.test.ts`，摘掉 `start.ts` 的 `onReport` 即红）；owner 入口 `prts emotion`；10 情境 9/10 有回复，**博士打分未做** |
+| V1-06 记忆 | ✅ | ✅（链路） | 机制层 10/10；**真实链路已验**（`6ae72da`）：10 条对话 turn → `consolidateFacts` → 重启后 ≥9 可检索，含反证（stub 返回空则测试红）。提炼**质量**（真模型抽得准不准）未验 |
 | V1-07 主动回忆 | ✅ | ❌ | 7 天试用 ≥70% 恰当（需真实使用） |
 | V1-08 上下文 | ✅ | ❌ | 超窗口 3 倍 + 跨天未完成事项（成本最高的自动化项） |
 | V1-09 进化 | ✅ | ✅ | propose→evaluate→adopt→retire→restore + 人格核心守卫（验收脚本 7 项） |
@@ -46,7 +46,7 @@
 
 - [ ] **appcontainer 三档端到端**：**confine 层已有真机证据**——`mode: 'read-only'` 下 pwsh 写工作区被 OS 拒（`test\sandbox\live-wiring.test.ts` 新增 pwsh 用例；pwsh 7.6.9 实测：版本可读、workspace-write 能写、越界写与读密钥 denied）。**未验**的是 `/sandbox view` → `sandbox/mode` 事件 → `sandboxPolicy.resolve` 回读这条端到端（命令本身有 fake ctx 单元覆盖）。原判据：起 `prts chat` 切 view 后让模型写文件，期望守卫拒绝且审计留痕
 - [ ] **V1-08 上下文**：超模型窗口 3 倍仍答对开头 5 个约束；跨天新会话说出未完成事项（成本最高）
-- [ ] **V1-06 的提炼质量**：链路已验（`e86742c`），但用的是 stub generator；真实模型抽得准不准未验
+- [ ] **V1-06 的提炼质量**：链路已验（`6ae72da`），但用的是 stub generator；真实模型抽得准不准未验
   （要真实模型 + 标注集，属 LongMemEval 的 fact 抽取范畴）
 
 ## D. 冻结
@@ -72,7 +72,7 @@
 
 ## H. 已闭环（本会话）
 
-- [x] **模型后端切换**（`5cece79` + 桌面端 `f654e59`）：侧栏「模型后端」磁贴 / 终端 `/model`，
+- [x] **模型后端切换**（`cc8a6b4` + 桌面端 `f654e59`）：侧栏「模型后端」磁贴 / 终端 `/model`，
   写 `<dataRoot>\model-profile.json`，`chat-serve` 启动时读并覆盖 env。
   **必须重启 serve 才生效**——provider id 硬编码 `deepseek-official`
   （`dsh-llm-deepseek-api-key\lib\index.js:47`），同进程注册两个会互相覆盖；
@@ -82,11 +82,11 @@
   ⚠️ Strata 的 256K 来自口述，`docs\v1-02-second-provider-strata-2026-11-05.md` 实测是 `32768`——
   以实测为准，profile 文件支持 `contextWindow` 覆盖，别把默认值当已知事实。
 
-- [x] **桌面端二级页面读通道**（`a39a545` + 桌面仓 `c651b3b`）：所有者通道 `query` 协议实装
+- [x] **桌面端二级页面读通道**（`e846f25` + 桌面仓 `c651b3b`）：所有者通道 `query` 协议实装
   （`owner-protocol` 词表 / `owner-query` 取数层 / `terminal-server` 旁路注入点 / `chat-serve`
   延迟绑定）。tasks / sessions / intents / memory / sandbox 五类；未知 `what` 回 `query.result`
   而不是 `error`（无 id 的 error 会让客户端永久停用查询）。回归 `test\runtime\terminal-pipe.test.ts` ⑩⑪。
-- [x] **glob / grep + 写前必读**（`9db6320`）：补 `dsh-tool-fs-search`（ripgrep）与
+- [x] **glob / grep + 写前必读**（`171824c`）：补 `dsh-tool-fs-search`（ripgrep）与
   `dsh-fs-observation-policy`。两个坑记在这里：① 只装 JS 时启动不报错、首次调用才失败，
   必须同时装 `@vscode/ripgrep-win32-x64`（optionalDependency）；② 写前必读的实际语义是「写成功
   也算已观察」，同一会话写完立刻覆盖是允许的，只有从未接触过的文件才被拒。回归
@@ -102,18 +102,18 @@
 
 - [x] **「模型永不绑定」收紧到库层**：`MODEL_OPS` 删掉 `bindSession`（`ledger.ts:121`），model 调用抛 `FORBIDDEN`；补库层负向断言（`test/ledger/task-binding.test.ts`，先红后绿）；owner 通道不受影响
 
-- [x] **沙箱三档 `/sandbox view|edit|full`**：confine → runner `--mode` → appcontainer 授 RX / RX,W，fs 侧守卫拒写删；`prts-chat.cmd` 切 `appcontainer`（`d3a7d80`）
-- [x] **工具活动推送 M3**：`attachToolFeed` 把 tools/execute·result 翻成 `type:'tool'` 推给客户端（`6b85a61`）；README 修正 local 后端档位语义（`861f69d`）
+- [x] **沙箱三档 `/sandbox view|edit|full`**：confine → runner `--mode` → appcontainer 授 RX / RX,W，fs 侧守卫拒写删；`prts-chat.cmd` 切 `appcontainer`（`55339e9`）
+- [x] **工具活动推送 M3**：`attachToolFeed` 把 tools/execute·result 翻成 `type:'tool'` 推给客户端（`77d1307`）；README 修正 local 后端档位语义（`109c1f9`）
 - [x] 全量 **843 pass / 0 fail**（2026-11-06 实测，49.8s），`tsc -p .` exit=0
 
-- [x] V1-14 4 项 / V1-06 3 项 / V1-15 2 项 / V1-09 7 项 → `scripts/verify-v1-acceptance.mjs` **16 项全 PASS**（`47ed24a`、`27a154e`）
-- [x] **V1-06 真实链路**：10 条对话 turn → `consolidateFacts` → 重启后 ≥9 可检索；含反证（stub 返回空则测试红）与解析失败不污染（`e86742c`）
-- [x] **V1-05 系统侧生产者**：轮次失败 → 自动写「受挫」（system 通道、10 分钟节流、写失败不冒泡）（`e46da94`）
-- [x] V1-17 回归守卫 `npm run verify:memory`（`f6251b6`）
-- [x] V1-02 五项（`21ce477`）、V1-01 三项（`d1253ec`、`5cd52e5`）
-- [x] 回合超时可配 + 空回复不静默（`b847439`）；启动报错指名插件（`c7c1dc5`）
-- [x] V1-16 装配延迟 p95 1610→815ms（`2d6a4e0`）；V1-12 导出导入（`f116399`）
-- [x] 向量重排否决（45.0%→40.0%，`dc058a0`）；S10 根因定位（`eef25fe`）
+- [x] V1-14 4 项 / V1-06 3 项 / V1-15 2 项 / V1-09 7 项 → `scripts/verify-v1-acceptance.mjs` **16 项全 PASS**（`51e0c72`、`2223c36`）
+- [x] **V1-06 真实链路**：10 条对话 turn → `consolidateFacts` → 重启后 ≥9 可检索；含反证（stub 返回空则测试红）与解析失败不污染（`6ae72da`）
+- [x] **V1-05 系统侧生产者**：轮次失败 → 自动写「受挫」（system 通道、10 分钟节流、写失败不冒泡）（`ea23bcf`）
+- [x] V1-17 回归守卫 `npm run verify:memory`（`bb7e340`）
+- [x] V1-02 五项（`165a862`）、V1-01 三项（`60b58b1`、`1a13e0d`）
+- [x] 回合超时可配 + 空回复不静默（`90dff61`）；启动报错指名插件（`2d64782`）
+- [x] V1-16 装配延迟 p95 1610→815ms（`a1ab651`）；V1-12 导出导入（`53b1e20`）
+- [x] 向量重排否决（45.0%→40.0%，`26aa48a`）；S10 根因定位（`3fd8ac7`）
 
 ## I. 工具链事实（DSH 升级必读）
 

@@ -7,7 +7,7 @@
 ## 前置修复
 
 跑之前发现：`applyEmotionEvent` 在 `src/` 里**零调用**，`prts emotion` 命令不存在，
-所以 `renderMood()` 永远返回空串——没有情感状态可测。已补 owner 侧入口（`3addfa6`）。
+所以 `renderMood()` 永远返回空串——没有情感状态可测。已补 owner 侧入口（`4e010e4`）。
 
 ## 执行方式
 

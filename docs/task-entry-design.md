@@ -134,13 +134,13 @@ stateDiagram-v2
 
 | 波次 | 内容 | 提交 | 偏离设计之处 |
 |---|---|---|---|
-| W0 | `startRuntime` 打开/关闭 Ledger（与 supervisor 同库） | `306d240` | 无 |
-| W1 | draft→activate 语义 + 并发上限 | `8573075` | 上限检查落在 `create`（只对 model），不是 `activate`——见「容量与并发」 |
-| W2 | session↔task 绑定（账本事件 + 投影表） | `50859d6` | 用独立表 `task_bindings`，没给 `tasks` 加列（`CREATE TABLE IF NOT EXISTS` 不会给已有表加列） |
-| W3 | 工具调用记账 | `d898670` | begin/end 都挂 `tools/result`，不是 `execute` + `result`——见「回合如何挂上去」 |
-| W4 | 终端入口 `/task`、`/task-approve` | `ec99601` | 无 |
-| W4b | 模型入口 `prts_task_create` | `cf7225b` | 只产出 draft + 强制 owner-confirm |
-| W5 | 启动列出 draft/active/blocked | `a9e3dbf` | 无 |
+| W0 | `startRuntime` 打开/关闭 Ledger（与 supervisor 同库） | `d44f2c7` | 无 |
+| W1 | draft→activate 语义 + 并发上限 | `e84978d` | 上限检查落在 `create`（只对 model），不是 `activate`——见「容量与并发」 |
+| W2 | session↔task 绑定（账本事件 + 投影表） | `657b825` | 用独立表 `task_bindings`，没给 `tasks` 加列（`CREATE TABLE IF NOT EXISTS` 不会给已有表加列） |
+| W3 | 工具调用记账 | `14b0a7e` | begin/end 都挂 `tools/result`，不是 `execute` + `result`——见「回合如何挂上去」 |
+| W4 | 终端入口 `/task`、`/task-approve` | `4e1c577` | 无 |
+| W4b | 模型入口 `prts_task_create` | `5edd0ab` | 只产出 draft + 强制 owner-confirm |
+| W5 | 启动列出 draft/active/blocked | `871661d` | 无 |
 
 每波独立提交，每波跑过 `npm test` 与 `npx tsc -p .`。当前全量 85 pass / 0 fail。
 

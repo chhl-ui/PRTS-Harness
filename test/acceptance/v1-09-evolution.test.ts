@@ -28,7 +28,7 @@ test('V1-09 ①「经验 → 候选 → 评估 → 采用」走完整一圈', ()
       trigger: '要改一个被多处 import 的函数签名时',
       steps: ['grep 该符号的所有引用', '逐个确认签名同步', '再跑全量'],
       pitfalls: ['只看当前文件的调用会漏掉跨包消费方，类型检查也未必覆盖'],
-      sourceRefs: ['turn-82', '974ef12'],
+      sourceRefs: ['turn-82', '69d9219'],
     }
     const id = store.propose({ kind: 'model', sessionId: 'sess-1' }, experience)
     assert.equal(store.get(id)?.phase, 'candidate', '第一步：经验落成候选')

@@ -71,7 +71,7 @@ async function runTurn(booted: Boot, ws: string): Promise<void> {
     }
   }).get('agents')
   const sessionId = `fs-${randomUUID().slice(0, 8)}`
-  // 未注册会话的写权限是 deny（bad1fc1 的翻牌）——这里是真实守卫路径，不是夹具噪声。
+  // 未注册会话的写权限是 deny（7d19649 的翻牌）——这里是真实守卫路径，不是夹具噪声。
   booted.app.authority.registerPrimarySession(sessionId)
   const h = await agents.create({
     sessionId,

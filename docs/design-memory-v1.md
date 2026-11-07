@@ -647,7 +647,7 @@ M8/M9 的缺失比 M15 更值得优先补：它们验证的是一个选型的正
 
 **v2.7 换成混合检索后（FTS5 trigram + LIKE 兜底 + RRF 融合）**
 
-**注意：`b8e5a9c` 的提交信息写了「19.6%→45.1%」，那是纯 FTS 探针的数字，不是实现的。
+**注意：`77e2fa2` 的提交信息写了「19.6%→45.1%」，那是纯 FTS 探针的数字，不是实现的。
 真实实现是 36.9%——差异来自最终排序里乘了 `recency × importance`，稀释了 bm25 的名次。
 以本表为准。**
 
@@ -683,7 +683,7 @@ M8/M9 的缺失比 M15 更值得优先补：它们验证的是一个选型的正
 「证据能不能进 top-8」主要由候选层决定，调排序动不了它。对端到端 QA 的
 影响尚未验证。
 
-**V1-17 回归重跑（2026-11-05）**：`6edbdc5`（turn 向量）与 `d0c97ae`（写入时间）之后，
+**V1-17 回归重跑（2026-11-05）**：`5af0f78`（turn 向量）与 `87e69d3`（写入时间）之后，
 用 `scripts/eval-longmemeval-retrieval.mjs` 重跑全量 479 题（全库口径，与 v2.8 同源，
 `memory-s.sqlite` 未重建）：
 
@@ -907,7 +907,7 @@ gold 答案直接以 fact 形式放进库里**，能检索到吗？纯检索层�
 
 **v2.16 画像闸门修复 + 语义检索验证（2026-11-02）**
 
-**闸门**（`1e6691e`）：`mem_profiles` 独立表 + `mem_fts_profiles` + `profileQuota`（默认 0）。
+**闸门**（`a23a563`）：`mem_profiles` 独立表 + `mem_fts_profiles` + `profileQuota`（默认 0）。
 修掉两个真实 bug——① 画像 id 与 fact id 同值导致 `fused` 合并时 kind 被吞（症状：12 条
 画像命中、最终 0 条进结果）；② 分组取名额后又全局重排截断，把配额语义抵消。
 修后画像能进结果（0→3 条），但**内容仍不相关**：120 条画像里含 Sony 的正确画像只有
@@ -1003,7 +1003,7 @@ Premiere Pro…”。那是**已经推理好的偏好画像**，不是能从对�
 | judged_by | `deepseek-reasoner`（被测 `deepseek-chat`） |
 | 样本 | 全量 500 题，`n=500 valid` / **0 invalid** |
 | 基准文件 | `C:\prts-benchmark\longmemeval\longmemeval_oracle.json`，**15,388,478 字节** |
-| 代码版本 | commit `79f7374`（`src/` 部分来自其父 `e6b8acc`；本提交补上评测脚本，二者合计才是跑出该数字的完整代码状态） |
+| 代码版本 | commit `a2f264e`（`src/` 部分来自其父 `6be91e7`；本提交补上评测脚本，二者合计才是跑出该数字的完整代码状态） |
 | 检索形态 | LIKE + 分词 + 停用词；SQL 按 `hit_count DESC` 取候选（`LIMIT limit*4`，**带 ORDER BY**）；JS 层按 `相关度 × 时近 × 重要性` 取 top-8；prompt 带 `question_date` 与每条 excerpt 的原始时间串 |
 | 口径 | **全库池**——500 题的 haystack 全部导入一个库（10960 turn）后全局检索，**不是**每题隔离 |
 

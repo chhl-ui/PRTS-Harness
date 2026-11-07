@@ -84,8 +84,8 @@ DSH 的不可用处理是 fail-closed：`SandboxUnavailableError` / `SANDBOX_UNA
 
 | 启示 | 依据 | PRTS 落地 |
 |---|---|---|
-| Windows 上默认不开沙箱是业界常态 | Codex 这么重的实现也 `Disabled` | 已采纳：保留 `local` 默认 + `localBackendWarning` 启动警告（`8fb58c9`） |
-| workspace 内的只读子路径 | Codex 的 `WritableRoot.read_only_subpaths` | 已做：`readOnlySubpaths`，缺省 `['.git']`（`6f50925`） |
+| Windows 上默认不开沙箱是业界常态 | Codex 这么重的实现也 `Disabled` | 已采纳：保留 `local` 默认 + `localBackendWarning` 启动警告（`4fcd5b7`） |
+| workspace 内的只读子路径 | Codex 的 `WritableRoot.read_only_subpaths` | 已做：`readOnlySubpaths`，缺省 `['.git']`（`6737377`） |
 | 不可 enforce 时提前判断而非每条命令撞 | Codex/DSH 都是 fail-closed | 部分：`localBackendWarning` 已提前判断，但只是警告，不是拒绝执行 |
 | 接 DSH 的 escalation | — | **撤销**：见下 |
 

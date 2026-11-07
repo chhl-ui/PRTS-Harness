@@ -121,7 +121,7 @@ PRTS 缺的是模块 1 的 Router 层与模块 4 的状态/计算分离。
 | 修前 | FAIL | TIMEOUT | FAIL | — |
 | 修后 | OK | TIMEOUT | OK | `example.com` 正文 577 字节 |
 
-**已修**（`d7b9422`）：`SECURITY_CAPABILITIES` 加 `internetClient`（`S-1-15-3-1` +
+**已修**（`6e3c43e`）：`SECURITY_CAPABILITIES` 加 `internetClient`（`S-1-15-3-1` +
 `SE_GROUP_ENABLED`）。只加出站，不加内网、不加入站监听。
 
 **修后仍存的边界**：AppContainer 永久禁止 loopback，系统代理 `127.0.0.1:7892`
