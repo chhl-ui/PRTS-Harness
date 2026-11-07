@@ -132,6 +132,24 @@ const SECURITY_CAPABILITIES = koffi.struct('SECURITY_CAPABILITIES', {
   CapabilityCount: 'uint32_t',
   Reserved: 'uint32_t',
 })
+
+/** `SID_AND_ATTRIBUTES` 数组的元素：SECURITY_CAPABILITIES.Capabilities 指向它。 */
+const SID_AND_ATTRIBUTES = koffi.struct('SID_AND_ATTRIBUTES', {
+  Sid: 'void *',
+  Attributes: 'uint32_t',
+})
+
+/**
+ * AppContainer 默认**没有任何网络能力**——不是「被防火墙拦」，是连 socket 都出不去，
+ * 表现为直连 IP 失败、DNS「拒绝访问」（用户看到的就是后者，容易误判成 DNS 故障）。
+ * `internetClient`（well-known SID S-1-15-3-1）是出站网络的最小能力集。
+ *
+ * 只加这一个：不加 `privateNetworkClientServer`（内网）与 `internetClientServer`
+ * （入站监听）。沙箱的目的是限制**文件写**，不该顺带切断网络。
+ */
+const CAP_INTERNET_CLIENT_SID = 'S-1-15-3-1'
+/** SE_GROUP_ENABLED：capability 处于启用状态。 */
+const SE_GROUP_ENABLED = 0x4
 const SECURITY_ATTRIBUTES = koffi.struct('SECURITY_ATTRIBUTES', {
   nLength: 'uint32_t',
   lpSecurityDescriptor: 'void *',
@@ -165,6 +183,24 @@ const DeleteAppContainerProfile = userenv.func(
 const ConvertSidToStringSidW = advapi32.func(
   'bool ConvertSidToStringSidW(void *sid, _Out_ void **str)',
 )
+const ConvertStringSidToSidW = advapi32.func(
+  'bool ConvertStringSidToSidW(const char16_t *str, _Out_ void **sid)',
+)
+
+/**
+ * capability SID 转换一次就够：它是进程级常量，且 `ConvertStringSidToSidW`
+ * 分配的内存要 LocalFree，缓存住既省调用也避免每次 spawn 漏一块。
+ */
+let internetClientSidCache: unknown | undefined
+function internetClientSid(): unknown {
+  if (internetClientSidCache !== undefined) return internetClientSidCache
+  const out: unknown[] = [null]
+  if (!ConvertStringSidToSidW(CAP_INTERNET_CLIENT_SID, out)) {
+    throw new Error(`prts: 解析 capability SID ${CAP_INTERNET_CLIENT_SID} 失败`)
+  }
+  internetClientSidCache = out[0]
+  return internetClientSidCache
+}
 const InitializeProcThreadAttributeList = kernel32.func(
   'bool InitializeProcThreadAttributeList(void *list, uint32_t count, uint32_t flags, _Inout_ size_t *size)',
 )
@@ -380,10 +416,17 @@ export async function createAppContainer(opts: AppContainerOptions): Promise<App
       }
 
       const capsBuf = koffi.alloc(SECURITY_CAPABILITIES, 1)
+      // 能力数组必须与 capsBuf 一样活到 CreateProcess 返回：koffi 的 alloc 对象
+      // 在本作用域内保持引用，进程创建是同步调用，出作用域前不会被回收。
+      const capEntry = koffi.alloc(SID_AND_ATTRIBUTES, 1)
+      koffi.encode(capEntry, SID_AND_ATTRIBUTES, {
+        Sid: internetClientSid(),
+        Attributes: SE_GROUP_ENABLED,
+      })
       koffi.encode(capsBuf, SECURITY_CAPABILITIES, {
         AppContainerSid: sidPtr,
-        Capabilities: null,
-        CapabilityCount: 0,
+        Capabilities: capEntry,
+        CapabilityCount: 1,
         Reserved: 0,
       })
       // DWORD_PTR 是 64 位：Number 传给 uint64_t 参数会被 koffi 拒绝，必须 BigInt。
