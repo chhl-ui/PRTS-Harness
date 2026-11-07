@@ -176,7 +176,7 @@
     description: |-
       Run commands in a PowerShell shell
       * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
-      * Outbound network works, but only by DIRECT connection. The system proxy points at 127.0.0.1, and this sandbox cannot reach loopback -- Invoke-WebRequest / Invoke-RestMethod will hang until timeout unless you pass -Proxy $null. Prefer curl.exe or Invoke-RestMethod -Proxy $null. node / git / npm / curl.exe ignore that proxy and work as-is.
+      * Outbound network works, but only by DIRECT connection. The system proxy points at 127.0.0.1 and this sandbox cannot reach loopback. So: Invoke-WebRequest / Invoke-RestMethod MUST pass -NoProxy (a bare call or -Proxy $null will hang until timeout -- NO_PROXY/HTTP_PROXY env vars do NOT help, .NET reads the WinINET system proxy). Raw HttpClient needs a handler with UseProxy = $false. curl.exe / node / git / npm ignore that proxy and work as-is.
       * State is persistent across command calls and discussions with the user.
       * Use native Windows paths (C:\...) and $env:NAME variables; this is PowerShell, not bash.
       * Please avoid commands that may produce a very large amount of output.

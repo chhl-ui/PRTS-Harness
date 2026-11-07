@@ -127,8 +127,22 @@ PRTS 缺的是模块 1 的 Router 层与模块 4 的状态/计算分离。
 **修后仍存的边界**：AppContainer 永久禁止 loopback，系统代理 `127.0.0.1:7892`
 在沙箱里永远不可达。`CheckNetIsolation LoopbackExempt` 也救不了——`dispose()` 会删除
 profile，`-n=<name>` 找不到对象（用户看到的「错误: 参数无效」就是这个）。所以沙箱里
-**只走直连**：.NET 的 HTTP 客户端（`Invoke-WebRequest` / `Invoke-RestMethod`）必须
-`-Proxy $null`；`curl.exe` / node / git / npm 不读 IE 代理，不受影响。
-`config/prts.yml` 的 pwsh 描述已按此更正——它原来写着「You don't have access to the
+**只走直连**。
+
+.NET 那条路要单独说清楚，因为它和 curl 的读法不同（2026-11-07 pwsh 7.6.9 实测）：
+
+| 客户端 | 默认 | 关代理后 |
+|---|---|---|
+| `curl.exe` | 直连，200 | — |
+| `Invoke-WebRequest` | **挂到超时**（读 WinINET 系统代理） | `-NoProxy` → 200 |
+| 裸 `HttpClient` | 同上 | `UseProxy = $false` → 200 |
+
+两个反直觉的点：
+- **`-Proxy $null` 无效**。`-NoProxy` 才是 pwsh 7 的开关；7.6.9 上实测前者仍走系统代理。
+- **环境变量无效**。`HTTP_PROXY` / `NO_PROXY=*` 都试过，.NET 在 Windows 上优先读
+  WinINET 设置，不看环境变量。所以没法靠沙箱注环境变量一劳永逸解决，模型必须带参数。
+
+`curl.exe` / node / git / npm 不读 IE 代理，不受影响。
+`config/prts.yml` 的 pwsh 描述已按上表更正——它原来写着「You don't have access to the
 internet via this tool」，会让模型直接放弃联网。
 
