@@ -17,3 +17,5 @@ __pycache__/
 .tianshu-canvas/
 # 界面设计原型与三视口截图（7.4M）：设计过程资产，不进仓库
 prototypes/
+# 各段工作交接：内部工作痕迹（本机路径、调试实录、未公开判据），只在本地保留
+docs/HANDOFF-*.md

@@ -177,5 +177,5 @@ test\           164 个测试文件；test\support\ 是驱动、脚本化模型�
 | 改代码前先认规则 | `AGENTS.md`——工具层接线事实、沙箱、所有者通道、K6 组合、外部参考与选型规则 |
 | 实现到验收的差距 | `docs\TODO.md`（§A 对照表）、`docs\PENDING-2026-11-05.md` |
 | 产品目标与第一版范围 | `docs\reference\` 两份原文 |
-| 各段工作交接 | `docs\HANDOFF-2026*.md`（最新 `HANDOFF-20261106-session-h.md`） |
+| 各段工作交接 | 不进仓库——本地 `docs\HANDOFF-2026*.md`（最新 `HANDOFF-20261106-session-h.md`） |
 | 设计与专项调查 | `docs\` 下的 `design-*` / `memory-*` / `v1-*` |
