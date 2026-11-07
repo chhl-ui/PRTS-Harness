@@ -1,112 +1,181 @@
 # prts-system
 
-PRTS 受保护核心：任务账本、授权、停止、审计、启动完整性，以及把这些接进 DSH 运行时的入口。
-纯 TypeScript，`node:sqlite` 持久化，只追加哈希链事件 + 可重建投影。
+**PRTS 的受保护核心。** 任务账本、审计链、权限入口、启动完整性、分级停止、运行沙箱，以及把这些接进 DSH 运行时的入口。
 
-**这是 PRTS 当前唯一在办的主线。** 其它 PRTS 目录的地位见 `C:\Users\Administrator\Desktop\PRTS-INDEX.md`。
+纯 TypeScript，`node:sqlite` 持久化，只追加哈希链事件 + 可重建投影。运行时以 DSH 为底座，Cordis 插件框架由 DSH 维护，本仓不自研。
+
+这个仓不是 PRTS 全体。产品目标、能力表与首版验收判据在 `docs\reference\`（两份：项目章程、架构需求）；界面与桌面端在另仓。有一条判断要一直记着：**机制存在 ≠ 验收通过**——「有代码且有调用方」和「有真实流程证据」是两件事，逐项对照在 `docs\TODO.md`。
+
+## 分层
+
+```mermaid
+flowchart TB
+  CLI["cli/  chat · chat-serve · chat-client · prts"]
+  RT["runtime/  start（boot 组合 · 守卫/审批/记账接线 · 注入链）"]
+  GUARD["护栏层  ledger K1 · audit K4 · authority K2a · stop K3 · integrity K5 · sandbox U3"]
+  MECH["机制层  memory · persona · emotion · skills · proactive · reminders · cost · spill"]
+  DB[("数据根 · *.sqlite")]
+  SUP["supervisor/  进程外守护（仅 Windows）：Job Object · 管道认证 · 重启限额"]
+
+  CLI --> RT
+  SUP -. 守护 .-> RT
+  RT --> GUARD
+  RT --> MECH
+  GUARD --> DB
+  MECH --> DB
+```
+
+| 层 | 职责 | 目录 |
+| --- | --- | --- |
+| 护栏层 | 结构上不许绕过的那层：账本、审计、授权判定、分级停止、启动完整性、沙箱 | `src\ledger\` `src\audit\` `src\authority\` `src\stop\` `src\integrity\` `src\sandbox\` |
+| 机制层 | 四方向的机制：记忆、人格、情感、进化，加前瞻、提醒、费用、输出卸载 | `src\memory\` `src\persona\` `src\emotion\` `src\skills\` `src\proactive\` `src\reminders\` `src\cost\` `src\spill\` |
+| 运行时 | 把上面两层接进 DSH：boot 组合、工具面、注入链、所有者通道 | `src\runtime\` |
+| 入口 | 所有者 REPL、服务端、分离客户端、`prts` 子命令 | `src\cli\` |
+| 共享原语 | 哈希链（canonicalJson / sha256hex / chainHash / verifyChainRows） | `src\chain\` |
+
+新组件复用 `src\chain\` 的链原语，不要各自实现一遍哈希链。
 
 ## 跑起来
 
+Node 24（本机实测 24.19.0）。持久化依赖 `node:sqlite`，低于 22.5 无法运行。
+
 ```sh
-npm install       # 依赖：@deepseek-ai/dsh-* 0.2.1-rc.2（RC 版本，升级需复验接口）
-npm run chat:serve # 所有者通道服务端（P2）：起运行时 + 命名管道，端点写 <数据根>/terminal.endpoint
-npm run chat:remote # 分离客户端：连上面那条管道（需另开一个终端，PRTS_DATA_ROOT 指同一数据根）
-npm run verify:e10 # E10 硬门（见下）。**所有者通道的安全性验收判据是这个脚本 exit 0**
-npm test          # node --test，112 例，约 33 秒（2026-11-01 实测 112 pass / 0 fail）
-npm run typecheck # tsc -p .（strict + noEmit + erasableSyntaxOnly）
-npm run chat      # 所有者终端：进程内 REPL（需下面三个环境变量）
+npm install
+npm run typecheck      # tsc -p .（strict + noEmit + erasableSyntaxOnly）
+npm test               # node --test，164 个测试文件
+npm run verify:memory  # V1-17 检索回归：低于冻结基线即退出码 1（零容差）
+npm run verify:e10     # E10 硬门：四臂全部符合才 exit 0，这是所有者通道唯一的安全判据
 ```
 
-`prts chat` 的用法：
+最小可用是进程内 REPL。三个环境变量缺任一直接退出——不猜默认值：
 
 ```sh
 PRTS_DATA_ROOT=C:\prts-data PRTS_WORKSPACE=C:\prts-workspace \
 PRTS_CONFIG=C:\prts-system\config\prts.yml npm run chat
 ```
 
-输入消息开始对话，`/exit` 退出，Ctrl-C 中断当前轮次。`/persona [预设名]` 查看/切换人格预设（切换后需重启 `prts chat` 才生效——人格在启动时装配）。工作区外的越界操作会弹审批提示（见「E3 审批」）。
+输入消息开始对话，`/exit` 退出，Ctrl-C 中断当前轮次（见下方命令表）。
 
-**API key 存哪**——按「被随手读到的门槛」从高到低取第一个可用的：
+**API key** 按「被随手读到的门槛」从高到低取第一个可用的：
 
-1. **Windows 凭据管理器**（推荐，磁盘上无明文）：`npm run secret:set` 交互输入（不回显），`npm run secret:del` 删除。存好后可删掉明文密钥文件。
+1. **Windows 凭据管理器**（推荐，磁盘上无明文）：`npm run secret:set` 交互输入（不回显），`npm run secret:del` 删除；存好可删掉明文文件。
 2. **环境变量** `DEEPSEEK_API_KEY`：读到后立刻从本进程环境删除，防派生子进程继承。
-3. **明文文件** `<dataRoot>\secrets\deepseek.key`：向后兼容保留，启动时打印警告——模型 shell 用 `Get-Content` 就能读走它。
+3. **明文文件** `<dataRoot>\secrets\deepseek.key`：兼容保留，启动时打印警告——模型 shell 用 `Get-Content` 就能读走它。
 
-诚实边界：同用户下的任何持久化存储都可能被同用户的恶意进程提取。本方案消除的是「明文文件可被随手读」，不是「同用户主动提取」。
+诚实边界：同用户下的任何持久化存储都可能被同用户的恶意进程提取。这套方案消除的是「明文文件可被随手读」，不是「同用户主动提取」。
+
+**所有者通道**（运行时与客户端分离）：
+
+```sh
+npm run chat:serve     # 起运行时 + 命名管道；端点原子发布到 <dataRoot>\terminal.endpoint
+npm run chat:remote    # 另开终端，PRTS_DATA_ROOT 指向同一数据根
+```
+
+客户端不解析命令语义（`/accept`、`/tasks` 一律当普通文本发给服务端），意外断开自动重连并重读端点文件（服务端重启会换管道名）；`/exit` 是主动结束，不重连。服务端常驻：客户端断开只结束本代会话，运行时与 agent 不退。
+
+## 模型能调什么
+
+模型能调的工具 = DSH 插件提供的 + PRTS 自己注册的。权威清单看代码，不要抄文档：`grep -rn "name: 'prts_" src`。
+
+- **PRTS 自有工具**（当前 13 个 `prts_*`）：任务（`prts_task_create` / `prts_task_list`）、记忆（`prts_memory_recall` / `prts_memory_summarize`）、会话（`prts_session_recall` / `prts_session_archive`）、意图（`prts_intent_create` / `prts_intent_list`）、技能（`prts_skill_propose` / `prts_skill_list`）、分派（`prts_subtask`）、联网（`prts_web_search` / `prts_web_fetch`）。模型只能建 `draft` 任务，不能自己批准、不能自己激活。
+- **DSH 插件工具**（`config\prts.yml`）：`read` / `read_image` / `write` / `edit`（经 K2a 守卫）、`glob` / `grep`（ripgrep 后端）、`working_directory`（只切会话 cwd，不产生能力）、`pwsh`（win32）/ `bash`（非 win32，互斥）。
+- **写前必读**：`write` 新建放行；覆盖会话从未接触过的已存在文件被拒（`FS_NOT_OBSERVED`）；`edit` 必须先读，读过后文件被外部改动会报 `FS_STALE_VERSION`。回归见 `test\runtime\fs-tools.test.ts`。
+- **模型侧不接受 actor 入参**：actor 在工具内部写死为 `{ kind: 'model', sessionId }`；属于 owner/system 的固定通道没有任何工具封装。
+
+## owner 命令
+
+宿主命令不触发模型回合，走 owner 通道：
+
+| 命令 | 作用 |
+| --- | --- |
+| `/task <目标>` | 提一个 `draft` 任务 |
+| `/task-approve [taskId]` | 批准本会话待批的任务（省略 id 时用本会话最近一个 draft） |
+| `/tasks` | 列账本里的任务 |
+| `/accept [taskId]` · `/reject <理由>` · `/cancel [taskId]` · `/budget [JSON]` | 裁决与预算；省略 taskId 时作用于本会话进行中的任务 |
+| `/memory <检索词>` | 检索长期记忆 |
+| `/forget <id,...> [--yes]` · `/forget-session <sessionId,...> [--yes]` · `/correct <factId> <新内容>` | 记忆删除与纠正 |
+| `/intent [list [--all] \| cancel <id,...>]` | 前瞻意图 |
+| `/persona [预设名]` | 人格预设；切换后需重启 `prts chat`（人格在启动时装配） |
+| `/model <预设名>` | 模型后端；切换后需重启 `chat:serve`（窗口在启动期定） |
+| `/sandbox <view\|edit\|full>` | 沙箱档位，per-session |
+| `/sessions` · `/switch <sessionId>` · `/new` | 会话表、切到已存在的 live 会话、新建会话 |
+| `/dispatch <任务>` | 分派给 worker，只回摘要 |
+| `/exit` · `/quit` | 退出 |
 
 ## 目录
 
 ```
-src/
-  chain/        共享链原语（canonicalJson / sha256hex / chainHash / verifyChainRows）
-  ledger/       K1 任务账本：append-only 事件 + fold.ts 投影
-  audit/        K4 审计：同一 DB、独立表、独立链
-  authority/    K2a 授权：Authority.guard 是唯一强制点（同步、返回理由串即拒绝）
-  stop/         K3 分级停止 StopController
-  supervisor/   K3 进程外守护：Job Object、控制管道认证、崩溃重启限额
-  integrity/    K5 启动完整性：受保护包与源码树哈希，锚在审计链
-  cli/          prts upgrade（清单只能经它修改）
-  runtime/      K6 运行时入口 main.ts + start.ts（boot 组合 + 内存 credentials + 守卫/审批/记账接线）
-                task-tools.ts：模型侧任务工具与 stepNo 单一分配器、账本工具排除名单
-config/prts.yml 组合树（sdk-minimal 展开，自 sdk-app/jsonrpc 与账户链中剥离）
-test/           106 例；test/support/ 是驱动、脚本化模型替身、临时目录
-.scratch/       一次性诊断探针（gitignore，不参与测试）
+src\
+  chain\        共享链原语，新组件复用
+  ledger\       K1 任务账本：append-only 事件 + fold.ts 投影
+  audit\        K4 审计：同一 DB、独立表、独立链
+  authority\    K2a 授权：Authority.guard 是唯一强制点（同步，返回理由串即拒绝）
+  stop\         K3 分级停止 StopController
+  supervisor\   K3 进程外守护：Job Object、控制管道认证、崩溃重启限额
+  integrity\    K5 启动完整性：受保护包与源码树哈希，锚在审计链
+  sandbox\      U3 运行沙箱：AppContainer / ACL runner
+  core\         startup-check 双链校验 + initCoreDb
+  memory\       长期记忆：写入 / 巩固 / 检索 / 纠正 / 遗忘 / 向量索引
+  persona\      人格预设      emotion\  情感状态      skills\  进化：候选 / 评估 / 采用 / 回退
+  proactive\    前瞻回忆      reminders\ 任务提醒        cost\    费用计量
+  spill\        工具输出卸载：超阈值落文件，read 可回读
+  runtime\      start.ts（boot + 接线）、assembly.ts（注入链）、task-tools、subtask、
+                terminal-server、owner-protocol、各 *-tools、tool-loop-guard
+  cli\          chat（REPL）、chat-serve、chat-client、prts（upgrade / memory / emotion / archive）
+config\prts.yml 运行时组合树（sdk-minimal 展开，剥掉 sdk-app 与账户链）
+test\           164 个测试文件；test\support\ 是驱动、脚本化模型替身、临时目录
 ```
 
-## 模型侧工具
+## 数据根
 
-模型能调的工具 = DSH 插件提供的 + PRTS 自己注册的。下面只是索引，权威清单看代码：
+运行时只认 `PRTS_DATA_ROOT`，所有状态都在这个目录下：
 
-- **PRTS 自有工具**：经 `tools.register` 注册在 `src\runtime\start.ts` 与 `src\runtime\task-tools.ts`。起点是 `prts_task_create`——提一个 `draft` 任务，不能自己批准、不能自己激活；D2 在同一文件补齐 `prts_task_note` / `step_begin` / `step_end` / `add_evidence` / `claim_done`。权威清单：`grep -rn "name: 'prts_task_" src`，不要抄文档。
-- **DSH 插件工具**（`config\prts.yml`）：`read` / `read_image` / `write` / `edit`（`tool-fs`，经 K2a 守卫）、`glob` / `grep`（`tool-fs-search`，ripgrep 后端，包自带二进制）、`working_directory`（只切会话 cwd，不产生能力）、`pwsh`（win32）/ `bash`（非 win32，两者互斥）。`pwsh`/`bash` 不归 K2a 也不归 E3——命令体内的写删识别不了，归 K2b。
-- **写前必读**（`dsh-fs-observation-policy`）：`write` 新建放行；覆盖**会话从未接触过的已存在文件**被拒（`FS_NOT_OBSERVED`）；`edit` 必须先读；读过之后文件被外部改动会报 `FS_STALE_VERSION`。注意「刚写成功的文件」也算已观察——同一会话写完立刻覆盖是允许的。回归：`test\runtime\fs-tools.test.ts`。
-- **模型侧不接受 actor 入参**：actor 在工具内部写死为 `{ kind: 'model', sessionId }`；账本里属于 owner/system 的固定通道（`verify` / `ownerAccept` / `ownerReject` / `setBudget` / `stopByOwner` / `resumeFromStop` / `chargeUsage` / `recoverOnStartup`）没有任何工具封装。工具面与授权层的逐条对应见 `AGENTS.md` 的「工具层接线事实」。
+| 路径 | 内容 |
+| --- | --- |
+| `core.sqlite` | K1 账本 + K4 审计（独立表、独立链） |
+| `memory.sqlite` | 长期记忆：片段、事实、向量索引、巩固与纠正记录 |
+| `persona.sqlite` | 人格预设与当前 active |
+| `skills.sqlite` · `emotion.sqlite` · `proactive.sqlite` · `reminders.sqlite` · `cost.sqlite` | 各机制自己的库 |
+| `model-profile.json` | `/model` 写入的后端预设，`chat:serve` 启动时读并覆盖 env |
+| `terminal.endpoint` | 所有者通道的管道名（listen 成功之后才原子发布） |
+| `secrets\deepseek.key` · `secrets\firecrawl.key` | 兜底明文密钥（读到即告警） |
+| `dsh-home\sessions\**` | DSH 会话日志（jsonl）：`/sessions`、回放、流式兜底都读它 |
 
-## 必须守住的不变量（细节见 AGENTS.md）
+工具输出卸载（spill）默认落在数据根的同级目录 `prts-spill`（`PRTS_SPILL_ROOT` 可改）。
 
-- 守卫是唯一强制点。`pre-execute` 瀑布与审批应答都可能被前置插件伪造，守卫在后面仍会拒。
-- 真实运行时必须在派生任何子进程之前调用 `connectControl`，并把控制 env 读即删。
-- 所有者命名管道只接受 `stop` 和 `status`；控制管道 token 每次重启换新、`timingSafeEqual` 比对、pid 必须等于 Job 内运行时 pid。
-- key 只存在于内存 credentials 服务，不进环境变量，不落模型可读的位置。
-- 账本/审计是事实来源；投影只能由 `fold.ts` 的 `applyEvent` 更新。
-- `startupCheck` 返回 read-only 时不得调用 `initCoreDb`，只能只读打开。
+## 必须守住的不变量
 
-## 当前状态
+1. **守卫是唯一强制点**。`pre-execute` 瀑布与审批应答都可能被前置插件伪造，`Authority.guard` 在后面仍会拒。它同步、与 DSH `tools.guard` 同签名、返回理由串即拒绝，且每次直查 SQLite——跨进程撤销即时生效。当前覆盖 `fs.read:` / `fs.write:` / `fs.delete:` / `net:`。
+2. **真实运行时必须在派生任何子进程之前调用 `connectControl`**，并把 `PRTS_CONTROL_*` 从 env 读即删——否则模型 shell 经继承的环境变量就能冒充运行时。
+3. **所有者命名管道只接受 `stop` 和 `status`**，其余一律 `UNSUPPORTED`，畸形 JSON 不崩守护进程。控制管道连接须在 2s 内发送 `{type:'hello',pid,token}` 认证：token 每次重启换新、`timingSafeEqual` 比对、pid 必须等于 Job 内运行时 pid，先认证者胜。
+4. **key 只存在于内存 credentials 服务**：不进环境变量，不落模型可读的位置。
+5. **账本与审计是事实来源**。`tasks` / `task_steps` / `evidence` 只能由 `src\ledger\fold.ts` 的 `applyEvent` 更新，`audit_deletions` 只能由 `src\audit\fold.ts` 的 `applyAuditEvent` 更新；每个变更是「追加事件 + 应用投影」在同一个 SQLite 事务内完成。
+6. **`startupCheck` 返回 `read-only` 时不得调用 `initCoreDb`**，只能只读打开（写方法一律抛 `READ_ONLY`）。断链或缺表就进只读，不修、不猜。
+7. **owner 通道不暴露给模型**：`verify` / `ownerAccept` / `ownerReject` / `setBudget` / `stopByOwner` / `resumeFromStop` / `chargeUsage` / `recoverOnStartup` 的 actor 由库内固定；工具适配层只能把 actor 固定为 `{ kind: 'model', sessionId }`，本库不验证 actor 的真实来源。
+8. **只用可擦除语法**：不要 `enum` / `namespace` / 参数属性 / `import =` / 装饰器；本地导入一律带 `.ts` 后缀——Node 原生类型剥离直接运行 `.ts`。
 
-- **最新（2026-11-05）**：Wave 3 收尾完成——会话表、`/sessions`、`/switch`、`/new`、分派器（`/dispatch`）、客户端寿命与运行时寿命解耦、授权翻牌（未注册会话写权限 → deny）；`/switch` 与分派器已有真实 runtime 端到端测试。当前全量 **796 pass / 0 fail**（`node --test "test/**/*.test.ts"`）。细节见 `docs/HANDOFF-20261105-session-f.md`。
-- （历史记录，截至 2026-10-31）最近的功能提交是 `ddc511d`（2026-10-31 22:55）"任务入口设计同步到实现状态"。在此之前 `b3cb34b`（2026-10-30）"Runtime integration 2a" 让真实 DSH 组合在自有守护进程下跑通、模型由脚本替身驱动；此后不再只有文档提交——K1 任务入口已按 `docs/task-entry-design.md` 的 W0–W5 全部落地（`306d240` W0 至 `a9e3dbf` W5），模型只能建 `draft`、`owner` 才能 `activate`。取准看 `git log`。
-- **测试稳定性（2026-10-31 实测）**：曾观察到 1 次 `fail 1`（85 例时代，详情因日志被 grep 过滤而丢失）。随后 **20 轮连续采样**（90 例，共 1800 次用例执行）**0 失败**，原始失败未复现——若真实概率是 1/5，20 轮全绿的概率仅 1.15%，故该频率假设可以否定；95% 置信的失败率上界约 15%（rule of three, 3/20）。**仍未定位**：头号嫌疑是 R2 等待 LanguageMode 落盘的轮询窗口（原 10s，已放宽到 15s，并把「等待超时」与「语言模式错误」拆成两条断言，避免下次复现时把定位引到错误的层）。单次全绿仍不作结论，判据是**连续两次全绿**。
-- O1 已修（2026-10-31）：驱动路径改用 `createUserMessage()` 构造消息，真实适配器经 agent 轮次能发出请求；回归见 `test/runtime/o1-real-adapter.test.ts`。
-- **E1 已通（2026-10-31）**：真实 key、真实 `api.deepseek.com`、出厂默认配置（`reasoningEffort` 缺省 = `high`，未改 `config/prts.yml`），连跑 4 次全部成功，`assistant/message` 含 `reasoning` + `text` 块，`turn/end` 为 `completed`，单次约 1580ms，`agent/error` 0 条。thinking block 被正确映射为 `reasoning`，不需要关掉推理。
-- **`prts chat` 已流式输出（2026-10-31）**：`agent/assistant-stream` 的 payload 是 `{ frame: AssistantStreamFrame }`（`dsh-agent/lib/types/runtime-types.d.ts:107-140`，事件声明 `:366-369`）；可见文本只在 `frame.type === 'chunk'` 且 `frame.chunk.type === 'text-delta'` 的 `chunk.text` 里（`dsh-llm/lib/types/types.d.ts:434-441`，emit 站点 `dsh-agent-loop/lib/index.js:1080`）。`src/cli/chat.ts` 按此契约取增量、逐片写终端；真实 key 实测首片比回合结束早约 250ms 到达。某 provider 只发完整 block 不发 `text-delta` 时，仍走 `<dataRoot>/dsh-home/sessions/**` 的 `assistant/message` 兜底——两条路径互斥，不会重复。
-- **U4：step 现在有 started 中间态（2026-10-31）**：`beginStep` 从 `tools/result` 挪到 `tools/execute`（waterfall，位置在 guards 之后、工具真正执行之前——`dsh-tools/lib/index.js:3427` 晚于 `:3337` 的 guardReason），`endStep` 仍在 `tools/result`。收益是进程在工具执行中途崩溃时账本里留着孤儿 step，`recoverOnStartup` 才看得见；代价是被守卫拒绝的调用不再产生 step——拒绝不是「执行失败」，它压根没执行。回归见 `test/runtime/ledger-startstep.test.ts`。
-- Devin 留下的孤儿脚本 `enum-tools.ts` 已移入 `.scratch\`（一次性探针，不参与测试）。
+## 状态
 
-## 已知缺陷
+- **测试**：`npm test` 本机实测 **888 passed / 0 failed**，98s（2026-11-07，164 个测试文件）。
+- **实现 vs 验收**：初版 17 项全部有实现；验收完成 9 项、部分 2 项、待博士盲评或外部条件 6 项。逐项判据与证据见 `docs\TODO.md` §A。
+- **本机部署事实（2026-11-06 实测）**：K5 从未在 `C:\prts-data` 锚定——没有 manifest 文件、`core.sqlite` 无 `integrity.*` 事件、`prts chat` 不经过 Supervisor。要启用得先用 `prts upgrade --init` 做首次锚定（还要带 `--install-root` / `--manifest` / `--db` / `--spec` 四个参数），此后每次改 `src\` 都要重跑，且要有消费方给 `Supervisor.start` 传 `config.integrity` 才真的校验。在那之前「改 src 就要跑 upgrade」在本机不成立。
+- **沙箱默认**：代码默认 `PRTS_SANDBOX_BACKEND=local`；部署脚本 `prts-chat.cmd` 已设 `appcontainer`（部署层已切，代码默认未改）。
 
-- **O1（已修，2026-10-31）**：根因是 `agent.followup()` 不归一化入参——传裸 `{content, source}` 的消息缺 `role`，`serialize` 里 `previous?.role === wireRole` 在首元素上双 `undefined` 相等，解引用 `previous.content` 抛 TypeError（`dsh-llm-deepseek/lib/index.js:1688:45`），被 `generate()` 兜底 catch 包成误导性的 `TRANSPORT`。修法：`agent.followup/steer/inject` 一律传 `createUserMessage()`（`dsh-llm`）；接线事实与各处 file:line 见 `AGENTS.md`。
-- **错误曾全程静默（随 O1 一并修掉）**：`agent/error` 是 turn 内失败的唯一上报通道（`throwError()` 先 emit 再 throw，`kick()` 的 catch 只吞异常传播）。此前无订阅方，失败在对话里表现为一直不回复。`src/runtime/error-report.ts` 现将其脱敏后写 stderr，由 `startRuntime()` 挂载、`dispose()` 解绑。
-- 复现脚本 `.scratch/o1-probe.test.ts` 仍自持裸对象调用，可复现原始症状，用于对照。
+## 边界（实测结果，不是待办）
 
-## 沙箱三档与工具流水（2026-11-06）
-
-- **`/sandbox <view|edit|full>`**（owner 命令，`src\cli\chat.ts` 的 `runSandbox`）：映射上游 `dsh-sandbox-policy` 三档 `read-only` / `workspace-write` / `danger-full-access`，写 `sandbox/mode` 会话事件（per-session、随会话日志回放重建），部署默认仍是 `workspace-write`。切档会先 kill 活 PTY——持久 pwsh 只在起 shell 时 confine 一次，不换 shell 档位不生效。
-  - `view`：fs 侧由 `tools.guard` 直接拒 `fs.write:`/`fs.delete:`（`src\runtime\start.ts` 的 `resolveSandboxMode`）；shell 侧由 runner `--mode read-only` 只授 `(OI)(CI)(RX)`——此前 read-only 与 workspace-write 同构、容器仍授写，2026-11-06 收紧才名副其实。
-  - `full`：上游 `spawnArgv` 绕过 confine，shell 不进容器；fs 仍走 K2a 授权，档位不绕过 owner 审批。
-  - 后端差异：两个后端都消费 `--mode`——`local` 走上游 `dsh-sandbox-local`（`lib/index.js:34/322/359` 按 `policy.mode` 选 runner 与授权，Windows 上再委托 `dsh-sandbox-windows-acl` 的 runner，其 `lib/runner.js:144` 在 read-only 时 `writableDirs: []`）；`appcontainer` 走本仓 runner → `appcontainer.ts:352` 授 `(OI)(CI)(RX,W)` 或 `(OI)(CI)(RX)`。前者在本机实测下连 workspace-write 档都写不了工作区（见下条「已知限制」），所以实际能拿到 workspace 写权限的是 appcontainer 后端（`prts-chat.cmd` 已设）。
-- **工具活动推送（M3）**：`attachToolFeed`（`src\runtime\terminal-server.ts`）把 `tools/execute`/`tools/result` 翻成 `type:'tool'` 推送（call 带参数截断，result 只在出错时带错误摘要）；`chat:remote` 与桌面客户端据此渲染活动流水。纯观测，绝不否决工具执行。
-
-## 已知限制
-
-- **K2a 守卫已接线，覆盖 `fs.*` 与 `net.*`**（2026-10-31 初版只覆盖 fs；net 随后纳入，见 `src/runtime/start.ts:406-407`）：`src/runtime/start.ts` 在 boot 返回后挂 `tools.guard`，模型发起的读/写/删/联网先过 `Authority.guard`——越界返回拒绝理由并写 `tool.denied` 审计，工作区内读写正常放行（回归见 `test/runtime/guard-wiring.test.ts`）。
-- **`exec` 的边界由沙箱后端决定，不是"未实现"**（2026-11-05 核实，2026-11-06 修正）：默认 `PRTS_SANDBOX_BACKEND=local` 走 `dsh-sandbox-windows-acl` 的 WRITE_RESTRICTED token——`whoami /all` 实测为 **Low Mandatory Level + `BUILTIN\Administrators` deny-only**，读不受限、写只落在 restricting SID 有 ACE 的路径。**本机实测：local 下 pwsh 连 `C:\prts-workspace` 都写不了**（根目录与子目录的 `New-Item` 均报「访问被拒绝」），旧版此处「local 此时 pwsh 没有文件系统边界」的说法与实测相反，已删除。切到 `appcontainer` 后，pwsh 进程被 OS 的 AppContainer ACL 限制，**真机实测**：工作区内写成功、工作区外写失败且文件未创建、读密钥被拦（`test/sandbox/live-wiring.test.ts` 断言 `writeInside.code === 0` / 越界文件不存在 / 读密钥非零，本机 995ms、1 pass）。K2a 对 pwsh 只能整体放行或整体拒绝，而整体拒绝会破坏现有 pwsh 用例且不是真边界——所以判定分工放在 OS 层，`src/runtime/start.ts` 的 guard 显式过滤 `exec`/`tool`/`system` 是**分工而非遗漏**。设计依据见 `docs/k2b-exec-boundary-design-2026-11-05.md`。**这与下面的审批问题是两件事**——审批不可达是 fs backend 的问题，守卫接线是工具流水线的问题，不要互相代替。
-- **请求重试会重复输出片段**：`frame` 带 `attemptId` / `revision`，模型请求失败重试会起新 attempt 从头重发 delta，而已经写进终端的片段撤不回来。`chat.ts` 按 `attemptId` 变化重置游标，但不做终端回滚——重试路径下用户可能看到重复片段。正常对话（无错误、无工具重试）不触发。
-- **E3 审批已实现（2026-10-31），走 K2a 侧而非 DSH 的 fs escalation**。DSH 的 `resolvePolicy` 路径被 K2a 守卫遮蔽——越界写在 `authority.ts:148-152` 就被拒，到不了 `dsh-tool-fs/lib/index.js:1134-1150`。可用的钩子是 `tools/pre-execute`：它是异步 waterfall 且在同步 guards 之前（`dsh-tools/lib/index.js:3321` / `:3337`）。链路：pre-execute 用 `classify(name, arguments)` 算 capabilities → `decide()` 返 `ask` → 按 callId 暂存 → `approval/request` answerer（`src/cli/chat.ts`）弹终端提示 → `recordOwnerDecision({outcome:'allowed-once'})` → 同步 guard 读到 once 放行。回归见 `test/runtime/e3-approval.test.ts`。
-- **三层授权语义**：`protectedRoots` 内 → `deny`（绝对禁止，审批救不了）；工作区外且非 protected → `ask`（可审批）；工作区内 → `allow`。`decide()` 的优先级是 `deny > ask > allow`，所以越界写的 E3 用例必须落在「工作区外、非 protectedRoots」。
-- **审批只覆盖文件能力**：`exec` / `net` / `system` 不归 E3（归 K2b）——pre-execute 对非 `fs.*` 能力直接放行。
-- ~~dispose 后进程不退出~~（2026-10-31 复测不复现）：`startRuntime` → `dispose` 与 `startRuntime` → 一次完整 turn → `dispose` 两个场景，结束后 `_getActiveHandles()` 只剩 stdin/stdout/stderr（fd 0/1/2）、`_getActiveRequests()` 为空，不加 `--test-force-exit` 也正常 `exit 0`。若日后在 supervisor / job 路径上再观察到挂住，按那条路径单独记，不能笼统写成「dispose 后不退出」。
+- **沙箱三档**：`/sandbox view|edit|full` → `read-only` / `workspace-write` / `danger-full-access`，写 `sandbox/mode` 会话事件（per-session，随会话日志回放重建）。切档会先 kill 活 PTY——持久 shell 只在起 shell 时 confine 一次。`view` 档下 fs 写/删由 `src\runtime\start.ts` 直接拒：本地 fs 后端不消费 `sandboxPolicy`，不在这里拦就名不副实（实测过：切 view 后 `write` 照写不误）。
+- **后端差异是真实的**：`local` 走 `dsh-sandbox-windows-acl` 的 WRITE_RESTRICTED token，本机实测**连 `C:\prts-workspace` 都写不了**；`appcontainer` 下真机三臂通过——工作区内写成功、工作区外写失败且文件未创建、读密钥被拦（`test\sandbox\live-wiring.test.ts`）。要能写工作区就用 appcontainer。
+- **`pwsh` 的命令体不归 K2a**。守卫识别不了命令体内的写删，对 `exec` / `net` / `system` 只能整体放行或整体拒绝；判定分工放在 OS 层（沙箱）。`src\runtime\start.ts` 里显式过滤 `exec` / `tool` / `system` 是分工，不是遗漏。设计见 `docs\k2b-exec-boundary-design-2026-11-05.md`。
+- **E3 审批覆盖 `fs.*` 与 `net`**，不覆盖 `exec` / `system` / `tool`——pwsh 命令体内的写删识别不了，整体拒绝会切掉现有能力。只有 `decide()` 返 `ask` 才问人：`allow` 原样放行，`deny`（如 `protectedRoots`）不可审批，交回同步守卫去拒并落 `tool.denied`。三层授权语义：`protectedRoots` 内恒 `deny`，工作区外且非 protected 为 `ask`，工作区内 `allow`；优先级 `deny > ask > allow`。
+- **请求重试会重复输出片段**：失败重试会起新 attempt 从头重发 delta，已经写进终端的片段撤不回来。正常对话（无错误、无工具重试）不触发。
+- **停止权与进程外守护仅 Windows**（Job Object + 命名管道）；其他平台只有进程内的 `StopController`。
 
 ## 文档
 
-- 设计与计划：`C:\Users\Administrator\Desktop\设计和计划\`（先读其中的 README.md）
-- 最新设计：`PRTS-DESIGN-02-RUNTIME-INTEGRATION-2026-10-30.md`（§8A/§8B 是 2a 步的实测记录）
+| 想去哪 | 读什么 |
+| --- | --- |
+| 改代码前先认规则 | `AGENTS.md`——工具层接线事实、沙箱、所有者通道、K6 组合、外部参考与选型规则 |
+| 实现到验收的差距 | `docs\TODO.md`（§A 对照表）、`docs\PENDING-2026-11-05.md` |
+| 产品目标与第一版范围 | `docs\reference\` 两份原文 |
+| 各段工作交接 | `docs\HANDOFF-2026*.md`（最新 `HANDOFF-20261106-session-h.md`） |
+| 设计与专项调查 | `docs\` 下的 `design-*` / `memory-*` / `v1-*` |
