@@ -93,6 +93,17 @@
   config:
     shellDialect: pwsh
     timeoutMs: 300000
+    # 启动即把 .NET 的默认代理置空。为什么必须在启动参数里做：
+    #   - NO_PROXY / HTTP_PROXY 环境变量对 .NET 无效（Windows 上读 WinINET），实测过；
+    #   - profile 走不通，默认参数带 -NoProfile；
+    #   - 系统代理指向 127.0.0.1，而 AppContainer 禁 loopback，不改就是「每次请求挂到超时」。
+    # -NoExit 保证初始化完仍进交互式 shell，PTY 语义不变。
+    shellArgs:
+      - '-NoLogo'
+      - '-NoProfile'
+      - '-NoExit'
+      - '-Command'
+      - '[System.Net.Http.HttpClient]::DefaultProxy = [System.Net.WebProxy]::new()'
 
 - id: timer
   name: '@deepseek-ai/cordis-plugin-timer'
@@ -176,7 +187,7 @@
     description: |-
       Run commands in a PowerShell shell
       * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
-      * Outbound network works, but only by DIRECT connection. The system proxy points at 127.0.0.1 and this sandbox cannot reach loopback. So: Invoke-WebRequest / Invoke-RestMethod MUST pass -NoProxy (a bare call or -Proxy $null will hang until timeout -- NO_PROXY/HTTP_PROXY env vars do NOT help, .NET reads the WinINET system proxy). Raw HttpClient needs a handler with UseProxy = $false. curl.exe / node / git / npm ignore that proxy and work as-is.
+      * Outbound network works by DIRECT connection. The .NET default proxy is cleared when this shell starts, so Invoke-WebRequest / Invoke-RestMethod / HttpClient work as-is -- do not pass -Proxy and do not set HTTP(S)_PROXY. The system proxy points at 127.0.0.1 and this sandbox cannot reach loopback; anything that still tries it will hang until timeout. curl.exe / node / git / npm are unaffected.
       * State is persistent across command calls and discussions with the user.
       * Use native Windows paths (C:\...) and $env:NAME variables; this is PowerShell, not bash.
       * Please avoid commands that may produce a very large amount of output.

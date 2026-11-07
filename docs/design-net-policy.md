@@ -137,12 +137,26 @@ profile，`-n=<name>` 找不到对象（用户看到的「错误: 参数无效�
 | `Invoke-WebRequest` | **挂到超时**（读 WinINET 系统代理） | `-NoProxy` → 200 |
 | 裸 `HttpClient` | 同上 | `UseProxy = $false` → 200 |
 
-两个反直觉的点：
+两个反直觉的点，都实测过：
 - **`-Proxy $null` 无效**。`-NoProxy` 才是 pwsh 7 的开关；7.6.9 上实测前者仍走系统代理。
-- **环境变量无效**。`HTTP_PROXY` / `NO_PROXY=*` 都试过，.NET 在 Windows 上优先读
-  WinINET 设置，不看环境变量。所以没法靠沙箱注环境变量一劳永逸解决，模型必须带参数。
+- **环境变量无效**。`NO_PROXY=*` 在进程内第一条就设置仍然失败——.NET 在 Windows 上只读
+  WinINET 系统代理，不看环境变量。所以「沙箱注 env 一劳永逸」这条路不存在。
 
-`curl.exe` / node / git / npm 不读 IE 代理，不受影响。
-`config/prts.yml` 的 pwsh 描述已按上表更正——它原来写着「You don't have access to the
-internet via this tool」，会让模型直接放弃联网。
+**最终解法**：`config/prts.yml` 的 `terminal-pwsh` 用 `shellArgs` 覆盖默认的
+`["-NoLogo","-NoProfile"]`，追加
+
+```
+-NoExit -Command "[System.Net.Http.HttpClient]::DefaultProxy = [System.Net.WebProxy]::new()"
+```
+
+shell 启动时就把 .NET 的默认代理置空。实测（临时 dataRoot + 真 appcontainer + 真模型）：
+`Invoke-WebRequest -Uri https://example.com` **裸调用返回 200**，不需要任何额外参数。
+
+为什么只能在启动参数里做：profile 路被 `DEFAULT_PWSH_ARGS` 里的 `-NoProfile` 挡住，
+环境变量路被 .NET 无视——能动的只有 `shellArgs`。`-NoExit` 保证初始化后仍进交互式
+shell，PTY 语义不变（实测 pwsh 工具正常往返）。
+
+`curl.exe` / node / git / npm 不读 IE 代理，本来就不受影响。
+`config/prts.yml` 的 pwsh 描述已同步：原句「You don't have access to the internet via
+this tool」会让模型直接放弃联网。
 
