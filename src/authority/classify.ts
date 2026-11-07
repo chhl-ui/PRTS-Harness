@@ -22,6 +22,22 @@ function absFilePath(args: unknown, tool: string): string {
  */
 const NET_TOOL = /(?:^|[^a-z])(web|search|fetch|http|crawl|browser|net|api)(?:[^a-z]|$)/i
 
+/**
+ * 第三方代理类联网工具：真实出站是代理服务本身，不是参数里的目标站点。
+ *
+ * 为什么必须单独登记：`netHost` 只能从参数里找 url/href/uri/endpoint。
+ * `prts_web_search` 的参数只有 query/limit，取不到 host 就退化成 `net:*`；
+ * 而 `hostAllowed('*')` 恒 false（authority.ts:114），白名单对它永远不生效，
+ * 审批提示上也看不出要连哪个站。
+ *
+ * `prts_web_fetch` 虽然带 url，但抓页面是 Firecrawl 代取——本机连接的仍然是
+ * api.firecrawl.dev。按目标站授权等于对着错的边界做判定。
+ */
+const PROXY_NET_HOSTS: Record<string, string> = {
+  prts_web_search: 'api.firecrawl.dev',
+  prts_web_fetch: 'api.firecrawl.dev',
+}
+
 /** 从参数里尽力取 host；取不到返回 `*`（表示「任意域名」，仍会走授权判定）。 */
 function netHost(args: unknown): string {
   if (args !== null && typeof args === 'object') {
@@ -64,6 +80,12 @@ export function classify(tool: string, args: unknown): Capability[] {
       if (typeof tool !== 'string' || tool === '') raise('INVALID_INPUT', 'tool must be a non-empty string')
       // K2b：联网类工具归 net（无 grant 即 ask）。放在 tool 之前判，
       // 否则 MCP 的 web_search 之类会一直落到 tool 分支、永远拿不到 net 的授权语义。
+      // 代理类先判：它们的 host 由代码决定，不看参数（见 PROXY_NET_HOSTS）。
+      // 用 hasOwn 而不是直接索引——模型可以把工具名传成 'constructor' 之类。
+      const proxyHost: string | undefined = Object.hasOwn(PROXY_NET_HOSTS, tool)
+        ? PROXY_NET_HOSTS[tool]
+        : undefined
+      if (proxyHost !== undefined) return [cap.net(proxyHost)]
       if (NET_TOOL.test(tool)) return [cap.net(netHost(args))]
       return [cap.tool(tool)]
   }

@@ -27,6 +27,33 @@ test('K1 网络类工具归到 net，并尽力从参数里提取 host', () => {
   assert.deepEqual(classify('http_request', { endpoint: 'https://api.deepseek.com/v1' }), [cap.net('api.deepseek.com')])
 })
 
+test('K1b 第三方代理工具按真实出站 host 授权，不按参数里的目标站点', () => {
+  // prts_web_* 的代码跑在本进程里，但真正被连接的是 Firecrawl。参数里的 url 只是
+  // 「要它替你抓哪个站」，本机的网络边界是 api.firecrawl.dev——按目标站授权会让
+  // prts_web_search（参数里根本没有 url）退化成 net:*，白名单永远命不中。
+  assert.deepEqual(classify('prts_web_search', { query: '量子计算' }), [cap.net('api.firecrawl.dev')])
+  assert.deepEqual(classify('prts_web_fetch', { url: 'https://evil.example/x' }), [cap.net('api.firecrawl.dev')])
+  // 未登记的工具仍按参数推 host，行为不变
+  assert.deepEqual(classify('web_search', { query: 'x' }), [cap.net('*')])
+})
+
+test('K1c 白名单配 api.firecrawl.dev 后，两个联网工具都直接放行，不弹审批', () => {
+  const t = makeTmp('prts-k2b-')
+  const a = Authority.open(t.db(), {
+    workspaceRoots: [t.dir], protectedRoots: [], netAllowHosts: ['api.firecrawl.dev'],
+  })
+  try {
+    for (const [tool, args] of [
+      ['prts_web_search', { query: 'q' }],
+      ['prts_web_fetch', { url: 'https://example.com' }],
+    ] as const) {
+      assert.equal(a.decide(call(classify(tool, args))).kind, 'allow', `${tool} 应被白名单放行`)
+    }
+    // 白名单只覆盖 Firecrawl，不放行任意站点
+    assert.equal(a.decide(call([cap.net('example.com')])).kind, 'ask', '别的域名仍要授权')
+  } finally { a.close(); t.cleanup() }
+})
+
 test('K2 非网络工具分类一个字节都不变（fs / pwsh / 普通工具）', () => {
   // 路径会被 normalizePath 补成盘符绝对路径（Windows 下 /tmp/x → C:\tmp\x），
   // 所以只断言能力类别，不硬比路径字符串。
