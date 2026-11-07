@@ -72,6 +72,15 @@ export interface SpawnSubtaskDeps {
   model: string
   /** 等子会话收敛的上限，默认 120s（与 runChat 的 waitIdle 默认一致）。 */
   timeoutMs?: number
+  /**
+   * 等摘要正文落盘的上限，默认 30s。
+   *
+   * 与 `timeoutMs` 分开是因为两者等的东西不同：前者等回合收敛，后者等**日志落盘**。
+   * 实测子会话日志的正文可能比 waitIdle 返回晚 3.6 秒（2026-11-07 真机：
+   * createdAt 1794029664762，含正文的 assistant/message 在 1794029668387 落盘，
+   * 而旧实现只有 30×100ms 固定窗口，必然读到空串）。
+   */
+  summaryWaitMs?: number
 }
 
 export interface SubtaskResult {
@@ -136,12 +145,28 @@ export async function spawnSubtask(
     }))
     const settled = await waitIdle(handle.agent, deps.timeoutMs ?? 120_000)
     if (!settled) throw new Error('subtask: 子会话未在时限内收敛')
-    // 摘要落盘晚于回合收敛（实测全量并发下 waitIdle 返回后日志仍可能为空）：
-    // 轮询读，最多 3s。worker 合法地不产出文本时，超时后仍返回空串，不制造假摘要。
-    let summary = assistantAfterSeq(deps.dataRoot, plan.sessionId, 0).text
-    for (let i = 0; i < 30 && summary.trim() === ''; i += 1) {
+    // 摘要落盘晚于回合收敛，而且**晚多久不确定**：实测健康检查子会话的正文比
+    // waitIdle 返回晚 3.6 秒。旧实现是固定 30×100ms 窗口，到点即放弃——晚到就返回
+    // 空串，父会话看到「回执缺正文」。
+    //
+    // 现在的退出条件是「日志停止增长」而不是「时间到」：
+    //   - 出现正文 → 立刻收；
+    //   - 已有事件但 seq 连续 10 秒不变 → 子会话合法地没产出文本，返回空串（不造假摘要）。
+    //     阈值不能小：模型在两个 step 之间停顿数秒是常态（实测 0.9s/步，但推理步可能更久），
+    //     判太早会把还在跑的子会话当成"没话说"。
+    let summary = ''
+    let lastSeq = -1
+    let quietTicks = 0
+    const deadline = Date.now() + (deps.summaryWaitMs ?? 30_000)
+    while (Date.now() < deadline) {
+      const read = assistantAfterSeq(deps.dataRoot, plan.sessionId, 0)
+      if (read.text.trim() !== '') { summary = read.text; break }
+      if (read.seq > 0) {
+        if (read.seq === lastSeq) quietTicks += 1
+        else { quietTicks = 0; lastSeq = read.seq }
+        if (quietTicks >= 100) break
+      }
       await new Promise((r) => setTimeout(r, 100))
-      summary = assistantAfterSeq(deps.dataRoot, plan.sessionId, 0).text
     }
     return { sessionId: plan.sessionId, summary }
   } finally {
@@ -202,7 +227,10 @@ export function createSubtaskTool(
         },
         required: ['sessionId', 'summary'],
       },
-      render: (value: unknown): { type: 'text'; text: string }[] => {
+      // DSH 的 render 契约是 (args, value)。写成单参数时收到的是 **args**，
+      // `v?.summary` 永远 undefined，回执会退化成入参 JSON——模型只能看到
+      // 自己传的 task/taskId，拿不到子会话的正文（2026-11-07 真机复现）。
+      render: (_args: unknown, value: unknown): { type: 'text'; text: string }[] => {
         const v = value as { summary?: unknown }
         return [{ type: 'text', text: typeof v?.summary === 'string' ? v.summary : JSON.stringify(value) }]
       },

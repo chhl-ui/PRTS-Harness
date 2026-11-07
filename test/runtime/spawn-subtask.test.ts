@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync } from 'node:fs'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { Authority } from '../../src/authority/authority.ts'
 import { spawnSubtask, createSubtaskTool, planSubtask } from '../../src/runtime/subtask.ts'
@@ -53,6 +53,8 @@ function env(opts: { failCreate?: boolean; stayRunning?: boolean } = {}) {
     deps: {
       ctx: fakeCtx(seen, opts), authority: auth, workspace: ws, dataRoot: data,
       parentSessionId: 'main-1', provider: 'p', model: 'm', timeoutMs: 600,
+      // 假 agent 不写日志：缩短摘要轮询，避免每个用例白等默认的 30s。
+      summaryWaitMs: 300,
     },
     cleanup() { auth.close(); t.cleanup() },
   }
@@ -128,5 +130,61 @@ test('SP5 planSubtask 与 spawnSubtask 的注册键同一：dir 在 plan 的派�
     assert.equal(r.sessionId, plan.sessionId)
     const created = e.seen.created[0] as { meta?: { cwd?: string } }
     assert.equal(created.meta?.cwd, plan.dir, '子会话工作目录必须是派生目录')
+  } finally { e.cleanup() }
+})
+
+test('SP7 render 收到的是 execute 的返回值，不是入参（回归：回执缺正文）', () => {
+  const e = env()
+  try {
+    const defs: Array<{
+      name?: string
+      output?: { render?: (args: unknown, value: unknown) => Array<{ text?: string }> }
+    }> = []
+    const { parentSessionId: _parent, ...toolDeps } = e.deps
+    createSubtaskTool({ register: (d) => { defs.push(d as never); return () => {} } }, toolDeps)
+    const render = defs[0]?.output?.render
+    assert.equal(typeof render, 'function', 'prts_subtask 必须有 output.render')
+    // DSH 的 render 契约是 (args, value)。只声明一个参数时收到的是 args，
+    // summary 永远 undefined，回执会退化成入参 JSON——模型看到的只有 task/taskId。
+    const out = render!({ task: '任务', taskId: 't7' }, { sessionId: 'subtask-t7', summary: '子会话回报的正文' })
+    assert.equal(out[0]?.text, '子会话回报的正文', '必须渲染 summary，不能回退成入参 JSON')
+  } finally { e.cleanup() }
+})
+
+/** 按 DSH 的落盘形状往子会话日志里追加一条 assistant 消息。 */
+function appendAssistant(dataRoot: string, sessionId: string, text: string, seq: number): void {
+  const dir = join(dataRoot, 'dsh-home', 'sessions', '--ws--', sessionId)
+  mkdirSync(dir, { recursive: true })
+  const rec = {
+    type: 'assistant/message',
+    seq,
+    data: { message: { role: 'assistant', content: [{ type: 'text', text }] } },
+  }
+  appendFileSync(join(dir, 'session.v4.jsonl'), `${JSON.stringify(rec)}\n`, 'utf8')
+}
+
+test('SP6 正文晚于固定窗口落盘：回执仍要拿到正文（回归：3s 轮询窗口读空）', { timeout: 30_000 }, async () => {
+  const e = env()
+  try {
+    const sid = 'subtask-t6'
+    const ctx = {
+      get(name: string): unknown {
+        if (name !== 'agents') return undefined
+        return {
+          async create(): Promise<unknown> {
+            // 先落一条无文本的工具步（真实子会话就是这个形状：step1 只有 tool-call），
+            // 正文在 3.6 秒后才到——比旧实现的 30×100ms 固定窗口晚。
+            appendAssistant(e.data, sid, '', 13)
+            setTimeout(() => appendAssistant(e.data, sid, '迟到的正文', 31), 3600)
+            return {
+              agent: { status: 'idle', followup(): void { /* noop */ } },
+              dispose: async (): Promise<void> => { e.seen.disposed += 1 },
+            }
+          },
+        }
+      },
+    }
+    const r = await spawnSubtask({ ...e.deps, ctx, summaryWaitMs: 10_000 }, '任务', 't6')
+    assert.equal(r.summary, '迟到的正文', '正文晚到也必须等到，不能返回空串')
   } finally { e.cleanup() }
 })
