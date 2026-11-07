@@ -64,6 +64,69 @@ export class OllamaGenerator implements TextGenerator {
   }
 }
 
+export interface OpenAIGeneratorOptions {
+  baseUrl?: string
+  model?: string
+  timeoutMs?: number
+  fetchImpl?: typeof fetch
+  apiKey?: string
+}
+
+/**
+ * OpenAI 兼容的生成器（`POST /v1/chat/completions`）。
+ *
+ * 为什么不复用 `OllamaGenerator`：那个走 `/api/generate`，是 Ollama 专有端点，
+ * 响应形状 `{response}`；Strata（以及任何 OpenAI 兼容服务）走 `/v1/chat/completions`，
+ * 响应形状 `{choices:[{message:{content}}]}`。换 baseUrl 不够，协议不同。
+ *
+ * 默认值对着 `Strata-FlashNext.bat` 的实际配置：8080 端口、`/v1` 前缀、
+ * 模型 qwen3.8-flash-next-iq3_xxs（262144 上下文）。
+ */
+export class OpenAIGenerator implements TextGenerator {
+  readonly model: string
+  private readonly baseUrl: string
+  private readonly timeoutMs: number
+  private readonly fetchImpl: typeof fetch
+  private readonly apiKey: string | undefined
+
+  constructor(opts: OpenAIGeneratorOptions = {}) {
+    // 不用参数属性：项目只允许可擦除语法（AGENTS.md「语法约束」）。
+    this.model = opts.model ?? 'qwen3.8-flash-next-iq3_xxs'
+    this.baseUrl = (opts.baseUrl ?? 'http://127.0.0.1:8080/v1').replace(/\/+$/, '')
+    this.timeoutMs = opts.timeoutMs ?? 300_000
+    this.fetchImpl = opts.fetchImpl ?? fetch
+    this.apiKey = opts.apiKey
+  }
+
+  async generate(prompt: string): Promise<string> {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), this.timeoutMs)
+    try {
+      const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.apiKey === undefined ? {} : { Authorization: `Bearer ${this.apiKey}` }),
+        },
+        body: JSON.stringify({
+          model: this.model,
+          messages: [{ role: 'user', content: prompt }],
+          stream: false,
+          temperature: 0,
+        }),
+        signal: ctrl.signal,
+      })
+      if (!res.ok) throw new Error(`memory: openai generate HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
+      const j = await res.json() as { choices?: Array<{ message?: { content?: unknown } }> }
+      const content = j.choices?.[0]?.message?.content
+      if (typeof content !== 'string') throw new Error('memory: openai generate 返回缺 choices[0].message.content')
+      return content
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+}
+
 /**
  * 从模型输出里抠出 JSON 数组。
  *

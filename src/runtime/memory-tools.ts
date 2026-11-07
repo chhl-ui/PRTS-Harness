@@ -28,6 +28,8 @@ import type { ToolRegistry } from './task-tools.ts'
 import { renderReading } from '../memory/index.ts'
 import { applyRerank, type Reranker } from '../memory/rerank.ts'
 import type { Embedder, MemoryHit, MemoryStore, ReadingDeps } from '../memory/index.ts'
+import { summarizeSession } from '../memory/summarize.ts'
+import type { TextGenerator } from '../memory/generate.ts'
 
 export interface MemoryToolDeps {
   store: MemoryStore
@@ -42,6 +44,21 @@ export interface MemoryToolDeps {
    * 与注入同口径：只重排候选池、不新增命中；抛错时保持原顺序。
    */
   reranker?: Reranker
+  /**
+   * 惰性取文本生成器，供 `prts_memory_summarize` 使用。
+   *
+   * 惰性而非直接注入：模型可能长时间不调摘要，启动时就去连 Strata/Ollama
+   * 会把一次非必需的外部依赖变成启动阻塞。取到 undefined 时工具报不可用，
+   * 不静默返回空——「摘要没写」和「摘要写了一篇空的」必须能区分。
+   */
+  generator?: () => Promise<TextGenerator | undefined>
+}
+
+/** 从工具执行上下文里取当前会话 id；取不到返回空串（调用方 fail-closed）。 */
+function readSessionId(exec: unknown): string {
+  const e = exec as { agent?: { session?: { id?: unknown } } } | undefined
+  const id = e?.agent?.session?.id
+  return typeof id === 'string' && id !== '' ? id : ''
 }
 
 export interface MemoryTools {
@@ -182,6 +199,57 @@ export function createMemoryTools(tools: ToolRegistry, deps: MemoryToolDeps): Me
       }
 
       return { message: body, hits: hits.map(toWire) }
+    },
+  })
+
+  register({
+    name: 'prts_memory_summarize',
+    description:
+      '把当前这段会话压成一条情景摘要写进长期记忆。'
+      + '当一段工作告一段落、或者你判断「这些结论下次还会用到」时调用。'
+      + '摘要会保留任务 id、产物路径、当前状态与待办，比对话原文更适合以后冷启动时快速接上进度。'
+      + '写入后本会话不受影响，可以继续对话。',
+    parameters: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          written: { type: 'boolean', description: '是否真的写入了摘要' },
+          summaryId: { type: 'string', description: '摘要 id，写入时才有' },
+          turnCount: { type: 'integer', description: '被压缩的对话轮数' },
+          reason: { type: 'string', description: '未写入时的原因' },
+        },
+      },
+      render: (_args: unknown, value: unknown) => {
+        const v = value as { written?: boolean; summaryId?: string; turnCount?: number; reason?: string }
+        const text = v?.written === true
+          ? `已写入摘要 ${v.summaryId ?? ''}（压缩 ${v.turnCount ?? 0} 轮）`
+          : `未写入摘要：${v?.reason ?? '未知原因'}`
+        return [{ type: 'text', text }]
+      },
+    },
+    execute: async (_args: unknown, exec: unknown): Promise<unknown> => {
+      const sessionId = readSessionId(exec)
+      if (sessionId === '') {
+        // fail-closed：拿不到会话 id 就不知道该压缩哪一段，瞎写等于污染记忆库
+        throw new Error('prts_memory_summarize: 拿不到当前会话 id，拒绝写摘要')
+      }
+      if (deps.generator === undefined) {
+        throw new Error('prts_memory_summarize: 未配置文本生成器，摘要不可用')
+      }
+      const generator = await deps.generator()
+      if (generator === undefined) {
+        throw new Error('prts_memory_summarize: 生成器当前不可用（本地模型可能未启动）')
+      }
+      const result = await summarizeSession({ store: deps.store, generator }, { sessionId })
+      if (result === null) {
+        return { written: false, reason: '本会话还没有可摘要的对话轮次' }
+      }
+      return { written: true, summaryId: result.summaryId, turnCount: result.turnCount }
     },
   })
 

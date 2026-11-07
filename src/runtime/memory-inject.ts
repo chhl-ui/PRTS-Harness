@@ -224,6 +224,11 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
       const ranked = deps.store
         .search({
           text: query, limit: limit * 3, includeOrigin: ['live'],
+          // 摘要路默认 quota=0（store.ts:1190「不开摘要路时基线一字不变」）。
+          // 不在这里显式开，`mem_summaries` 写得再对也永远进不了上下文——
+          // 那等于生产者白接。给 2 条：摘要压得比 turn 紧，冷启动时比碎片有用；
+          // 具体去留仍由下面的精排决定。
+          summaryQuota: 2,
           ...(queryVector === undefined ? {} : { queryVector, semanticTopK: limit * 3, semanticMinSim }),
         })
         .filter((h) => h.kind !== 'turn' || h.sessionId !== sessionId)

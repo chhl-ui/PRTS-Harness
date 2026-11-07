@@ -93,8 +93,12 @@ const app = await startRuntime({
 // 模型调用的是哪个工具）。纯观测，不进入守卫/审批路径。
 const detachToolFeed = attachToolFeed(app.ctx, term)
 
-// 服务端会话 id 固定：重连沿用同一个会话与 agent，而不是每次连上都开新会话。
-const serveSessionId = process.env.PRTS_SESSION_ID ?? `prts-serve-${process.pid}`
+// 服务端会话 id：同一进程内多次 accept 共用它（重连沿用同一个会话与 agent），
+// 但**跨进程不能复用**。Windows 会快速回收 pid，「上次 serve 被杀、下次拿到同一个
+// pid」时固定 id 会直接撞上 dsh 持久化的 SessionAlreadyExistsError——实测 serve
+// 启动即崩、客户端连上就被断开，且 stdio 是 ignore，日志里什么都看不到。
+// 加启动时间戳保证跨进程唯一；同进程内它仍是常量。
+const serveSessionId = process.env.PRTS_SESSION_ID ?? `prts-serve-${process.pid}-${Date.now().toString(36)}`
 // 只读查询（桌面端任务 / 会话 / 记忆 / 意图页）：处理器与 terminal-pipe 的 rig 共用
 // 同一实现（owner-query.ts）——「测试与入口同构」靠共用代码保证，不靠两边对齐。
 // 当前会话可变（`/switch` `/new` 经 runChat 回调），所以传取值函数而不是值。

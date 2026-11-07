@@ -19,7 +19,8 @@ import { MemoryStore, findForOwner, forgetFlow, correctFlow, type VectorOwnerKin
 import { probeSessions, purgeSessions } from '../memory/session-purge.ts'
 import { AuditLog } from '../audit/audit.ts'
 import { OllamaEmbedder } from '../memory/embedding.ts'
-import { OllamaGenerator } from '../memory/generate.ts'
+import { OllamaGenerator, OpenAIGenerator } from '../memory/generate.ts'
+import { summarizeSession } from '../memory/summarize.ts'
 
 const USAGE = `usage:
   prts memory stats      [--db <path>]
@@ -178,6 +179,66 @@ export async function memoryExtractFacts(args: string[]): Promise<number> {
     return 0
   } catch (e) {
     console.error(`prts memory extract-facts 失败: ${e instanceof Error ? e.message : String(e)}`)
+    return 1
+  } finally {
+    store?.close()
+  }
+}
+
+/**
+ * 把一个会话的 turn 压成一条情景摘要并落库。
+ *
+ * `mem_summaries` 此前**零写入**：表建了、`putSummary` 在 store 上等着、FTS 索引也建了，
+ * 但全仓没有生产者，于是检索只能召回 turn 碎片。这个命令补上写入端。
+ *
+ * 与 `extract-facts` 同构：默认干跑，加 `--apply` 才真调模型并写库。
+ * 不进 `memoryCommand` 的 switch——它要 await 模型，由 `prts.ts` 按子命令名分流。
+ */
+export async function memorySummarize(args: string[]): Promise<number> {
+  const sessionId = arg(args, '--session')
+  const apply = args.includes('--apply')
+  const model = arg(args, '--model')
+  const baseUrl = arg(args, '--strata')
+  const limit = numArg(args, '--limit') ?? 40
+
+  if (sessionId === undefined) {
+    console.error('prts memory summarize: 需要 --session <sessionId>')
+    return 2
+  }
+  const dbPath = resolveDbPath(args)
+  if (dbPath === undefined) {
+    console.error('prts memory: 无法确定记忆库路径——传 --db，或设置 PRTS_MEMORY_DB / PRTS_DATA_ROOT')
+    return 2
+  }
+
+  let store: MemoryStore | undefined
+  try {
+    store = MemoryStore.open(dbPath)
+    const turns = store.turnsForSession(sessionId, { limit })
+    if (turns.length === 0) {
+      console.error(`prts memory summarize: 会话 ${sessionId} 在记忆库里没有 turn（先跑 extract-facts 或让会话进库）`)
+      return 1
+    }
+    if (!apply) {
+      console.log(`会话 ${sessionId}：${turns.length} 条 turn 将压成 1 条摘要，模型 ${model ?? 'q38-gsq-iq3s'}`)
+      console.log('加 --apply 才会真正调用模型并写库。')
+      return 0
+    }
+    // 摘要走 Strata（OpenAI 兼容 /v1/chat/completions）。OllamaGenerator 走的是
+    // /api/generate 专有端点，换 baseUrl 不够——协议不同，所以这里换生成器。
+    const generator = new OpenAIGenerator({
+      ...(model === undefined ? {} : { model }),
+      ...(baseUrl === undefined ? {} : { baseUrl }),
+    })
+    const result = await summarizeSession({ store, generator }, { sessionId, limit })
+    if (result === null) {
+      console.error('摘要为空，未写库')
+      return 1
+    }
+    console.log(JSON.stringify(result))
+    return 0
+  } catch (e) {
+    console.error(`prts memory summarize 失败: ${e instanceof Error ? e.message : String(e)}`)
     return 1
   } finally {
     store?.close()

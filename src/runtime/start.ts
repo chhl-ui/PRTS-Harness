@@ -14,6 +14,9 @@ import { deriveAppContainerSid } from '../sandbox/appcontainer.ts'
 import { DEFAULT_READ_ONLY_SUBPATHS } from '../authority/index.ts'
 import { createStepAllocator, createTaskTools, isLedgerTool } from './task-tools.ts'
 import { createMemoryTools } from './memory-tools.ts'
+import { createSessionTools } from './session-tools.ts'
+import { registerWebSearch } from './web-search.ts'
+import { createWebTools } from './web-tools.ts'
 import { createIntentTools } from './intent-tools.ts'
 import { createSkillTools } from './skill-tools.ts'
 import { attachIntentTrigger } from './intent-trigger.ts'
@@ -36,7 +39,7 @@ import { openCostStore, priceFromEnv, priceOf, type CostStore } from '../cost/in
 import { Ledger } from '../ledger/index.ts'
 import type { TaskId } from '../ledger/index.ts'
 import { initCoreDb } from '../core/init.ts'
-import { MemoryStore, OllamaEmbedder, OpenAiCompatibleEmbedder, OllamaGenerator } from '../memory/index.ts'
+import { MemoryStore, OllamaEmbedder, OpenAiCompatibleEmbedder, OllamaGenerator, OpenAIGenerator } from '../memory/index.ts'
 import { SkillStore } from '../skills/index.ts'
 import { PersonaStore } from '../persona/index.ts'
 import { EmotionStore } from '../emotion/index.ts'
@@ -567,8 +570,14 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
         readonly agent?: { session?: { id?: string } }
       }
       const capabilities = classify(exec.name, exec.arguments)
-        .filter((c) => c.startsWith('fs.read:') || c.startsWith('fs.write:') || c.startsWith('fs.delete:'))
-      // 非文件能力不归 E3（exec/net/system 归 K2b），原样放行。
+        .filter((c) => c.startsWith('fs.read:') || c.startsWith('fs.write:')
+          || c.startsWith('fs.delete:') || c.startsWith('net:'))
+      // net 必须一起进 E3：它的默认策略是 ask，而 ask 只有经这里发审批、
+      // 由 approval/request 落成 once/grant 才可能变 allow。把 net 留在外面，
+      // 同步守卫那侧就只剩「无 grant → deny」一条路——那不是审查，是无条件拒绝
+      // （实测：prts_web_search 报 `no active grant for net:*`，且无任何通道能签发）。
+      // exec/system/tool 仍不进：pwsh 命令体内的写删识别不了，整体拒绝会切掉现有
+      // 能力（test/runtime/runtime.test.ts 的 R2 依赖 pwsh 可用）。
       if (capabilities.length === 0) return next()
       // 只读档下的写/删不问人：问了守卫照样拒，白制造一次审批。
       if (capabilities.some((c) => c.startsWith('fs.write:') || c.startsWith('fs.delete:'))
@@ -941,7 +950,35 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     store: memory,
     ...(embedderResolver === undefined ? {} : { embedder: embedderResolver }),
     ...(reranker === undefined ? {} : { reranker }),
+    // 摘要工具用的生成器：惰性构造，默认 Strata（OpenAI 兼容 /v1/chat/completions）。
+    // 不在这里探活——启动时连不上本地模型不该阻断 boot；工具调用时失败会明确报错，
+    // 模型看得到「摘要不可用」而不是拿到一个空成功。
+    generator: async () => new OpenAIGenerator({
+      ...(process.env.PRTS_SUMMARY_BASE === undefined ? {} : { baseUrl: process.env.PRTS_SUMMARY_BASE }),
+      ...(process.env.PRTS_SUMMARY_MODEL === undefined ? {} : { model: process.env.PRTS_SUMMARY_MODEL }),
+    }),
   })
+
+  // Firecrawl 联网工具：key 存在才挂。工具跑在**本进程**（有网络），不走 pwsh 沙箱
+  // ——那边 restricted-token 把 Authenticated Users 移掉了，DNS Client 管道进不去。
+  // key 缺失时两个工具都不注册，模型看不到它们，而不是看到一个必然失败的壳。
+  const firecrawlKey = (() => {
+    try {
+      return readFileSync(join(o.dataRoot, 'secrets', 'firecrawl.key'), 'utf8').trim()
+    } catch {
+      return ''
+    }
+  })()
+  const webTools = firecrawlKey === '' ? undefined : createWebTools(tools, { apiKey: firecrawlKey })
+
+  // server-side web_search：默认关闭，PRTS_WEB_SEARCH=1 才往请求里加 tools 字段。
+  // 开了以后查询内容会发到 DeepSeek 后端，本地守卫看不到——这条只写在注释里，不弹横幅。
+  const webSearchRegistry = ctx.get('deepseekLlmApiExtensions') as { register(field: string, provider: unknown): unknown } | undefined
+  const webSearchOff = registerWebSearch(webSearchRegistry)
+
+  // 会话自主管理工具（prts_session_archive）：模型只写 archive/requested 事件，
+  // 真正的切换由 runChat 主循环在下一轮开头执行（它够得着 applySwitch）。
+  const sessionTools = createSessionTools(tools, memory === undefined ? {} : { store: memory })
 
   // Wave 1 装配器：必须**最先注册**——Cordis 的 waterfall 是「先注册 = 最外层」，
   // 只有最外层的 next() 才在其余七条注入链全部追加完之后返回（见 assembly.ts 头注释）。
@@ -1157,8 +1194,21 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     memory,
     /** Authority/Ledger 共用的 core.sqlite 路径——chat 的 forgetFlow 用它在同库记 K4 删除。 */
     dbPath,
-    /** 本次实际注册的 prts_task_* / prts_memory_* 工具名（来自注册回执，不是手写常量）。 */
-    toolNames: [...taskTools.names, ...(memoryTools?.names ?? []), ...(intentTools?.names ?? [])],
+    /**
+     * 本次实际注册的工具名汇总（来自注册回执，不是手写常量）。
+     *
+     * 顺序无关，完整性有关：memory-commands.test.ts 用它对整个工具面做
+     * 「不得出现删除/纠正语义」的断言——漏掉任何一个工具集，那条断言就会
+     * 在漏掉的部分上静默变绿。新增工具集务必一起加进来。
+     */
+    toolNames: [
+      ...taskTools.names,
+      ...(memoryTools?.names ?? []),
+      ...(intentTools?.names ?? []),
+      ...sessionTools.names,
+      ...(webTools?.names ?? []),
+      ...(skillTools?.names ?? []),
+    ],
     /** 本会话最近一次模型创建的 draft；进程内易失提示，不是账本事实。 */
     draftTaskForSession: (sessionId: string) => taskTools.draftTaskForSession(sessionId),
     /** 后台巩固调度器（未启用时为 undefined）：诊断可读 stats()，测试可 runOnce()。 */
@@ -1185,6 +1235,9 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       reminders?.close()
       memoryScheduler?.dispose()
       memoryTools?.dispose()
+      sessionTools.dispose()
+      webTools?.dispose()
+      await webSearchOff?.()
       skillTools?.dispose()
       subtaskTool.dispose()
       skillInjection?.dispose()

@@ -70,7 +70,7 @@ test('MT1 注册 prts_memory_recall，命中事实后返回文本与时间', asy
     const fake = fakeRegistry()
     const tools = createMemoryTools(fake.registry, { store })
     try {
-      assert.deepEqual([...tools.names], ['prts_memory_recall'])
+      assert.deepEqual([...tools.names], ['prts_memory_recall', 'prts_memory_summarize'])
       assert.deepEqual(fake.get('prts_memory_recall').parameters.required, ['query'])
 
       const out = await fake.get('prts_memory_recall').execute({ query: '光学' }) as {
@@ -197,7 +197,7 @@ test('MT6 dispose 注销工具', () => {
   try {
     const fake = fakeRegistry()
     const tools = createMemoryTools(fake.registry, { store })
-    assert.equal(tools.names.length, 1)
+    assert.equal(tools.names.length, 2)
     tools.dispose()
     assert.equal(tools.names.length, 0)
     assert.throws(() => fake.get('prts_memory_recall'), /工具未注册/)

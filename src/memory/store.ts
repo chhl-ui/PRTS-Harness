@@ -1884,6 +1884,90 @@ export class MemoryStore {
   }
 
 
+  /**
+   * 按会话取 turn（含正文），供摘要生成使用。
+   *
+   * 正文走 `mem_bodies`（与 `readBodyForForget` 同一条外置路线），所以这里 LEFT JOIN。
+   * 顺序按 `turn_index` 升序——摘要要顺着对话推进读，倒序会把结论放在最前面。
+   */
+  turnsForSession(sessionId: string, opts: { limit?: number } = {}): Array<{
+    turnId: string
+    speaker: string
+    text: string
+    occurredAtMs: number | null
+  }> {
+    const rows = this.db.prepare(
+      `SELECT t.turn_id AS turnId, t.speaker AS speaker, t.occurred_at_ms AS occurredAtMs, b.body AS body
+         FROM mem_turns t LEFT JOIN mem_bodies b ON b.body_ref = t.body_ref
+        WHERE t.scope = ? AND t.session_id = ? AND t.deleted_at_ms IS NULL
+        ORDER BY t.turn_index ASC LIMIT ?`,
+    ).all(SCOPE, sessionId, opts.limit ?? 40) as Array<{
+      turnId: string
+      speaker: string
+      occurredAtMs: number | null
+      body: string | null
+    }>
+    return rows.map((r) => ({
+      turnId: r.turnId,
+      speaker: r.speaker,
+      text: r.body ?? '',
+      occurredAtMs: r.occurredAtMs,
+    }))
+  }
+
+  /**
+   * 列出现有会话（按最近活动倒序），每个带轮数与首条消息。
+   *
+   * 供 `prts_session_recall` 使用：模型此前完全不知道历史上有哪些会话，
+   * 只能靠语义检索碰运气。有了这个才能「先看目录、再读某一章」。
+   */
+  sessionsWithTurns(limit = 20): Array<{
+    sessionId: string
+    turnCount: number
+    lastAtMs: number | null
+    firstText: string
+  }> {
+    const rows = this.db.prepare(
+      `SELECT t.session_id AS sessionId,
+              COUNT(*) AS turnCount,
+              MAX(t.occurred_at_ms) AS lastAtMs,
+              (SELECT b2.body FROM mem_turns t2
+                 LEFT JOIN mem_bodies b2 ON b2.body_ref = t2.body_ref
+                WHERE t2.scope = t.scope AND t2.session_id = t.session_id
+                  AND t2.deleted_at_ms IS NULL
+                ORDER BY t2.turn_index ASC LIMIT 1) AS firstText
+         FROM mem_turns t
+        WHERE t.scope = ? AND t.deleted_at_ms IS NULL
+        GROUP BY t.session_id
+        ORDER BY lastAtMs DESC
+        LIMIT ?`,
+    ).all(SCOPE, limit) as Array<{
+      sessionId: string
+      turnCount: number
+      lastAtMs: number | null
+      firstText: string | null
+    }>
+    return rows.map((r) => ({
+      sessionId: r.sessionId,
+      turnCount: r.turnCount,
+      lastAtMs: r.lastAtMs,
+      firstText: r.firstText ?? '',
+    }))
+  }
+
+  /** 取一条摘要的来源轮次 id（`source_turn_ids` 存的是 JSON 数组串）。 */
+  summarySourceTurns(summaryId: string): string[] {    const row = this.db.prepare(
+      'SELECT source_turn_ids AS s FROM mem_summaries WHERE summary_id = ?',
+    ).get(summaryId) as { s: string | null } | undefined
+    if (row?.s == null || row.s === '') return []
+    try {
+      const parsed: unknown = JSON.parse(row.s)
+      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []
+    } catch {
+      return []
+    }
+  }
+
   /** 统计摘要数量。 */
   countSummaries(opts: { origin?: Origin } = {}): number {
     const row = (opts.origin === undefined

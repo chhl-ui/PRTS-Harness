@@ -14,7 +14,7 @@ export {
   type ConsolidateOptions, type ConsolidateResult,
   type ConsolidateModelOptions, type ConsolidateModelResult,
 } from './consolidate.ts'
-export { OllamaGenerator, extractJsonArray, type TextGenerator } from './generate.ts'
+export { OllamaGenerator, OpenAIGenerator, extractJsonArray, type TextGenerator } from './generate.ts'
 export {
   buildFactPrompt, parseFacts, extractFacts,
   type ExtractedFact, type FactPromptTurn,

@@ -11,7 +11,7 @@ import { initCoreDb } from '../core/init.ts'
 import { emotionCommand } from './emotion.ts'
 import { startupCheck } from '../core/startup-check.ts'
 import { AuditLog } from '../audit/index.ts'
-import { memoryCommand, memoryEmbedVectors, memoryExtractFacts } from './memory.ts'
+import { memoryCommand, memoryEmbedVectors, memoryExtractFacts, memorySummarize } from './memory.ts'
 import { exportArchive, importArchive } from './archive.ts'
 
 function arg(args: string[], name: string): string | undefined {
@@ -164,7 +164,9 @@ try {
       ? await memoryExtractFacts(args.slice(1))
       : args[1] === 'embed'
         ? await memoryEmbedVectors(args.slice(1))
-        : memoryCommand(args.slice(1))
+        : args[1] === 'summarize'
+          ? await memorySummarize(args.slice(1))
+          : memoryCommand(args.slice(1))
   }
   else if (args[0] === 'archive') code = archiveCommand(args.slice(1))
   else if (args[0] === 'emotion') code = emotionCommand(args.slice(1))

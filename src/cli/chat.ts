@@ -94,6 +94,32 @@ export function assistantAfterSeq(dataRoot: string, sessionId: string, afterSeq:
 }
 
 /**
+ * 查会话日志里有没有模型发出的归档请求。
+ *
+ * 与 `assistantAfterSeq` 同源：都逐行读 `session.v4.jsonl`，只是过滤的事件类型不同。
+ * 走日志而不是进程内变量，是因为事件会落盘——进程崩了重启还能看到「上一轮请求过归档」；
+ * 内存标记丢了就没了，模型会以为切过了。
+ *
+ * 返回命中的最大 seq（调用方据此推进游标，避免同一事件反复触发），没有则 null。
+ */
+export function findArchiveRequest(dataRoot: string, sessionId: string, afterSeq: number): number | null {
+  let hit: number | null = null
+  for (const f of sessionFiles(dataRoot, sessionId)) {
+    let content: string
+    try { content = readFileSync(f, 'utf8') } catch { continue }
+    for (const line of content.split(NL)) {
+      if (!line.trim()) continue
+      let rec: { type?: string; seq?: number }
+      try { rec = JSON.parse(line) } catch { continue }
+      if (rec.type !== 'archive/requested') continue
+      const seq = typeof rec.seq === 'number' ? rec.seq : 0
+      if (seq > afterSeq && (hit === null || seq > hit)) hit = seq
+    }
+  }
+  return hit
+}
+
+/**
  * 回合收敛的墙钟预算。
  *
  * 为什么可配：120s 对云端模型够用，对本地模型（实测 59–71 t/s）在多工具调用时不宽裕——
@@ -857,7 +883,48 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
         }) as never,
       )
 
+    // 归档事件游标：独立于 seenSeq（后者在切换时清零），只用于事件去重。
+    let archiveCursor = 0
     for (;;) {
+      // 模型请求归档：回合结束后在这里执行切换，下一次对话就落在新会话里。
+      // 放在 readLine 之前——否则用户不输入，归档永远不执行（readLine 是阻塞的）。
+      // 游标独立于 seenSeq：seenSeq 在切换时会被清零，不能拿它当事件去重依据。
+      const archiveSeq = findArchiveRequest(deps.dataRoot, sessionId, archiveCursor)
+      if (archiveSeq !== null) {
+        archiveCursor = archiveSeq
+        const newId = `prts-chat-${Date.now()}`
+        let registered = true
+        // 先注册身份再 create：与 /new、spawnSubtask 同一顺序，消除「已创建但未注册」的窗口。
+        if (deps.authority !== undefined) {
+          try {
+            deps.authority.registerPrimarySession(newId)
+          } catch (error) {
+            registered = false
+            deps.out(`[prts] 归档中止：新会话身份注册失败 ${error instanceof Error ? error.message : String(error)}\n`)
+          }
+        }
+        if (registered) {
+          try {
+            const archived = await agents.create({
+              sessionId: newId,
+              meta: { cwd: deps.cwd },
+              agentOptions: {
+                provider: 'deepseek-official',
+                model: process.env.PRTS_LLM_MODEL ?? 'deepseek-chat',
+              },
+            })
+            applySwitch(archived.agent, newId)
+            archiveCursor = 0
+            deps.out(`[prts] 已归档上一段，新会话 ${newId}\n`)
+          } catch (error) {
+            // create 失败要释放刚注册的身份，不留幽灵会话；原会话保持不变。
+            try { deps.authority?.releaseSession(newId) } catch { /* 释放失败不掩盖主错误 */ }
+            deps.out(`[prts] 归档失败，留在当前会话：${error instanceof Error ? error.message : String(error)}\n`)
+          }
+        }
+        deps.onIdle?.()
+      }
+
       const raw = await readLine()
       if (raw === undefined) break
       const line = raw.trim()
