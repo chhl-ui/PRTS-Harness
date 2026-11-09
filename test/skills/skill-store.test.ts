@@ -6,9 +6,11 @@
  *
  * 本文件钉住的是**不变量**，不是实现细节：
  *
- * 1. 模型只能 `propose`，不能 `adopt` / `reject` / `retire` / `restore`。
- *    与账本同构：模型只能建 draft，owner 才能 activate。理由相同——「越用越熟练」
- *    不能变成「模型自己给自己加能力」。
+ * 1. 模型可以 `propose` / `evaluate` / `adopt`（2026-11-09 放开）；`reject` /
+ *    `retire` / `restore` 仍只有 owner 能做——否决与回退留在人手里。
+ *    放开的前提是：技能只是注入上下文的建议文本，不参与工具注册、不参与
+ *    `Authority.guard`，真正的强制点在 K2a 守卫。**若将来技能能携带工具、
+ *    数据源或授权路径，必须先恢复 actor 校验**——那时它才真的是「能力扩张」。
  * 2. 没有评估就不能采用；评估结论是 reject 或 needs-work 时同样不能采用。
  *    「候选与启用分开」是这一格的设计要点（`docs/memory-landscape.md:129`）。
  * 3. 每次变更进哈希链；投影（skills 表）只能由 `fold.ts` 重建。
@@ -77,15 +79,20 @@ test('SK2 模型可以提经验，落成 candidate，内容原样保留', () => 
   } finally { c.tmp.cleanup(c.store) }
 })
 
-test('SK3 模型不能自己采用——「越用越熟练」不能变成「模型自己加能力」', () => {
+test('SK3 模型可以自评自采——2026-11-09 放开（技能不授予权限）', () => {
   const c = open()
   try {
     const id = c.store.propose(model(), lesson)
-    c.store.evaluate(owner, { id, revision: 1 }, { verdict: 'adopt', basis: '看起来对' })
-    const before = c.store.get(id)
-    assert.equal(codeOf(() => c.store.adopt(model(), { id, revision: 2 })), 'FORBIDDEN')
-    assert.equal(c.store.get(id)?.phase, 'candidate', '被拒后不得改变相位')
-    assert.equal(c.store.get(id)?.revision, before?.revision, '被拒后不得推进修订号')
+    const e = c.store.evaluate(model(), { id, revision: 1 }, {
+      verdict: 'adopt',
+      basis: '在归档对账任务上照这条做过，磁盘真值与文档数字对上了',
+    })
+    const a = c.store.adopt(model(), { id, revision: e.revision })
+    assert.equal(a.phase, 'active', '模型评估为 adopt 后可以自己采用')
+    assert.equal(a.evaluations.length, 1)
+    assert.equal(a.evaluations[0].by.kind, 'model', '评估者必须留痕：谁评的要能查')
+    assert.equal((a.evaluations[0].by as { sessionId: string }).sessionId, 'sess-1')
+    assert.deepEqual(c.store.adoptedBy(id), model(), '采用者要能从事件链读回（注入层据此标注）')
   } finally { c.tmp.cleanup(c.store) }
 })
 
@@ -148,14 +155,14 @@ test('SK8 回退可恢复：retired → restore → active（演练要能演回�
   } finally { c.tmp.cleanup(c.store) }
 })
 
-test('SK9 模型也不能 retire / restore / reject——破坏性动作全在 owner 通道', () => {
+test('SK9 模型仍不能 reject / retire / restore——否决与回退留在 owner 通道', () => {
   const c = open()
   try {
     const { id, revision } = activated(c.store)
     assert.equal(codeOf(() => c.store.retire(model(), { id, revision }, '想退')), 'FORBIDDEN')
     assert.equal(codeOf(() => c.store.reject(model(), { id, revision }, '想拒')), 'FORBIDDEN')
-    const p = c.store.propose(model(), lesson)
-    assert.equal(codeOf(() => c.store.evaluate(model(), { id: p, revision: 1 }, { verdict: 'adopt', basis: '自评' })), 'FORBIDDEN')
+    assert.equal(codeOf(() => c.store.restore(model(), { id, revision }, '想恢复')), 'FORBIDDEN')
+    assert.equal(c.store.get(id)?.phase, 'active', '被拒后相位不变')
   } finally { c.tmp.cleanup(c.store) }
 })
 

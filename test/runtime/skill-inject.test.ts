@@ -100,7 +100,7 @@ test('SI2 active 技能与查询相关 → 注入标题、触发条件与步骤'
   } finally { c.tmp.cleanup(c.store) }
 })
 
-test('SI3 candidate 不注入——没被采用的经验不该被执行', async () => {
+test('SI3 candidate 不作为做法注入——只提醒它待评估，正文不得给步骤', async () => {
   const c = open()
   try {
     c.store.propose(owner, lesson)
@@ -108,7 +108,11 @@ test('SI3 candidate 不注入——没被采用的经验不该被执行', async 
     const inj = attachSkillInjection(h.ctx, { store: c.store })
     try {
       const d = await h.fire(payloadOf('我要改一个共享模块的函数签名'), async () => enter([])) as { messages: unknown[] }
-      assert.equal(d.messages.length, 0, 'candidate 不得进上下文')
+      assert.equal(d.messages.length, 1, '应有一条候选提醒')
+      const text = textOf([d.messages[0]])
+      assert.match(text, /技能候选/, '必须标明这是候选提醒')
+      assert.match(text, /别直接照做/, '必须明说它不是已生效的做法')
+      assert.ok(!text.includes('grep 该符号的所有引用'), `候选步骤不得进正文（那等于批准执行）：\n${text}`)
     } finally { inj.dispose() }
   } finally { c.tmp.cleanup(c.store) }
 })
@@ -182,6 +186,57 @@ test('SI8 被退下来的技能不再注入——回退要在行为上看得出�
     try {
       const d = await h.fire(payloadOf('改共享模块的函数签名'), async () => enter([])) as { messages: unknown[] }
       assert.equal(d.messages.length, 0)
+    } finally { inj.dispose() }
+  } finally { c.tmp.cleanup(c.store) }
+})
+
+test('SI9 注入标注采用者——模型自采与博士采用必须可分辨', async () => {
+  const c = open()
+  try {
+    activated(c.store) // 博士采用
+    const modelActor = { kind: 'model' as const, sessionId: 'sess-1' }
+    const modelId = c.store.propose(modelActor, {
+      title: '模型自采的一条：对账先以磁盘为基准',
+      trigger: '要改共享模块的函数签名时先核对磁盘真值',
+      steps: ['枚举磁盘拿真值', '再改文档数字'],
+    })
+    const e = c.store.evaluate(modelActor, { id: modelId, revision: 1 }, {
+      verdict: 'adopt',
+      basis: '在同一次对账任务上用过，数字对上了',
+    })
+    c.store.adopt(modelActor, { id: modelId, revision: e.revision })
+
+    const h = fakeHookCtx()
+    const inj = attachSkillInjection(h.ctx, { store: c.store })
+    try {
+      const d = await h.fire(payloadOf('我要改共享模块的函数签名'), async () => enter([])) as { messages: unknown[] }
+      const text = textOf([d.messages[0]])
+      assert.match(text, /博士采用/, `博士采用的那条要标出来，否则模型分不清来历：\n${text}`)
+      assert.match(text, /模型自采/, `模型自采的那条要标出来（这是 2026-11-09 放开的代价与前提）：\n${text}`)
+    } finally { inj.dispose() }
+  } finally { c.tmp.cleanup(c.store) }
+})
+
+test('SI10 候选提醒每会话每条只出现一次；采用后转成 active 注入', async () => {
+  const c = open()
+  try {
+    const modelActor = { kind: 'model' as const, sessionId: 'sess-1' }
+    const id = c.store.propose(modelActor, lesson)
+    const h = fakeHookCtx()
+    const inj = attachSkillInjection(h.ctx, { store: c.store })
+    try {
+      const first = await h.fire(payloadOf('改共享模块的函数签名', 'sess-a', 1, 1), async () => enter([])) as { messages: unknown[] }
+      assert.equal(first.messages.length, 1, '第一次应提醒候选')
+      const second = await h.fire(payloadOf('改共享模块的函数签名', 'sess-a', 2, 1), async () => enter([])) as { messages: unknown[] }
+      assert.equal(second.messages.length, 0, '同一候选不重复提醒——提醒是钩子不是噪声源')
+
+      // 模型自评自采后，同一条应转成 active 注入并标注「模型自采」。
+      const e = c.store.evaluate(modelActor, { id, revision: 1 }, { verdict: 'adopt', basis: '在上一轮做过，结果对得上' })
+      c.store.adopt(modelActor, { id, revision: e.revision })
+      const third = await h.fire(payloadOf('改共享模块的函数签名', 'sess-b', 1, 1), async () => enter([])) as { messages: unknown[] }
+      const text = textOf(third.messages)
+      assert.match(text, /模型自采/, `采用后应按 active 注入并标注来历：\n${text}`)
+      assert.ok(!text.includes('[技能候选]'), '采用后不该再当候选提醒')
     } finally { inj.dispose() }
   } finally { c.tmp.cleanup(c.store) }
 })

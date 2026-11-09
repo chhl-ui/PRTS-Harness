@@ -5,10 +5,12 @@
  *
  *   propose（model 或 owner）
  *      → candidate
- *   evaluate（**owner**，必须给依据）
+ *   evaluate（owner 或 model，必须给依据）
  *      → 仍是 candidate，只是多一条评估记录
- *   adopt（**owner**，要求最近一次评估是 adopt）
+ *   adopt（owner 或 model，要求最近一次评估是 adopt）
  *      → active
+ *   reject（**owner**，理由必填）
+ *      → rejected
  *   retire（**owner**，理由必填）
  *      → retired
  *   restore（**owner**，理由必填）
@@ -19,11 +21,20 @@
  * 「评估」是取证，「采用」是决策。合并成一个动作，事后就分不清「评估过了但没采用」
  * 与「根本没评估」——而这两种情况对「这条经验该不该改」的判断完全不同。
  *
- * ## 为什么 model 不能 evaluate
+ * ## 为什么模型可以评估与采用（2026-11-09 博士决定放开）
  *
- * 与账本同构：模型只能建 draft，owner 才能 activate。技能是**能力扩张**，
- * 让模型自己评估自己提的经验，等于让它自己给自己加能力——那正是产品原则里
- * 「不会悄悄改掉自己的底线」要挡的形态。
+ * 这一格原先写的是「模型只能 propose，采用是博士的决策」。放开的依据是事实：
+ * 技能**不授予任何权限**——它不参与工具注册，不过 `Authority.guard`
+ * （`src/runtime/start.ts` 里 skills 只做 open / 注册工具 / 注入三件事），
+ * 注入的只是一段建议文本（`src/runtime/skill-inject.ts`），真正拦得住模型的是 K2a 守卫。
+ * 而记忆事实本来就是自动写入、无人审批的；把工作方法卡在人工队列里，代价是
+ * 博士要当每条经验的审批机器——实测就是唯一那条候选从提出起一直没人处理。
+ *
+ * **前提必须记住**：一旦技能能携带工具、数据源或授权路径，这条放开就不成立，
+ * 必须先恢复 `requireOwner` 校验。到那时它才真的是「能力扩张」。
+ *
+ * 否决与回退（reject / retire / restore）仍只有 owner 能做：模型可以让一条经验
+ * 生效，但不能自己关掉已经生效的东西——回退留在人手里，这是放开后的最后一道手刹。
  */
 import { randomUUID } from 'node:crypto'
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite'
@@ -120,7 +131,7 @@ export class SkillStore {
 
   /** 记录一次评估。只写评估，不改相位——采用是下一个动作。 */
   evaluate(actor: SkillActor, ref: SkillRef, e: { verdict: SkillVerdict; basis: string }): SkillSnapshot {
-    this.requireOwner(actor, 'evaluate')
+    this.requireWriter(actor, 'evaluate')
     const verdict = nonEmpty(e?.verdict, 'verdict')
     if (!VERDICTS.has(verdict)) raise('INVALID_INPUT', `unknown verdict: ${verdict}`)
     const basis = nonEmpty(e?.basis, 'basis')
@@ -134,7 +145,7 @@ export class SkillStore {
   }
 
   adopt(actor: SkillActor, ref: SkillRef): SkillSnapshot {
-    this.requireOwner(actor, 'adopt')
+    this.requireWriter(actor, 'adopt')
     return this.tx(() => {
       const s = this.mustSkill(ref)
       if (s.phase !== 'candidate') raise('INVALID_TRANSITION', `skill ${s.id} is '${s.phase}', not candidate`)
@@ -181,6 +192,20 @@ export class SkillStore {
   }
 
   // ---------- 读通道 ----------
+
+  /**
+   * 最后一条 `skill.adopted` 事件的操作者。
+   *
+   * 用途只有一个：注入层要能区分「博士采用」与「模型自采」（`runtime/skill-inject.ts`）。
+   * 不上投影表、不加列——采用者本来就是事件事实，查链即可；技能量级是个位数到几十条，
+   * 一次按索引过滤的成本可忽略（`skill_events(skill_id)` 由主键前缀覆盖）。
+   */
+  adoptedBy(id: SkillId): SkillActor | undefined {
+    const row = this.db.prepare(
+      "SELECT actor_json FROM skill_events WHERE skill_id = ? AND kind = 'skill.adopted' ORDER BY seq DESC LIMIT 1",
+    ).get(id) as { actor_json: string } | undefined
+    return row === undefined ? undefined : JSON.parse(row.actor_json) as SkillActor
+  }
 
   get(id: SkillId): SkillSnapshot | undefined {
     const row = this.db.prepare('SELECT * FROM skills WHERE skill_id = ?').get(id) as SkillRow | undefined
@@ -231,6 +256,18 @@ export class SkillStore {
   }
 
   // ---------- 内部 ----------
+
+  /**
+   * 评估与采用对所有 actor 开放（2026-11-09 放开）。
+   *
+   * 与 `requireOwner` 并列而不是替换它：否决与回退仍走 owner 校验（见文件头）。
+   * 放开的前提是技能不授予权限——若将来技能能携带工具或授权路径，这里要收回。
+   */
+  private requireWriter(actor: SkillActor, op: string): void {
+    if (actor?.kind !== 'owner' && actor?.kind !== 'model') {
+      raise('FORBIDDEN', `only owner or model may ${op} a skill`)
+    }
+  }
 
   private requireOwner(actor: SkillActor, op: string): void {
     if (actor?.kind !== 'owner') raise('FORBIDDEN', `only owner may ${op} a skill`)

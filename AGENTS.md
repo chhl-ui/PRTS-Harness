@@ -161,20 +161,27 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 - **未知预设必须失败**：`switchTo` 对不存在的预设抛 `NOT_FOUND`，不静默降级成「没有人格」。
   回归：`test\cli\persona-command.test.ts`（P1 查看 / P2 切换 + 重启提示 + 库内 active 真的变了 / P3 未知预设不改 active）。
 
-### 技能库：评估 / 采用入口与生效边界（2026-11-07）
+### 技能库：评估 / 采用入口与生效边界（2026-11-07，2026-11-09 放开 actor）
 
 - **入口**：`/skill`（`src\cli\chat.ts` 的 `runSkill`，owner 通道）。默认列待评估候选；`eval <id> <结论> <依据>` → `adopt <id>` 两步，`reject` / `retire` / `restore` 理由必填。
-  此前 chat 侧零入口——`grep -rn "\.adopt(\|\.evaluate(" src` 除 `src\skills` 自身外零命中，模型侧只拿到 `propose` / `list`
-  （`skill-tools.ts` 刻意不暴露评估与采用），于是生产库里那条候选（`C:\prts-data\skills.sqlite`）从提出起永停在 candidate。
-  「模型能提、只有博士能采用」由 `SkillStore.requireOwner` 强制（`skills\store.ts`），命令层不重复判角色。
+  此前 chat 侧零入口——`grep -rn "\.adopt(\|\.evaluate(" src` 除 `src\skills` 自身外零命中，于是生产库里那条候选
+  （`C:\prts-data\skills.sqlite`）从提出起永停在 candidate。
+- **模型也能自评自采（2026-11-09 博士决定完全放开）**：`skill-tools.ts` 暴露 `prts_skill_evaluate` / `prts_skill_adopt`，
+  model 走完整 propose → evaluate → adopt 闭环，库层由 `SkillStore.requireWriter` 放行（`skills\store.ts`）。
+  依据是事实：技能不参与工具注册、不过 `Authority.guard`，采用它**不等于**拿到新能力，强制点是 K2a 守卫。
+  **`reject` / `retire` / `restore` 仍归 owner**（`requireOwner`）——模型能让经验生效，不能自己关掉已生效的东西。
+  **前提**：一旦技能能携带工具、数据源或授权路径，必须收回 evaluate/adopt，否则这一格就真成了「模型自己给自己加能力」。
+- **注入按采用者标注**：`skill-inject.ts` 对每条技能查最后一条 `skill.adopted` 事件的 actor（`SkillStore.adoptedBy`），
+  渲染成「博士采用」或「模型自采」。不加投影列——采用者本来就是事件事实，重建投影无需迁移。
 - **生效边界与 `/persona` 相反**：技能注入是 `attachSkillInjection` 每轮 `list({ phase: 'active' })`（`skill-inject.ts`），
   不是启动期装配——**采用后下一轮就生效，输出里不要提示重启**（提示重启是错的）。
-  命令自开一条连接读写同一 `skills.sqlite`（`PRTS_SKILLS_DB` 与 `start.ts:411` 同源）；跨连接可见性由
+  `/skill` 自开一条连接读写同一 `skills.sqlite`（`PRTS_SKILLS_DB` 与 `start.ts:411` 同源）；跨连接可见性由
   `test\cli\skill-command.test.ts` 的 K3 守着——「命令写进去了、注入层看不见」正是要防的静默失效。
 - **评估与采用不合并**：`evaluate` 只记证据、不改相位，`adopt` 要求「最近一次评估是 adopt」（`skills\store.ts`）。
   合并成一个动作后，事后分不清「评估过但没采用」与「根本没评估」，而这两者对「这条经验该不该改」的判断完全不同。
-- **id 歧义不猜**：精确 → 唯一前缀 → 报错并列出候选。选错一条技能是能力扩张决策，代价大于让博士多打几位。
-  回归：`test\cli\skill-command.test.ts`（K1 列表 / K2 eval 不改相位 / K3 采用 + 另一连接可见 / K4 未评估拒绝 / K5 未知 id 无副作用 / K6 退役往返 / K7 --all）。
+- **id 歧义不猜**：精确 → 唯一前缀 → 报错并列出候选。选错一条技能的代价会持续到有人撤回，多打几位更便宜。
+  回归：`test\cli\skill-command.test.ts`（K1—K7）、`test\skills\skill-store.test.ts`（SK3 模型自采 / SK9 模型不能回退）、
+  `test\runtime\skill-tools.test.ts`（ST1 工具面 / ST5 闭环 / ST6 未评估不得采用）、`test\runtime\skill-inject.test.ts`（SI9 采用者标注）。
 
 ### 绑定归属：只由 owner 通道建立，模型永不绑定
 
