@@ -204,7 +204,18 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
   后到的「顺利」覆盖，情绪与实际相反且静默。
   回归：`test\runtime\emotion-signals.test.ts`（ES2 就是钉这条）、`test\runtime\emotion-wiring.test.ts`（真实 runtime 接线）。
 
-### 绑定归属：只由 owner 通道建立，模型永不绑定
+### 崩溃恢复：启动收口 + `/task-bind`（2026-11-09）
+
+- **启动时必须调 `ledger.recoverOnStartup()`**（`src\runtime\start.ts`，紧跟 `Ledger.open` 之后）。
+  它把 `started` step 收口为 `unknown`，**不改任务相位**。此前它在 `src` 里零调用点（只有测试用），
+  真实后果是：进程被杀后那条 step 永远停在 `started`，「正在执行」与「进程已死」无法区分。
+  失败只打日志、不阻断启动。回归：`test\runtime\crash-recovery-wiring.test.ts`。
+- **`/task-bind <taskId>` 是「接回来」的唯一入口**（`chat.ts` 的 `runTaskBind`，owner 通道）。
+  `/task-approve` 只处理 draft（要 `activate`，而 activate 只接受 draft），接不回 active 任务。
+  `bindSession` 允许 draft/active/paused/blocked（`ledger.ts:471`），绑定表按 `task_id` 覆盖，
+  所以重绑会顶掉旧会话的绑定。回归：`test\cli\task-bind.test.ts`。
+
+
 
 - **绑定的唯一建立点是 owner 通道**。当前 `/task` 走 `create(owner) → activate(owner) → bindSession(owner, …, sessionId)`（`src\cli\chat.ts` 的 `runTaskCommand`）；`/task-approve`（`runTaskApprove`）只 `activate`、**不绑定**——模型 draft 批准后是「active 但不属于会话」，后续工具调用不会被记 step（`start.ts` 的 `taskForSession` 查不到）。复核方式：`grep -rn bindSession src`，非测试调用点以它为准，文档过时算文档输。
 - **draft 不绑定会话**：`bindSession` 的相位白名单本身含 `draft`（`ledger.ts:467`），但没有任何路径会对 draft 调它。改顺序前先想清后果：`activate` 只接受 `draft`（`ledger.ts:453`），若改成 `bind → activate`，绑定成功而 activate 失败后重跑会因 `phase=active` 抛 `INVALID_TRANSITION`——**不自愈**，必须先读 `taskForSession` / `get().phase` 再决定是 bind 还是只 activate。同一会话绑到另一个未结任务被拒（`ledger.ts:468`）；绑到同一任务幂等（投影是 `ON CONFLICT(task_id) DO UPDATE`，`src\ledger\fold.ts` 的 `task.session-bound` 分支）。

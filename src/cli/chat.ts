@@ -263,11 +263,41 @@ export function describeOpenTasks(ledger: Ledger): string {
   for (const t of open) {
     lines.push(`  ${t.phase.padEnd(8)} ${t.id}  ${t.title}`)
   }
-  lines.push('  用 /task-approve <id> 批准草案；恢复执行请显式操作。')
+  lines.push('  用 /task-approve <id> 批准草案；用 /task-bind <id> 把已有任务接回本会话。')
   return lines.join('\n') + '\n'
 }
 
 /** `/task <目标>`：建任务 → 激活 → 绑定当前会话，全程 owner 通道。 */
+/**
+ * `/task-bind <taskId>`：把**已有**的未结任务接回当前会话。
+ *
+ * 为什么需要它：进程被杀后任务停在 active、绑定指向已死的会话，重启会打印
+ * 「未结任务 N 个……恢复执行请显式操作」，但此前没有任何命令能接回来——
+ * `/task-approve` 只处理 draft。阶段二的「恢复」这一半因此不成立。
+ * `Ledger.bindSession` 本身就允许 draft/active/paused/blocked（`ledger.ts:471`），
+ * 缺的只是一个 owner 入口。
+ */
+async function runTaskBind(deps: ChatDeps, id: string, sessionId: string): Promise<void> {
+  if (deps.ledger === undefined) {
+    deps.out('[prts] 未配置 ledger，/task-bind 不可用\n')
+    deps.onIdle?.()
+    return
+  }
+  if (id === '') {
+    deps.out('[prts] 用法：/task-bind <taskId>（/tasks 查看未结任务）\n')
+    deps.onIdle?.()
+    return
+  }
+  try {
+    const snap = deps.ledger.get(id as never)
+    const bound = deps.ledger.bindSession({ kind: 'owner' }, { id: snap.id, revision: snap.revision }, sessionId)
+    deps.out(`[prts] 已把 ${bound.id}（${bound.phase}）接回本会话\n`)
+  } catch (error) {
+    deps.out(`[prts] 接回失败：${error instanceof Error ? error.message : String(error)}\n`)
+  }
+  deps.onIdle?.()
+}
+
 async function runTaskCommand(deps: ChatDeps, sessionId: string, objective: string): Promise<void> {
   if (deps.ledger === undefined) {
     deps.out('[prts] 未配置 ledger，/task 不可用\n')
@@ -1127,6 +1157,11 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
       }
       if (line.startsWith('/task-approve')) {
         await runTaskApprove(deps, line.slice('/task-approve'.length).trim(), sessionId)
+        continue
+      }
+      // 崩溃/关机后把已有任务接回本会话——`/task-approve` 只处理 draft，接不回 active。
+      if (line === '/task-bind' || line.startsWith('/task-bind ')) {
+        await runTaskBind(deps, line.slice('/task-bind'.length).trim(), sessionId)
         continue
       }
       // ---- P0-2a 所有者记忆命令：不触发模型回合 ----

@@ -380,6 +380,22 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // :158 以 PRTS_DB 传下来），否则任务事实会落进 K1/K4/K5 都看不见的库。
   // 上面已经 initCoreDb 幂等建过表，这里直接 open 即可。
   const ledger = Ledger.open(dbPath)
+  // 进程被杀时留下的 `started` step 在这里收口。不调用的话它们永远悬着——
+  // 「正在执行的步骤」与「进程已死的步骤」在账本里无法区分。
+  // 2026-11-09 真实中断实测：杀掉在 `Start-Sleep 45` 里的进程，重启后 step 仍是 started。
+  // 只做 started → unknown，**不改任务相位**：任务仍 active，等 owner 用 /task-bind 接回。
+  try {
+    const recovered = ledger.recoverOnStartup()
+    if (recovered.length > 0) {
+      console.error(
+        `[prts] 启动恢复：${recovered.length} 个中断的步骤已标记 unknown`
+        + '（任务仍 active，用 /task-bind <taskId> 接回本会话）',
+      )
+    }
+  } catch (error) {
+    // 恢复失败不能阻断启动：账本还能用，只是孤儿 step 留到下个进程。
+    console.error(`[prts] 启动恢复失败：${error instanceof Error ? error.message : String(error)}`)
+  }
 
   // 记忆库：独立文件，不与 core.sqlite 混（K1/K4/K5 的库是护栏事实，
   // 记忆是对话内容，两者的保留与删除策略不同——设计稿 §6.6 的删除流程
