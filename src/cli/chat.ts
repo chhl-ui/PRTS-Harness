@@ -25,6 +25,8 @@ import { dispatchTasks } from '../runtime/dispatcher.ts'
 import { probeSessions, purgeSessions } from '../memory/session-purge.ts'
 import { AuditLog } from '../audit/audit.ts'
 import { PersonaStore } from '../persona/index.ts'
+import { SkillStore } from '../skills/index.ts'
+import type { SkillPhase, SkillSnapshot, SkillVerdict } from '../skills/index.ts'
 import { listProfiles, readProfile, writeProfile } from '../runtime/model-profile.ts'
 import type { Authority } from '../authority/index.ts'
 import type { ApprovalBridge } from '../runtime/start.ts'
@@ -729,6 +731,169 @@ async function runPersona(deps: ChatDeps, arg: string): Promise<void> {
   }
 }
 
+/*
+ * ---- V1-09 技能库：owner 通道（评估 / 采用 / 拒绝 / 退役 / 恢复）----
+ *
+ * 为什么需要它：全生命周期在库层已完整（`src/skills/store.ts`），模型侧刻意只拿到
+ * `prts_skill_propose` / `prts_skill_list`（`src/runtime/skill-tools.ts` 头注释：
+ * 「模型能自己采用经验，等于能自己给自己加能力」）。但 evaluate/adopt 的 owner
+ * 入口此前一处都没有——`grep -rn "\.adopt(\|\.evaluate(" src` 除 skills 模块自身外
+ * 零命中，于是生产库里那条候选（`C:\prts-data\skills.sqlite`，phase=candidate，
+ * evaluations=[]）从提出起永远停在原地。这条命令补的就是那个缺失的执行者位。
+ *
+ * 生效边界与 `/persona` 相反：技能注入是 `attachSkillInjection` 每轮
+ * `list({ phase: 'active' })`（`src/runtime/skill-inject.ts`），不是启动期装配，
+ * 所以采用后**下一轮就生效**，不需要重启。输出里不要提示重启，那是错的。
+ *
+ * 为什么命令自开连接而不是复用运行时的 store：`ChatDeps` 不带 skills 句柄，且
+ * 技能库与 `/persona` 同层（owner 直连 SQLite）。两条连接读同一文件不冲突——
+ * 写只发生在 REPL 空闲时，注入层只读；跨连接可见性由 `test/cli/skill-command.test.ts`
+ * 的 K3 守着。
+ */
+const SKILL_PHASES: readonly string[] = ['candidate', 'active', 'retired', 'rejected']
+const SKILL_VERDICTS: readonly string[] = ['adopt', 'reject', 'needs-work']
+
+/** 短 id：12 字符足够唯一（`sk-` + uuid 前 9 位），且能直接粘回命令。 */
+function skillShortId(id: string): string {
+  return id.slice(0, 12)
+}
+
+function skillLine(s: SkillSnapshot): string {
+  const next = s.phase === 'candidate'
+    ? `\n      下一步：/skill eval ${skillShortId(s.id)} adopt|reject|needs-work <依据>`
+    : ''
+  return `  ${skillShortId(s.id)}  ${s.phase.padEnd(9)}  ${s.title}${next}\n`
+}
+
+/**
+ * id 解析：精确 → 唯一前缀 → 报错。
+ *
+ * 歧义**不猜**：采用是能力扩张决策，选错一条的代价大于让博士多打几位。
+ */
+function resolveSkill(store: SkillStore, ref: string): SkillSnapshot {
+  if (ref === '') throw new Error('缺少技能 id（先跑 /skill 看候选）')
+  const all = store.list()
+  const exact = all.find((s) => s.id === ref)
+  if (exact !== undefined) return exact
+  const hits = all.filter((s) => s.id.startsWith(ref))
+  const first = hits[0]
+  if (first === undefined) throw new Error(`没有匹配 ${ref} 的技能（/skill list --all 查看全部）`)
+  if (hits.length > 1) {
+    throw new Error(`${ref} 匹配到 ${hits.length} 条，请多写几位：${hits.map((s) => skillShortId(s.id)).join(', ')}`)
+  }
+  return first
+}
+
+async function runSkill(deps: ChatDeps, arg: string): Promise<void> {
+  const dbPath = process.env.PRTS_SKILLS_DB ?? join(deps.dataRoot, 'skills.sqlite')
+  const parts = arg.split(/\s+/).filter((x) => x !== '')
+  const head = parts[0]
+  // 裸 `/skill` 与 `/skill --all` 都按 list 处理：别让一个开关逼人多打一次子命令。
+  const sub = head === undefined || head.startsWith('-') ? 'list' : head
+  const owner = { kind: 'owner' } as const
+  let store: SkillStore | undefined
+  try {
+    store = SkillStore.open(dbPath)
+
+    if (sub === 'list') {
+      const rest = parts.slice(1)
+      const all = rest.includes('--all')
+      const wanted = rest.find((x) => SKILL_PHASES.includes(x)) as SkillPhase | undefined
+      if (!all && wanted === undefined) {
+        // 默认只看候选：采用与否是博士的动作，待办队列才是该被看见的东西。
+        const queue = store.list({ phase: 'candidate' })
+        if (queue.length === 0) {
+          const active = store.list({ phase: 'active' }).length
+          deps.out(`[prts] 没有待评估的候选（已采用 ${active} 条）。/skill list --all 看全部\n`)
+          return
+        }
+        deps.out(`[prts] 待评估候选 ${queue.length} 条：\n`)
+        for (const s of queue) deps.out(skillLine(s))
+        // 采用要求「最近一次评估是 adopt」（store.ts:adopt），所以 eval 在 adopt 之前；
+        // 两行并列写出来，免得博士对着候选找采用命令。
+        deps.out('[prts] /skill show <id> 看全文；/skill eval <id> <结论> <依据> → /skill adopt <id> 才生效\n')
+        return
+      }
+      const rows = all ? store.list() : store.list({ phase: wanted as SkillPhase })
+      if (rows.length === 0) { deps.out('[prts] 技能库为空\n'); return }
+      deps.out(`[prts] 技能 ${rows.length} 条：\n`)
+      for (const s of rows) deps.out(skillLine(s))
+      return
+    }
+
+    if (sub === 'show') {
+      const s = resolveSkill(store, parts[1] ?? '')
+      deps.out(`[prts] ${s.title}\n`)
+      deps.out(`   id：${s.id}\n   相位：${s.phase}   提议者：${s.proposedBy.kind}\n`)
+      deps.out(`   何时用：${s.trigger}\n`)
+      s.steps.forEach((step, i) => deps.out(`   ${i + 1}) ${step}\n`))
+      const pitfalls = s.pitfalls ?? []
+      if (pitfalls.length > 0) deps.out(`   注意：${pitfalls.join('；')}\n`)
+      const sourceRefs = s.sourceRefs ?? []
+      if (sourceRefs.length > 0) deps.out(`   来源：${sourceRefs.join(', ')}\n`)
+      if (s.evaluations.length === 0) deps.out('   评估：尚无\n')
+      else for (const e of s.evaluations) deps.out(`   评估：${e.verdict}——${e.basis}\n`)
+      if (s.retireReason !== undefined) deps.out(`   退役理由：${s.retireReason}\n`)
+      return
+    }
+
+    if (sub === 'eval') {
+      const ref = parts[1] ?? ''
+      const verdict = parts[2] ?? ''
+      if (!SKILL_VERDICTS.includes(verdict)) {
+        deps.out('[prts] 用法：/skill eval <id> adopt|reject|needs-work <依据>\n')
+        return
+      }
+      const basis = parts.slice(3).join(' ').trim()
+      if (basis === '') {
+        deps.out('[prts] 评估必须给依据：/skill eval <id> <结论> <为什么>\n')
+        return
+      }
+      const s = resolveSkill(store, ref)
+      const after = store.evaluate(owner, { id: s.id, revision: s.revision }, {
+        verdict: verdict as SkillVerdict,
+        basis,
+      })
+      deps.out(`[prts] 已记录评估「${after.title}」→ ${verdict}（相位仍是 ${after.phase}）\n`)
+      if (verdict === 'adopt') deps.out(`[prts] 采用它：/skill adopt ${skillShortId(after.id)}\n`)
+      return
+    }
+
+    if (sub === 'adopt') {
+      const s = resolveSkill(store, parts[1] ?? '')
+      const after = store.adopt(owner, { id: s.id, revision: s.revision })
+      deps.out(`[prts] 已采用「${after.title}」（${skillShortId(after.id)}）——下一轮对话起会注入到相关问题上\n`)
+      return
+    }
+
+    if (sub === 'reject' || sub === 'retire' || sub === 'restore') {
+      const s = resolveSkill(store, parts[1] ?? '')
+      const reason = parts.slice(2).join(' ').trim()
+      if (reason === '') {
+        deps.out(`[prts] 用法：/skill ${sub} <id> <理由>（理由必填：退掉却不记为什么，下次还会被重新提出）\n`)
+        return
+      }
+      const ref = { id: s.id, revision: s.revision }
+      const after = sub === 'reject'
+        ? store.reject(owner, ref, reason)
+        : sub === 'retire'
+          ? store.retire(owner, ref, reason)
+          : store.restore(owner, ref, reason)
+      const verb = sub === 'reject' ? '已拒绝' : sub === 'retire' ? '已退役' : '已恢复'
+      deps.out(`[prts] ${verb}「${after.title}」（${after.phase}）：${reason}\n`)
+      return
+    }
+
+    deps.out('[prts] 用法：/skill [list [--all|active|retired|rejected] | show <id> | '
+      + 'eval <id> adopt|reject|needs-work <依据> | adopt|reject|retire|restore <id> [理由]]\n')
+  } catch (error) {
+    deps.out(`[prts] 技能命令失败：${error instanceof Error ? error.message : String(error)}\n`)
+  } finally {
+    store?.close()
+    deps.onIdle?.()
+  }
+}
+
 export async function runChat(deps: ChatDeps): Promise<ChatResult> {
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const ctx = deps.ctx as any
@@ -998,6 +1163,11 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
       // ---- 人格预设查看/切换（owner 通道；重启后生效）----
       if (line === '/persona' || line.startsWith('/persona ')) {
         await runPersona(deps, line.slice('/persona'.length).trim())
+        continue
+      }
+      // ---- V1-09 技能库：评估 / 采用 / 拒绝 / 退役 / 恢复（owner 通道；下一轮生效）----
+      if (line === '/skill' || line.startsWith('/skill ')) {
+        await runSkill(deps, line.slice('/skill'.length).trim())
         continue
       }
       // ---- 模型后端预设（owner 通道；重启 serve 后生效）----
