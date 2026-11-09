@@ -89,6 +89,16 @@ export function applySkillEvent(db: DatabaseSync, e: SkillEventInput): void {
       setPhase(db, e, 'active', null)
       break
 
+    /**
+     * 使用信号，**不动投影**：提供不等于状态变更，相位与 revision 都保持原值。
+     *
+     * 它仍然要有这个 case：`default` 分支会抛错，漏接会让「记一次提供」
+     * 在事务里失败并连带回滚——症状是「注入看起来正常但信号永远是 0」。
+     */
+    case 'skill.offered':
+      requireRow(db, e.skill_id)
+      break
+
     default:
       raise('INVALID_INPUT', `unknown skill event kind: ${String(e.kind)}`)
   }

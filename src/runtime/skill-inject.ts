@@ -166,7 +166,14 @@ export function attachSkillInjection(hookCtx: HookContext, deps: SkillInjectionD
       if (ranked.length === 0 && candidate === undefined) return decision
 
       injectedSteps.add(stepKey)
-      for (const s of ranked) seen.add(s.id)
+      for (const s of ranked) {
+        seen.add(s.id)
+        // 使用信号：`seen` 保证同一会话每条只记一次。写失败不得影响这一轮的回答——
+        // 信号丢了只是少一条观测，注入失败才是真的坏。
+        try {
+          deps.store.recordOffered({ kind: 'model', sessionId }, { id: s.id, revision: s.revision })
+        } catch { /* 观测失败不阻断注入 */ }
+      }
       if (candidate !== undefined) candidateSeen.add(candidate.id)
       injected.set(sessionId, seen)
       // active 做法与候选提醒合并成一条消息：两条 user message 会让模型把它们

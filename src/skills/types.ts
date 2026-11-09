@@ -68,6 +68,13 @@ export type SkillEventKind =
   | 'skill.rejected'
   | 'skill.retired'
   | 'skill.restored'
+  /**
+   * 使用信号：这条 active 技能被注入到某次上下文里（`skill-inject`）。
+   *
+   * 不是状态变更——`fold.ts` 里是 no-op，相位与 revision 都不动。存在的理由是
+   * 「采用之后有没有被用起来」此前完全不可观测，而观测它不需要新增表。
+   */
+  | 'skill.offered'
 
 /** 事件行。`payload` 是每种事件自己的载荷，由 `fold.ts` 解释。 */
 export interface SkillEventRow {

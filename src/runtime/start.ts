@@ -7,7 +7,7 @@ import { boot } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import type { Context } from '@deepseek-ai/cordis'
 import { attachErrorReporter } from './error-report.ts'
-import { createEmotionOnError } from './emotion-trigger.ts'
+import { createEmotionSignals } from './emotion-signals.ts'
 import { AppContainerSandboxProvider, appContainerProfileName } from '../sandbox/provider.ts'
 import { ensureWorkspaceWriteOwner, protectSubpathLocal, protectSubpathAppContainer } from '../sandbox/workspace-acl.ts'
 import { deriveAppContainerSid } from '../sandbox/appcontainer.ts'
@@ -1179,11 +1179,24 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       warn: (message: string) => console.warn(message),
     },
   )
-  // V1-05 系统侧生产者：轮次失败 → 写一条负面情绪（带 10 分钟节流）。
-  // `emotion` 是可选的（打不开时只是没有情绪层），所以没有它就不接 onReport。
-  const detachErrorReporter = attachErrorReporter(ctx, emotion === undefined
+  // V1-05 情感事件源：轮次失败 → 受挫（10 分钟节流）；turn 正常收尾 → 顺利；
+  // 博士验收/否定在 `chat.ts` 的 runAccept/runReject 里写（那是 owner 命令面）。
+  // `emotion` 是可选的（打不开时只是没有情绪层），所以没有它就不接线。
+  const emotionSignals = emotion === undefined ? undefined : createEmotionSignals({ store: emotion })
+  const detachErrorReporter = attachErrorReporter(ctx, emotionSignals === undefined
     ? {}
-    : { onReport: createEmotionOnError({ store: emotion }) })
+    : { onReport: (entry) => emotionSignals.onError(entry) })
+  // turn 正常收尾 → 轻微正向。DSH 语义：`agent/turn-stopping` 是 turn 即将关闭、
+  // 模型不再欠回复；失败走 `agent/error`（emit，先到）。失败轮由 signals 内部记账后跳过，
+  // 不让后到的「顺利」覆盖「受挫」。
+  const turnStopBus = events as unknown as
+    { on(name: string, fn: (payload: unknown) => void): () => void } | undefined
+  const detachTurnStop = emotionSignals === undefined || turnStopBus === undefined
+    ? undefined
+    : turnStopBus.on('agent/turn-stopping', (payload) => {
+      const p = payload as { turn?: unknown }
+      emotionSignals.onTurnStopping({ turn: typeof p.turn === 'number' ? p.turn : -1 })
+    })
   if (ctx.get('loader') !== undefined) appReady.commit()
   return {
     ctx,
@@ -1258,6 +1271,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       // Authority 自带 AuditLog 连接（authority.ts:44 close → audit.close）。
       authority.close()
       detachErrorReporter()
+      detachTurnStop?.()
       await ctx.fiber.dispose()
     },
   }

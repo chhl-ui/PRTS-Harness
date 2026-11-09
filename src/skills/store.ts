@@ -200,6 +200,36 @@ export class SkillStore {
   // ---------- 读通道 ----------
 
   /**
+   * 使用信号：这条技能被提供过多少次、最后一次什么时候。
+   *
+   * 只查事件链，不建投影列——`skill.offered` 是观测事件，重建投影时不需要它，
+   * 但它必须留在链上（否则「提供过几次」会随重建消失，那是无声漂移）。
+   */
+  usageStats(id: SkillId): { offered: number; lastOfferedAt: number | null } {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS c, MAX(ts) AS t FROM skill_events WHERE skill_id = ? AND kind = 'skill.offered'",
+    ).get(id) as { c: number; t: number | null } | undefined
+    return { offered: row?.c ?? 0, lastOfferedAt: row?.t ?? null }
+  }
+
+  /**
+   * 记一次「本轮把这条技能提供给了模型」。
+   *
+   * 幂等不由库保证：调用方（`skill-inject`）按会话去重，同一技能同一会话只记一次。
+   * revision 用当前值而不是 +1——提供不是状态变更，推进 revision 会让后续
+   * `evaluate`/`retire` 的乐观并发检查误报 `STALE_REVISION`。
+   */
+  recordOffered(actor: SkillActor, ref: SkillRef): void {
+    const s = this.mustSkill(ref)
+    this.tx(() => {
+      this.append(s.id, s.revision, 'skill.offered', actor, {
+        by: actor,
+        atMs: Date.now(),
+      })
+    })
+  }
+
+  /**
    * 最后一条 `skill.adopted` 事件的操作者。
    *
    * 用途只有一个：注入层要能区分「博士采用」与「模型自采」（`runtime/skill-inject.ts`）。

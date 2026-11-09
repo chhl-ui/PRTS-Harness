@@ -254,3 +254,25 @@ test('K7 /skill list --all：无过滤列出全部相位', async () => {
     assert.equal(state.followups, 0)
   } finally { t.cleanup() }
 })
+
+test('K8 /skill show 显示使用信号——采用之后有没有被用起来', async () => {
+  const t = makeTmp('prts-skill-8-')
+  try {
+    const dataRoot = join(t.dir, 'data')
+    const { dbPath, id } = seed(dataRoot)
+    // 先落两次「被提供」信号（skill-inject 在真实运行时里做同样的事）。
+    const s = SkillStore.open(dbPath)
+    try {
+      const snap = s.get(id)
+      assert.ok(snap !== undefined)
+      s.recordOffered({ kind: 'model', sessionId: 'sess-x' }, { id, revision: snap.revision })
+      s.recordOffered({ kind: 'model', sessionId: 'sess-y' }, { id, revision: snap.revision })
+    } finally { s.close() }
+
+    const state = makeAgent('sess-a')
+    const text = await chat(dataRoot, state, [`/skill show ${shortId(id)}`])
+    assert.match(text, /提供过：2 次/, `应显示提供次数，实际：${text}`)
+    assert.match(text, /最近/, `应显示最后一次提供的时间，实际：${text}`)
+    assert.equal(state.followups, 0)
+  } finally { t.cleanup() }
+})

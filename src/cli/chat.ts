@@ -26,6 +26,8 @@ import { probeSessions, purgeSessions } from '../memory/session-purge.ts'
 import { AuditLog } from '../audit/audit.ts'
 import { PersonaStore } from '../persona/index.ts'
 import { SkillStore } from '../skills/index.ts'
+import { EmotionStore } from '../emotion/index.ts'
+import { createEmotionSignals } from '../runtime/emotion-signals.ts'
 import type { SkillPhase, SkillSnapshot, SkillVerdict } from '../skills/index.ts'
 import { listProfiles, readProfile, writeProfile } from '../runtime/model-profile.ts'
 import type { Authority } from '../authority/index.ts'
@@ -356,6 +358,22 @@ function targetRef(deps: ChatDeps, id: string, sessionId: string): { id: never; 
  * 下把任务推成 done。这是所有者判断权的合理代价（「查个资料」类任务本就没有文件
  * 产物），不在账本层设硬门槛；但必须让人在知情下决定，故无证据时额外提示。
  */
+/**
+ * 博士反馈 → 情绪（架构需求 §5.1 四类事件里的「博士的反馈」）。
+ *
+ * 与 `/persona` 同层：自开一次短连接写同一 `emotion.sqlite`，写完即关。
+ * 失败一律吞掉——验收/驳回的结果是账本事实，不能因为情绪库打不开就改变裁决。
+ */
+function recordOwnerFeedback(deps: ChatDeps, kind: 'accept' | 'reject', reason: string): void {
+  let store: EmotionStore | undefined
+  try {
+    store = EmotionStore.open(process.env.PRTS_EMOTION_DB ?? join(deps.dataRoot, 'emotion.sqlite'))
+    const signals = createEmotionSignals({ store })
+    if (kind === 'accept') signals.onOwnerAccept(reason)
+    else signals.onOwnerReject(reason)
+  } catch { /* 情绪写失败不影响裁决 */ } finally { store?.close() }
+}
+
 async function runAccept(deps: ChatDeps, id: string, sessionId: string): Promise<void> {
   if (deps.ledger === undefined) {
     deps.out('[prts] 未配置 ledger，/accept 不可用\n')
@@ -378,6 +396,7 @@ async function runAccept(deps: ChatDeps, id: string, sessionId: string): Promise
     }
     const accepted = deps.ledger.ownerAccept({ id: snap.id, revision: snap.revision })
     deps.out(`[prts] 已验收 ${accepted.id}（${accepted.phase}）\n`)
+    recordOwnerFeedback(deps, 'accept', `任务 ${accepted.id} 验收通过`)
   } catch (error) {
     deps.out(`[prts] 验收失败：${error instanceof Error ? error.message : String(error)}\n`)
   }
@@ -399,6 +418,7 @@ async function runReject(deps: ChatDeps, id: string, reason: string, sessionId: 
     const ref = targetRef(deps, id, sessionId)
     const snap = deps.ledger.ownerReject(ref.id, reason.trim())
     deps.out(`[prts] 已驳回 ${snap.id}（${snap.phase}）：${reason.trim()}\n`)
+    recordOwnerFeedback(deps, 'reject', reason.trim())
   } catch (error) {
     deps.out(`[prts] 驳回失败：${error instanceof Error ? error.message : String(error)}\n`)
   }
@@ -831,6 +851,11 @@ async function runSkill(deps: ChatDeps, arg: string): Promise<void> {
       if (pitfalls.length > 0) deps.out(`   注意：${pitfalls.join('；')}\n`)
       const sourceRefs = s.sourceRefs ?? []
       if (sourceRefs.length > 0) deps.out(`   来源：${sourceRefs.join(', ')}\n`)
+      // 使用信号：采用之后到底有没有被用起来。这是观测，不是效果证明——
+      // 「提供过 N 次」不等于「每次都有用」，效果归因需要任务级埋点。
+      const usage = store.usageStats(s.id)
+      deps.out(`   提供过：${usage.offered} 次`
+        + (usage.lastOfferedAt === null ? '\n' : `（最近 ${new Date(usage.lastOfferedAt).toISOString().slice(0, 16).replace('T', ' ')}）\n`))
       if (s.evaluations.length === 0) deps.out('   评估：尚无\n')
       else for (const e of s.evaluations) deps.out(`   评估：${e.verdict}——${e.basis}\n`)
       if (s.retireReason !== undefined) deps.out(`   退役理由：${s.retireReason}\n`)

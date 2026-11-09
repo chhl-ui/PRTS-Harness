@@ -183,8 +183,26 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 - **评估与采用不合并**：`evaluate` 只记证据、不改相位，`adopt` 要求「最近一次评估是 adopt」（`skills\store.ts`）。
   合并成一个动作后，事后分不清「评估过但没采用」与「根本没评估」，而这两者对「这条经验该不该改」的判断完全不同。
 - **id 歧义不猜**：精确 → 唯一前缀 → 报错并列出候选。选错一条技能的代价会持续到有人撤回，多打几位更便宜。
-  回归：`test\cli\skill-command.test.ts`（K1—K7）、`test\skills\skill-store.test.ts`（SK3 模型自采 / SK9 模型不能回退）、
+  回归：`test\cli\skill-command.test.ts`（K1—K8）、`test\skills\skill-store.test.ts`（SK3 模型自采 / SK9 模型不能回退）、
   `test\runtime\skill-tools.test.ts`（ST1 工具面 / ST5 闭环 / ST6 未评估不得采用）、`test\runtime\skill-inject.test.ts`（SI9 采用者标注）。
+
+### 反馈回路：技能使用信号与情感事件源（2026-11-09）
+
+两条线补的都是「采用/发生后没有回音」这个缺口。
+
+- **技能使用信号**：`skill.offered` 事件 + `SkillStore.usageStats(id)`（`skills\store.ts`）。
+  注入层每会话每条写一次（`skill-inject.ts` 的 `recordOffered`，`seen` 去重），**不改相位、不推进 revision**
+  （`fold.ts` 里是 no-op，投影零迁移）——推进 revision 会让后续 `evaluate`/`retire` 误报 `STALE_REVISION`。
+  `/skill show` 显示「提供过 N 次」。**这是观测，不是效果证明**：它回答「有没有被用起来」，
+  不回答「用了之后结果如何」；后者要任务级归因，未做。
+- **情感事件源**：§5.1 要求四类事件驱动情绪，此前只接了 `agent/error` 一类（生产库 `emotion_events=0`
+  就是这个缺口的证据）。现在三处：error → 受挫（10 min 节流，沿用 `emotion-trigger.ts`）、
+  `agent/turn-stopping` → 顺利（5 min 节流）、`/accept` `/reject` → 被认可 / 受挫（`chat.ts` 的 `recordOwnerFeedback`）。
+  第四类「长时间未见」要时钟，未做。
+  **失败轮不许写正向**：`agent/error` 是 emit 且先到，turn-stopping 是 serial 随后仍触发，
+  所以 `emotion-signals.ts` 自己维护 `failedTurns`，收尾时先消费再判断——否则一次失败的回合会被
+  后到的「顺利」覆盖，情绪与实际相反且静默。
+  回归：`test\runtime\emotion-signals.test.ts`（ES2 就是钉这条）、`test\runtime\emotion-wiring.test.ts`（真实 runtime 接线）。
 
 ### 绑定归属：只由 owner 通道建立，模型永不绑定
 
