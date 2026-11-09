@@ -31,6 +31,7 @@ import { createSubtaskTool } from './subtask.ts'
 import { resolveTokenBudget } from './token-budget.ts'
 import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachToolLoopAudit } from './tool-loop-audit.ts'
+import { isSandboxDenial } from './tool-denial.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { openProactiveStore, type ProactiveStore } from '../proactive/index.ts'
@@ -729,6 +730,24 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
           }
         }
       } catch { /* 循环检测是观测，失败静默 */ }
+      // sandbox 模式拒绝也进审计链。`Authority.guard` 那条（authority.ts:366）只覆盖能力级拒绝，
+      // 而 `/sandbox view` 的 read-only 由 DSH 的 fs 后端自己拒、不经过 guard——
+      // 不补这一段，安全事件就只进对话、不进 K4（2026-11-09 实测：文件确实没写成功，
+      // 但审计链上一条记录都没有，TODO 那条判据的「审计留痕」不成立）。
+      try {
+        if (isSandboxDenial(result)) {
+          const deniedSessionId = exec.agent?.session?.id ?? ''
+          authority.auditLog.append(
+            { kind: 'model', sessionId: deniedSessionId },
+            {
+              kind: 'tool.denied',
+              sessionId: deniedSessionId,
+              tool: String(exec.name ?? ''),
+              reason: 'sandbox-mode:read-only',
+            },
+          )
+        }
+      } catch { /* 审计失败不阻断工具结果 */ }
       const key = String(exec.callId)
       const started = startedSteps.get(key)
       if (started === undefined) return

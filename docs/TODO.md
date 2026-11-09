@@ -50,10 +50,11 @@
 
 ## C. 可自动化，尚未做
 
-- [x] **appcontainer 三档端到端 —— 事件→resolve 段已验（2026-11-09）**：**confine 层已有真机证据**——`mode: 'read-only'` 下 pwsh 写工作区被 OS 拒（`test\sandbox\live-wiring.test.ts` 新增 pwsh 用例；pwsh 7.6.9 实测：版本可读、workspace-write 能写、越界写与读密钥 denied）。
-  新增 `test\runtime\sandbox-mode-live.test.ts`（live）：SM1 部署默认档位可 resolve 出（不是 undefined）；SM2 写 `sandbox/mode` 事件后 `sandboxModeFor` 立即跟上、**第二次切换覆盖第一次**（钉「读的是最近一次投影」而不是「第一条事件」）；SM3 档位 per-session 不串。
+- [x] **appcontainer 三档端到端 —— 全段已验（2026-11-09）**：**confine 层已有真机证据**——`mode: 'read-only'` 下 pwsh 写工作区被 OS 拒（`test\sandbox\live-wiring.test.ts` 新增 pwsh 用例；pwsh 7.6.9 实测：版本可读、workspace-write 能写、越界写与读密钥 denied）。
+  新增 `test\runtime\sandbox-mode-live.test.ts`（live）：SM1 部署默认档位可 resolve 出（不是 undefined）；SM2 写 `sandbox/mode` 事件后 `sandboxModeFor` 立即跟上、**第二次切换覆盖第一次**；SM3 档位 per-session 不串。
   依据：`chat.ts:670` 的 append 与 DSH 官方写路径（`dsh-sandbox-policy/lib/index.js:40-42` 的 `setSandboxMode`）是同一行代码，`start.ts:193` 的 `resolveSandboxMode` 调 `ctx.sandboxPolicy.resolve`。
-  **仍未验**的是「切档后让模型真去写文件、守卫拒绝且审计留痕」这**一整段**（需要模型调用 + 真实 fs backend）：现有证据是两段独立的（事件能被读出 / read-only 下 pwsh 被 OS 拒），中间没有一条测试跨过去。原判据不变：起 `prts chat` 切 view 后让模型写文件，期望守卫拒绝且审计留痕
+  **「切档 → 模型真写 → 被拒 → 审计留痕」整段也已验**（同日）：真机 `/sandbox view` 后让模型调 write，文件未创建、模型正确报因，审计链出现 `tool.denied`（actor `model`，`reason: sandbox-mode:read-only`，`tool: write`）。
+  这一条**原先不成立**——sandbox 拒绝由 DSH 的 fs 后端自己拒、不经过 `Authority.guard`，所以 K4 一条记录都没有。修法：新增 `src\runtime\tool-denial.ts`（判定纯函数）+ `start.ts` 的 `tools/result` 钩子补写审计。回归 `test\runtime\tool-denial.test.ts`（TD1—TD4）
 - [ ] **V1-08 上下文**：超模型窗口 3 倍仍答对开头 5 个约束；跨天新会话说出未完成事项（成本最高）
 - [ ] **V1-06 的提炼质量**：链路已验（`6ae72da`），但用的是 stub generator；真实模型抽得准不准未验
   （要真实模型 + 标注集，属 LongMemEval 的 fact 抽取范畴）
