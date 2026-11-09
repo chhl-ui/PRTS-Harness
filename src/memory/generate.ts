@@ -102,20 +102,37 @@ export class OpenAIGenerator implements TextGenerator {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs)
     try {
-      const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(this.apiKey === undefined ? {} : { Authorization: `Bearer ${this.apiKey}` }),
-        },
-        body: JSON.stringify({
-          model: this.model,
-          messages: [{ role: 'user', content: prompt }],
-          stream: false,
-          temperature: 0,
-        }),
-        signal: ctrl.signal,
-      })
+      let res: Response
+      try {
+        res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(this.apiKey === undefined ? {} : { Authorization: `Bearer ${this.apiKey}` }),
+          },
+          body: JSON.stringify({
+            model: this.model,
+            messages: [{ role: 'user', content: prompt }],
+            stream: false,
+            temperature: 0,
+          }),
+          signal: ctrl.signal,
+        })
+      } catch (error) {
+        // undici 把连接失败包成 `TypeError: fetch failed`，真原因在 cause 里。
+        // 不包装的话模型与博士都只能看到一个无法行动的四个字（2026-11-09 现场：
+        // 摘要连试两次，工具回给模型的就只是 "fetch failed"）。
+        if ((error as { name?: unknown }).name === 'AbortError') {
+          throw new Error(`memory: 生成超时（${this.timeoutMs}ms，端点 ${this.baseUrl} 无响应）`, { cause: error })
+        }
+        const cause = (error as { cause?: { code?: unknown } }).cause
+        const code = typeof cause?.code === 'string' && cause.code !== '' ? cause.code : '连接失败'
+        throw new Error(
+          `memory: 连不上生成端点 ${this.baseUrl}（${code}）。`
+          + '本地模型服务可能未启动；可用 PRTS_SUMMARY_BASE 指向可用端点。',
+          { cause: error },
+        )
+      }
       if (!res.ok) throw new Error(`memory: openai generate HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
       const j = await res.json() as { choices?: Array<{ message?: { content?: unknown } }> }
       const content = j.choices?.[0]?.message?.content
