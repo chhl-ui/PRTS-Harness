@@ -9,11 +9,11 @@
  *      → 仍是 candidate，只是多一条评估记录
  *   adopt（owner 或 model，要求最近一次评估是 adopt）
  *      → active
- *   reject（**owner**，理由必填）
+ *   reject（owner 或 model，理由必填）
  *      → rejected
- *   retire（**owner**，理由必填）
+ *   retire（owner 或 model，理由必填）
  *      → retired
- *   restore（**owner**，理由必填）
+ *   restore（owner 或 model，理由必填）
  *      → active
  *
  * ## 为什么 `evaluate` 与 `adopt` 分开
@@ -33,8 +33,13 @@
  * **前提必须记住**：一旦技能能携带工具、数据源或授权路径，这条放开就不成立，
  * 必须先恢复 `requireOwner` 校验。到那时它才真的是「能力扩张」。
  *
- * 否决与回退（reject / retire / restore）仍只有 owner 能做：模型可以让一条经验
- * 生效，但不能自己关掉已经生效的东西——回退留在人手里，这是放开后的最后一道手刹。
+ * 否决与回退（reject / retire / restore）同日第二次放开，也归模型：全生命周期
+ * 在工具面与 `/skill` 命令面都可达，没有保留动作。**理由必填这条没有放松**——
+ * 没有理由的回退，下次还会被重新提出，留痕是这里唯一的约束。
+ *
+ * 人工闸门退到哪去了：博士仍持有 `/skill`（同一套动作，随时能撤任何一条）
+ * 与哈希链（`skill_events` 逐条可 `verifyChain`）。放开的是「不用人批准」，
+ * 不是「不用留痕、不能追责」。
  */
 import { randomUUID } from 'node:crypto'
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite'
@@ -158,7 +163,7 @@ export class SkillStore {
   }
 
   reject(actor: SkillActor, ref: SkillRef, reason: string): SkillSnapshot {
-    this.requireOwner(actor, 'reject')
+    this.requireWriter(actor, 'reject')
     const why = nonEmpty(reason, 'reason')
     return this.tx(() => {
       const s = this.mustSkill(ref)
@@ -170,7 +175,7 @@ export class SkillStore {
 
   /** 回退演练：把在用的技能退下来。理由必填——退掉却不记为什么，下次还会被重新提出。 */
   retire(actor: SkillActor, ref: SkillRef, reason: string): SkillSnapshot {
-    this.requireOwner(actor, 'retire')
+    this.requireWriter(actor, 'retire')
     const why = nonEmpty(reason, 'reason')
     return this.tx(() => {
       const s = this.mustSkill(ref)
@@ -181,7 +186,7 @@ export class SkillStore {
   }
 
   restore(actor: SkillActor, ref: SkillRef, reason: string): SkillSnapshot {
-    this.requireOwner(actor, 'restore')
+    this.requireWriter(actor, 'restore')
     const why = nonEmpty(reason, 'reason')
     return this.tx(() => {
       const s = this.mustSkill(ref)
@@ -258,19 +263,19 @@ export class SkillStore {
   // ---------- 内部 ----------
 
   /**
-   * 评估与采用对所有 actor 开放（2026-11-09 放开）。
+   * 全生命周期对所有 actor 开放（2026-11-09 两次放开后没有保留动作）。
    *
-   * 与 `requireOwner` 并列而不是替换它：否决与回退仍走 owner 校验（见文件头）。
-   * 放开的前提是技能不授予权限——若将来技能能携带工具或授权路径，这里要收回。
+   * 仍保留一道校验而不是彻底删掉：技能库是共享文件，写入者如果是个不认识
+   * `kind` 的东西（第三方插件伪造的 actor、调试脚本传的裸字符串），那是 bug
+   * 而不是自主行为——fail-closed 比默默写进去好。
+   *
+   * 放开的前提是技能不授予权限。一旦技能能携带工具、数据源或授权路径，
+   * 必须把这里改回 owner-only（见文件头）。
    */
   private requireWriter(actor: SkillActor, op: string): void {
     if (actor?.kind !== 'owner' && actor?.kind !== 'model') {
       raise('FORBIDDEN', `only owner or model may ${op} a skill`)
     }
-  }
-
-  private requireOwner(actor: SkillActor, op: string): void {
-    if (actor?.kind !== 'owner') raise('FORBIDDEN', `only owner may ${op} a skill`)
   }
 
   private mustSkill(ref: SkillRef): SkillSnapshot {

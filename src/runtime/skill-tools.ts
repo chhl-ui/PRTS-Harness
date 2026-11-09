@@ -1,17 +1,17 @@
 /**
  * V1-09 模型侧工具。
  *
- * 2026-11-09 起暴露 `propose` / `evaluate` / `adopt`（博士决定完全放开）：
- * 技能只是注入上下文的建议文本，不参与工具注册、不过 `Authority.guard`，
- * 采用它不等于拿到新能力——真正拦得住模型的是 K2a 守卫。
+ * 2026-11-09 起暴露全套七个动作：propose / evaluate / adopt / reject / retire /
+ * restore / list。技能只是注入上下文的建议文本，不参与工具注册、不过
+ * `Authority.guard`，采用它不等于拿到新能力——真正拦得住模型的是 K2a 守卫。
  *
- * **`reject` / `retire` / `restore` 永不暴露给模型**：否决与回退留在 owner 通道
- * （`/skill`，见 `src/cli/chat.ts`）。模型可以让一条经验生效，不能自己关掉
- * 已经生效的东西——放开之后这道手刹仍在人手里。
+ * **回退也放开了**：模型能自己撤下已生效的经验（retire）与恢复（restore），
+ * 也能否决候选（reject）。理由必填这条不放松——没有理由的回退，下次还会被
+ * 重新提出。人工闸门退到 `/skill`（博士随时可撤任何一条）与哈希链
+ * （`skill_events` 逐条可 verify）：放开的是「不用人批准」，不是「不用留痕」。
  *
  * 这条放开的**前提**写在 `src/skills/store.ts` 头注释：一旦技能能携带工具、
- * 数据源或授权路径，`evaluate` / `adopt` 必须收回，否则这一格就真成了
- * 「模型自己给自己加能力」。
+ * 数据源或授权路径，采用与回退都要收回，否则这一格就真成了「模型自己给自己加能力」。
  *
  * 采用后注入层会逐条标注「博士采用 / 模型自采」（`skill-inject.ts`），
  * 所以回执里不要写「博士已批准」这类说法。
@@ -246,6 +246,67 @@ export function createSkillTools(tools: ToolRegistry, deps: SkillToolDeps): Skil
       }
     },
   })
+
+  /** reject / retire / restore 三者同构：id + 理由，理由是唯一不可省的东西。 */
+  const registerReasonAction = (
+    name: string,
+    description: string,
+    verb: string,
+    reasonLabel: string,
+    apply: (actor: { kind: 'model'; sessionId: string }, ref: { id: SkillId; revision: number }, reason: string) => { id: SkillId; title: string; phase: string },
+  ): void => {
+    register({
+      name,
+      description: `${description} ${reasonLabel}必填——理由落进哈希链，事后能追「为什么撤」。`,
+      parameters: {
+        type: 'object',
+        properties: {
+          skillId: { type: 'string', description: '技能 id（完整 id 或唯一前缀）' },
+          reason: { type: 'string', description: reasonLabel },
+        },
+        required: ['skillId', 'reason'],
+        additionalProperties: false,
+      },
+      output: outSchema({
+        type: 'object',
+        properties: { message: { type: 'string' }, skillId: { type: 'string' }, phase: { type: 'string' } },
+        required: ['message', 'skillId', 'phase'],
+      }),
+      execute: async (args: unknown, exec: unknown): Promise<unknown> => {
+        const a = (args ?? {}) as Record<string, unknown>
+        const sessionId = (exec as { agent?: { session?: { id?: string } } } | undefined)?.agent?.session?.id ?? ''
+        const reason = String(a.reason ?? '').trim()
+        if (reason === '') throw new Error(`${name.replace('prts_skill_', 'skill_')}: reason 不能为空`)
+        const ref = resolveSkillRef(deps.store, String(a.skillId ?? '').trim())
+        const after = apply({ kind: 'model', sessionId }, ref, reason)
+        return { message: `已${verb}「${after.title}」（${after.phase}）：${reason}`, skillId: after.id, phase: after.phase }
+      },
+    })
+  }
+
+  registerReasonAction(
+    'prts_skill_reject',
+    '否决一条候选技能（相位 → rejected）。坏经验要留痕，否则同一个错做法会被反复提出。',
+    '否决',
+    '理由',
+    (actor, ref, reason) => deps.store.reject(actor, ref, reason),
+  )
+
+  registerReasonAction(
+    'prts_skill_retire',
+    '撤下一条已生效的技能（相位 → retired）。发现它在当前环境里失效、或本身就是错的，就用它。恢复用 prts_skill_restore。',
+    '退役',
+    '理由',
+    (actor, ref, reason) => deps.store.retire(actor, ref, reason),
+  )
+
+  registerReasonAction(
+    'prts_skill_restore',
+    '把退役的技能恢复生效（相位 → active）。只在确认它仍然适用时用，别拿它抵消上一次回退的判断。',
+    '恢复',
+    '理由',
+    (actor, ref, reason) => deps.store.restore(actor, ref, reason),
+  )
 
   return {
     names,

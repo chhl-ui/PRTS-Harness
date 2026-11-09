@@ -51,7 +51,7 @@ const lesson = {
   pitfalls: ['整文件读会挤占上下文'],
 }
 
-test('ST1 注册 propose / evaluate / adopt / list——否决与回退不在工具面', () => {
+test('ST1 注册全套七个工具——2026-11-09 二次放开后不再保留动作', () => {
   const c = open()
   try {
     const fake = fakeRegistry()
@@ -59,10 +59,8 @@ test('ST1 注册 propose / evaluate / adopt / list——否决与回退不在工
     try {
       assert.deepEqual(fake.names().sort(), [
         'prts_skill_adopt', 'prts_skill_evaluate', 'prts_skill_list', 'prts_skill_propose',
+        'prts_skill_reject', 'prts_skill_restore', 'prts_skill_retire',
       ])
-      for (const forbidden of ['prts_skill_retire', 'prts_skill_restore', 'prts_skill_reject']) {
-        assert.equal(fake.names().includes(forbidden), false, `${forbidden} 不该存在——回退与否决留在 owner 通道`)
-      }
     } finally { tools.dispose() }
   } finally { c.tmp.cleanup(c.store) }
 })
@@ -148,6 +146,41 @@ test('ST6 没有 adopt 结论就不能采用——评估与采用仍然分开', 
         '未经评估不得采用',
       )
       assert.equal(c.store.get(out.skillId as never)?.phase, 'candidate')
+    } finally { tools.dispose() }
+  } finally { c.tmp.cleanup(c.store) }
+})
+
+test('ST7 模型能自己回退与恢复——采用之后不满意可以撤下', async () => {
+  const c = open()
+  try {
+    const fake = fakeRegistry()
+    const tools = createSkillTools(fake.registry, { store: c.store })
+    try {
+      const exec = { agent: { session: { id: 'sess-x' } } }
+      const out = await fake.get('prts_skill_propose').execute(lesson, exec) as { skillId: string }
+      await fake.get('prts_skill_evaluate').execute(
+        { skillId: out.skillId, verdict: 'adopt', basis: '在上一轮任务上验证过' },
+        exec,
+      )
+      await fake.get('prts_skill_adopt').execute({ skillId: out.skillId }, exec)
+      assert.equal(c.store.get(out.skillId as never)?.phase, 'active')
+
+      const r = await fake.get('prts_skill_retire').execute(
+        { skillId: out.skillId, reason: '换了仓库后触发条件不再出现' },
+        exec,
+      ) as { phase: string }
+      assert.equal(r.phase, 'retired')
+      const back = await fake.get('prts_skill_restore').execute(
+        { skillId: out.skillId, reason: '演练结束，确认仍适用' },
+        exec,
+      ) as { phase: string }
+      assert.equal(back.phase, 'active')
+
+      // 理由必填不因放开而放松——没理由的回退下次还会被重新提出。
+      await assert.rejects(
+        () => fake.get('prts_skill_retire').execute({ skillId: out.skillId, reason: '  ' }, exec),
+        /理由|reason|INVALID/,
+      )
     } finally { tools.dispose() }
   } finally { c.tmp.cleanup(c.store) }
 })

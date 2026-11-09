@@ -169,8 +169,11 @@ npm run typecheck  # tsc -p .（strict + erasableSyntaxOnly + noEmit）
 - **模型也能自评自采（2026-11-09 博士决定完全放开）**：`skill-tools.ts` 暴露 `prts_skill_evaluate` / `prts_skill_adopt`，
   model 走完整 propose → evaluate → adopt 闭环，库层由 `SkillStore.requireWriter` 放行（`skills\store.ts`）。
   依据是事实：技能不参与工具注册、不过 `Authority.guard`，采用它**不等于**拿到新能力，强制点是 K2a 守卫。
-  **`reject` / `retire` / `restore` 仍归 owner**（`requireOwner`）——模型能让经验生效，不能自己关掉已生效的东西。
-  **前提**：一旦技能能携带工具、数据源或授权路径，必须收回 evaluate/adopt，否则这一格就真成了「模型自己给自己加能力」。
+  **回退也放开了（同日第二次）**：`reject` / `retire` / `restore` 走同一个 `requireWriter`——模型能自己否决候选、
+  撤下已生效的经验、再恢复回来。**理由必填没放松**（没有理由的回退下次还会被重新提出）。
+  人工闸门退到 `/skill`（博士随时可撤任何一条）与哈希链（`skill_events` 逐条可 verify）：
+  放开的是「不用人批准」，不是「不用留痕」。
+  **前提**：一旦技能能携带工具、数据源或授权路径，必须把 `requireWriter` 改回 owner-only。
 - **注入按采用者标注**：`skill-inject.ts` 对每条技能查最后一条 `skill.adopted` 事件的 actor（`SkillStore.adoptedBy`），
   渲染成「博士采用」或「模型自采」。不加投影列——采用者本来就是事件事实，重建投影无需迁移。
 - **生效边界与 `/persona` 相反**：技能注入是 `attachSkillInjection` 每轮 `list({ phase: 'active' })`（`skill-inject.ts`），

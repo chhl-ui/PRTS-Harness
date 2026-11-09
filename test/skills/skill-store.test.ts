@@ -155,14 +155,24 @@ test('SK8 回退可恢复：retired → restore → active（演练要能演回�
   } finally { c.tmp.cleanup(c.store) }
 })
 
-test('SK9 模型仍不能 reject / retire / restore——否决与回退留在 owner 通道', () => {
+test('SK9 模型也能回退与否决——2026-11-09 二次放开（连回退也放开）', () => {
   const c = open()
   try {
     const { id, revision } = activated(c.store)
-    assert.equal(codeOf(() => c.store.retire(model(), { id, revision }, '想退')), 'FORBIDDEN')
-    assert.equal(codeOf(() => c.store.reject(model(), { id, revision }, '想拒')), 'FORBIDDEN')
-    assert.equal(codeOf(() => c.store.restore(model(), { id, revision }, '想恢复')), 'FORBIDDEN')
-    assert.equal(c.store.get(id)?.phase, 'active', '被拒后相位不变')
+    const r = c.store.retire(model(), { id, revision }, '换仓库后触发条件不再出现')
+    assert.equal(r.phase, 'retired', '模型可以撤下已生效的技能')
+    const back = c.store.restore(model(), { id, revision: r.revision }, '演练结束，确认仍适用')
+    assert.equal(back.phase, 'active', '模型也能恢复')
+
+    const p = c.store.propose(model(), lesson)
+    assert.equal(c.store.reject(model(), { id: p, revision: 1 }, '不通用').phase, 'rejected', '模型能否决候选')
+
+    // 理由必填不因放开而放松：没有理由的回退，下次还会被重新提出。
+    const { id: id2, revision: rev2 } = activated(c.store)
+    assert.equal(codeOf(() => c.store.retire(model(), { id: id2, revision: rev2 }, '   ')), 'INVALID_INPUT')
+    assert.equal(codeOf(() => c.store.restore(model(), { id: id2, revision: rev2 }, '')), 'INVALID_INPUT')
+    assert.equal(codeOf(() => c.store.reject(model(), { id: id2, revision: rev2 }, '')), 'INVALID_INPUT')
+    assert.equal(c.store.get(id2)?.phase, 'active', '被拒的回退不得改变相位')
   } finally { c.tmp.cleanup(c.store) }
 })
 

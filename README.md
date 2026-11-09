@@ -96,7 +96,7 @@ npm run chat:remote    # 另开终端，PRTS_DATA_ROOT 指向同一数据根
 | `/forget <id,...> [--yes]` · `/forget-session <sessionId,...> [--yes]` · `/correct <factId> <新内容>` | 记忆删除与纠正 |
 | `/intent [list [--all] \| cancel <id,...>]` | 前瞻意图 |
 | `/persona [预设名]` | 人格预设；切换后需重启 `prts chat`（人格在启动时装配） |
-| `/skill [list [--all\|active\|retired\|rejected] \| show <id> \| eval <id> <结论> <依据> \| adopt\|reject\|retire\|restore <id> [理由]]` | 技能库（V1-09）：默认列待评估候选；采用后**下一轮**就注入，不用重启。模型自己也能评估并采用（注入标为「模型自采」），否决与回退仍只有博士能做 |
+| `/skill [list [--all\|active\|retired\|rejected] \| show <id> \| eval <id> <结论> <依据> \| adopt\|reject\|retire\|restore <id> [理由]]` | 技能库（V1-09）：默认列待评估候选；采用后**下一轮**就注入，不用重启。模型自己也能评估、采用、否决与回退（注入标为「模型自采」）；博士的 `/skill` 始终能撤任何一条 |
 | `/model <预设名>` | 模型后端；切换后需重启 `chat:serve`（窗口在启动期定） |
 | `/sandbox <view\|edit\|full>` | 沙箱档位，per-session |
 | `/sessions` · `/switch <sessionId>` · `/new` | 会话表、切到已存在的 live 会话、新建会话 |
