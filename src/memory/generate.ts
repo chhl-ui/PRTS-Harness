@@ -24,6 +24,24 @@ export interface OllamaGeneratorOptions {
  * 会把 `num_predict` 全部烧在思考过程上，输出被截断，一条 JSON 都拿不到
  * （451 token 全是推理，`/no_think` 后缀也无效）。关掉后 4.2 秒/批、输出合法。
  */
+/**
+ * 把 undici 的 `TypeError: fetch failed` 翻译成可行动的错误。
+ *
+ * 两个生成器共用：真原因藏在 `error.cause.code` 里（`ECONNREFUSED` 等），
+ * 原样抛出的话调用方只能看到四个字，不知道该起服务、改地址还是等一会
+ * （2026-11-09 现场：摘要连试两次，模型只能回「fetch failed」）。
+ *
+ * `hint` 由各生成器给：它们的默认端点不同，下一步动作也不同。
+ */
+function describeEndpointFailure(error: unknown, endpoint: string, timeoutMs: number, hint: string): Error {
+  if ((error as { name?: unknown }).name === 'AbortError') {
+    return new Error(`memory: 生成超时（${timeoutMs}ms，端点 ${endpoint} 无响应）`, { cause: error })
+  }
+  const cause = (error as { cause?: { code?: unknown } }).cause
+  const code = typeof cause?.code === 'string' && cause.code !== '' ? cause.code : '连接失败'
+  return new Error(`memory: 连不上生成端点 ${endpoint}（${code}）。${hint}`, { cause: error })
+}
+
 export class OllamaGenerator implements TextGenerator {
   readonly model: string
   private readonly baseUrl: string
@@ -42,18 +60,26 @@ export class OllamaGenerator implements TextGenerator {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs)
     try {
-      const res = await this.fetchImpl(`${this.baseUrl}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: this.model,
-          prompt,
-          stream: false,
-          think: false,
-          options: { num_predict: 1500, temperature: 0 },
-        }),
-        signal: ctrl.signal,
-      })
+      let res: Response
+      try {
+        res = await this.fetchImpl(`${this.baseUrl}/api/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: this.model,
+            prompt,
+            stream: false,
+            think: false,
+            options: { num_predict: 1500, temperature: 0 },
+          }),
+          signal: ctrl.signal,
+        })
+      } catch (error) {
+        throw describeEndpointFailure(
+          error, this.baseUrl, this.timeoutMs,
+          'Ollama 可能未启动（默认 http://127.0.0.1:11434）；也可用 PRTS_OLLAMA_URL 指向别处。',
+        )
+      }
       if (!res.ok) throw new Error(`memory: generate HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
       const j = await res.json() as { response?: unknown }
       if (typeof j.response !== 'string') throw new Error('memory: generate 返回缺 response 字段')
@@ -122,15 +148,9 @@ export class OpenAIGenerator implements TextGenerator {
         // undici 把连接失败包成 `TypeError: fetch failed`，真原因在 cause 里。
         // 不包装的话模型与博士都只能看到一个无法行动的四个字（2026-11-09 现场：
         // 摘要连试两次，工具回给模型的就只是 "fetch failed"）。
-        if ((error as { name?: unknown }).name === 'AbortError') {
-          throw new Error(`memory: 生成超时（${this.timeoutMs}ms，端点 ${this.baseUrl} 无响应）`, { cause: error })
-        }
-        const cause = (error as { cause?: { code?: unknown } }).cause
-        const code = typeof cause?.code === 'string' && cause.code !== '' ? cause.code : '连接失败'
-        throw new Error(
-          `memory: 连不上生成端点 ${this.baseUrl}（${code}）。`
-          + '本地模型服务可能未启动；可用 PRTS_SUMMARY_BASE 指向可用端点。',
-          { cause: error },
+        throw describeEndpointFailure(
+          error, this.baseUrl, this.timeoutMs,
+          '本地模型服务可能未启动；可用 PRTS_SUMMARY_BASE 指向可用端点。',
         )
       }
       if (!res.ok) throw new Error(`memory: openai generate HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)

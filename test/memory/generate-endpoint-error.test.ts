@@ -22,7 +22,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { OpenAIGenerator } from '../../src/memory/generate.ts'
+import { OllamaGenerator, OpenAIGenerator } from '../../src/memory/generate.ts'
 
 /** 造一个 undici 风格的连接失败：message 是 fetch failed，真原因在 cause。 */
 function connRefused(): Error {
@@ -58,4 +58,20 @@ test('GE2 HTTP 非 2xx 的错误消息保持不变（不误伤既有路径）', 
     fetchImpl: (async () => new Response('bad gateway', { status: 502 })) as unknown as typeof fetch,
   })
   await assert.rejects(() => g.generate('x'), /HTTP 502/)
+})
+
+test('GE3 Ollama 路径同样翻译连接失败——不是只有 OpenAI 那条被包装', async () => {
+  const g = new OllamaGenerator({
+    baseUrl: 'http://127.0.0.1:11434',
+    fetchImpl: (async () => { throw connRefused() }) as unknown as typeof fetch,
+  })
+  await assert.rejects(
+    () => g.generate('x'),
+    (err: Error) => {
+      assert.notEqual(err.message, 'fetch failed', '不得原样透出 undici 的包装消息')
+      assert.match(err.message, /11434/, `要指出实际端点：${err.message}`)
+      assert.match(err.message, /Ollama/, `要指出该起什么：${err.message}`)
+      return true
+    },
+  )
 })
