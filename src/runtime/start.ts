@@ -1,5 +1,7 @@
 /** 运行时组装：boot('prts', configPath, patches, prepare) + 最小 credentials 服务 + K2a 守卫接线。 */
 import { mkdirSync, readFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { createRequire } from 'node:module'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -33,6 +35,7 @@ import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachToolLoopAudit } from './tool-loop-audit.ts'
 import { isSandboxDenial } from './tool-denial.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
+import { attachWakeClock, type WakeClock, type WakeReason } from './wake-clock.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { openProactiveStore, type ProactiveStore } from '../proactive/index.ts'
 import { openReminderStore, type ReminderStore } from '../reminders/index.ts'
@@ -220,6 +223,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   draftTaskForSession(sessionId: string): TaskId | undefined
   /** 后台巩固调度器（`PRTS_CONSOLIDATE=off` 或记忆库不可用时为 undefined）。 */
   memoryScheduler?: MemoryScheduler
+  /** §G2 ① 时钟（`PRTS_CLOCK=off` 或记忆库不可用时为 undefined）。 */
+  clock?: WakeClock
   /** 本次实际生效的 shell 沙箱后端（`PRTS_SANDBOX_BACKEND` 的解析结果）。 */
   sandboxBackend: 'local' | 'appcontainer'
   /**
@@ -1197,6 +1202,134 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     factsLimit: envNum('PRTS_CONSOLIDATE_FACTS_MAX', 20),
   })
 
+  // §G2 ① 时钟（方案 B：离屏自主）。`PRTS_CLOCK=off` 整体关闭。
+  //
+  // 为什么自己起会话而不是复用活跃会话：批准的是 B——「无人也能动」。复用活跃会话
+  // 意味着客户端一断时钟就哑了，那正是要解决的问题（`chat-serve.ts:121-153` 的
+  // accept 循环里，两次客户端之间有很长一段没有 agent 的窗口）。
+  //
+  // 会话身份：每次触发一个新 id。`agents.create` 对磁盘上已存在的 session 抛
+  // `SessionAlreadyExistsError`（`chat-serve.ts:96-102` 记过这个坑），复用 id 会在
+  // 第二次 tick 直接失败。代价是一天最多 `PRTS_CLOCK_DAILY_CAP` 个会话文件。
+  //
+  // 账本与费用：v1 不绑任务、不动 ledger——自主回合只说一句话，不产生工作项；
+  // 费用走 dsh 自己的 usage 记录，不记进任何任务预算。改这个口径要先改计划。
+  const clockStaleMs = envNum('PRTS_CLOCK_STALE_HOURS', 2) * 3_600_000
+  const clockModel = process.env.PRTS_CLOCK_MODEL ?? 'deepseek-chat'
+  /**
+   * 自主动机消息的正文。
+   *
+   * 「不要调用任何工具」不是在请求模型自律——它只是把意图说清楚。真正的强制点
+   * 是 `Authority.guard`：模型真去调 write/shell 仍逐条走 K2a，本版没有为它
+   * 新开任何授权。两件事别混：这里管的是「她大概率只说一句」，guard 管的是
+   * 「她真动手也会被挡住」。
+   */
+  const clockPrompt = (reason: WakeReason): string =>
+    `[自主动机] 这不是博士在说话，是时钟到点了。\n${reason.text}\n`
+    + '请只用一到两句话把这件事告诉博士；不要调用任何工具，不要创建或修改任务，不要展开分析。'
+  // 测试上下文默认关：`node --test` 会为每个测试文件起一个 `startRuntime`，而时钟的
+  // 启动 kick 是 `setTimeout(0)`——立刻就会去 create 一个离屏 agent。那会让几十个
+  // 既有测试凭空多出一条后台会话，且结果取决于临时库里有没有到期项，不可预测。
+  // live 测试用 `PRTS_CLOCK=on` 显式打开（`NODE_TEST_CONTEXT` 的判据与
+  // `sandbox/provider.ts:59` 同一套，不另造环境变量）。
+  const clockDisabled = process.env.PRTS_CLOCK === 'off'
+    || (process.env.PRTS_CLOCK !== 'on' && process.env.NODE_TEST_CONTEXT !== undefined)
+  const clock: WakeClock | undefined =
+    (memory === undefined || clockDisabled) ? undefined : attachWakeClock({
+      collectDue: (nowMs: number): WakeReason[] => {
+        const due: WakeReason[] = []
+        // 顺序即优先级：到期意图是唯一带「计划时刻」的事实，承诺过的先说。
+        try {
+          for (const r of memory.dueIntents(nowMs)) {
+            due.push({
+              kind: 'intent',
+              refId: r.intentId,
+              text: `你原定 ${new Date(r.fireAtMs).toISOString()} 提醒的事：${r.action}`,
+            })
+          }
+        } catch (error) {
+          console.error(`[prts] clock: dueIntents 读取失败：${error instanceof Error ? error.message : String(error)}`)
+        }
+        try {
+          for (const task of ledger.list()) {
+            if (task.phase !== 'blocked' && task.phase !== 'verifying') continue
+            if (typeof task.updatedAt !== 'number' || !Number.isFinite(task.updatedAt)) continue
+            if (nowMs - task.updatedAt < clockStaleMs) continue
+            const hours = Math.round((nowMs - task.updatedAt) / 3_600_000)
+            const title = typeof task.title === 'string' && task.title !== '' ? task.title : task.id
+            due.push({
+              kind: 'stale-task',
+              refId: task.id,
+              text: task.phase === 'verifying'
+                ? `任务「${title}」等你验收，已经 ${hours} 小时`
+                : `任务「${title}」被阻塞，已经 ${hours} 小时`,
+            })
+          }
+        } catch (error) {
+          console.error(`[prts] clock: 任务列表读取失败：${error instanceof Error ? error.message : String(error)}`)
+        }
+        return due
+      },
+      deliver: async (reason) => {
+        const agents = ctx.get('agents') as {
+          create(o: unknown): Promise<{
+            agent: { followup(m: unknown): void | Promise<void>; whenIdle?(): Promise<void> }
+            dispose(): Promise<void>
+          }>
+        } | undefined
+        if (agents === undefined) throw new Error('wake-clock: agents service unavailable')
+        const sessionId = `prts-clock-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
+        const handle = await agents.create({
+          sessionId,
+          meta: { cwd: o.workspace },
+          // 与 `/dispatch` 同一取法（chat-serve 的 dispatch 也是硬编码 provider）。
+          // provider id 硬编码是既有事实（TODO.md §I），profile 化了要一起改。
+          agentOptions: { provider: 'deepseek-official', model: clockModel },
+        } as never)
+        try {
+          await handle.agent.followup(createUserMessage({
+            content: [{ type: 'text', text: clockPrompt(reason) }],
+            source: { kind: 'user' },
+          }))
+          if (handle.agent.whenIdle !== undefined) await handle.agent.whenIdle()
+        } finally {
+          await handle.dispose()
+        }
+        return sessionId
+      },
+      onFired: (reason, nowMs, sessionId) => {
+        if (reason.kind === 'intent') {
+          try {
+            memory.markFired({ actor: 'system', intentId: reason.refId, firedAtMs: nowMs, sessionId: sessionId ?? '' })
+          } catch (error) {
+            console.error(`[prts] clock: markFired 失败（${reason.refId}）：${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+        try {
+          authority.auditLog.append({ kind: 'system', component: 'clock' }, {
+            kind: 'clock.fired',
+            sessionId,
+            reasonKind: reason.kind,
+            refId: reason.refId,
+            text: reason.text.slice(0, 200),
+          })
+        } catch (error) {
+          console.error(`[prts] clock: 审计写入失败：${error instanceof Error ? error.message : String(error)}`)
+        }
+      },
+      onStopped: (why, consecutive) => {
+        try {
+          authority.auditLog.append({ kind: 'system', component: 'clock' }, { kind: 'clock.stopped', consecutive, why })
+        } catch (error) {
+          console.error(`[prts] clock: 停止留痕失败：${error instanceof Error ? error.message : String(error)}`)
+        }
+      },
+      intervalMs: envNum('PRTS_CLOCK_INTERVAL_MS', 60_000),
+      minGapMs: envNum('PRTS_CLOCK_MIN_GAP_MS', 30 * 60_000),
+      dailyCap: envNum('PRTS_CLOCK_DAILY_CAP', 8),
+    })
+  clock?.start()
+
   // turn 内失败只经 agent/error 上报：dsh-agent-loop 的 throwError() emit 后 throw，
   // kick() 的 catch 吞掉异常传播。不订阅则失败完全静默。
   // 工具结果卸载（spill）接线。它是优化、不是启动前置：根与受保护根/工作区根
@@ -1261,6 +1394,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     draftTaskForSession: (sessionId: string) => taskTools.draftTaskForSession(sessionId),
     /** 后台巩固调度器（未启用时为 undefined）：诊断可读 stats()，测试可 runOnce()。 */
     memoryScheduler,
+    /** §G2 ① 时钟（未启用时为 undefined）：诊断读 stats()，测试可 tick()。 */
+    clock,
     sandboxBackend: backend,
     sandboxModeFor: (session) => resolveSandboxMode(ctx, session),
     dispose: async () => {
@@ -1282,6 +1417,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       taskReminder?.dispose()
       reminders?.close()
       memoryScheduler?.dispose()
+      // 先停时钟再关库：tick 里要读 dueIntents / ledger.list，库关了还在跑会抛错。
+      clock?.stop()
       memoryTools?.dispose()
       sessionTools.dispose()
       webTools?.dispose()

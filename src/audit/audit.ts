@@ -193,6 +193,19 @@ function validateEvent(e: AuditEvent): void {
     }
     case 'session.released':
       nonEmpty(e.sessionId, 'sessionId'); return
+    case 'clock.fired':
+      // sessionId 可选：正常路径一定有（时钟的 deliver 返回离屏会话 id），
+      // 但「没有会话」也是一种真实形态（deliver 实现被替换），不该因此丢留痕。
+      if (e.sessionId !== undefined) nonEmpty(e.sessionId, 'sessionId')
+      nonEmpty(e.refId, 'refId')
+      nonEmpty(e.text, 'text')
+      if (e.reasonKind !== 'intent' && e.reasonKind !== 'stale-task') {
+        raise('INVALID_INPUT', 'reasonKind must be intent|stale-task')
+      }
+      return
+    case 'clock.stopped':
+      if (!Number.isFinite(e.consecutive)) raise('INVALID_INPUT', 'consecutive must be finite')
+      nonEmpty(e.why, 'why'); return
     default:
       raise('INVALID_INPUT', `unknown event kind: ${String((e as { kind?: unknown }).kind)}`)
   }

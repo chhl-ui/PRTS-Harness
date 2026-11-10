@@ -4,7 +4,12 @@ export type AuditActor =
   | { kind: 'owner' }
   | { kind: 'model'; sessionId: string }
   | { kind: 'plugin'; pluginId: string }
-  | { kind: 'system'; component: 'authority' | 'stop' | 'supervisor' | 'integrity' | 'deletion' }
+  /**
+   * `clock` 是 §G2 ① 的时钟组件：它在没有用户输入时主动起一次回合。
+   * 单列一个 component 而不是复用 `plugin`——「她自己在无人时说的话」与
+   * 「第三方插件做的事」在追责时不是同一件事。
+   */
+  | { kind: 'system'; component: 'authority' | 'stop' | 'supervisor' | 'integrity' | 'deletion' | 'clock' }
 
 /** 形如 'tool:pwsh'、'fs.write:C:\\path'、'net:example.com'；本组件只校验非空。 */
 export type Capability = string
@@ -31,6 +36,16 @@ export type AuditEvent =
   /** 会话身份（设计见 `docs/design-session-identity.md` §3.1）：注册与释放都是授权事实。 */
   | { kind: 'session.registered'; sessionId: string; sessionKind: SessionKind; roots: string[]; parentSession?: string }
   | { kind: 'session.released'; sessionId: string }
+  /**
+   * §G2 ① 时钟：到点主动开了一次口。
+   *
+   * 落链的理由与 `tool.loop.suspected` 同一条：**误打扰率**只能靠事后回看攒样本，
+   * 而对话会滚掉。`sessionId` 是本次离屏会话的 id，`refId` 是被说的那条
+   * intent / task——不记正文来源，只记指针，审计链不该长成第二份记忆库。
+   */
+  | { kind: 'clock.fired'; sessionId?: string; reasonKind: 'intent' | 'stale-task'; refId: string; text: string }
+  /** 时钟连续失败到阈值而自停。停是重要事实：它在没人看的时候停止了自主行为。 */
+  | { kind: 'clock.stopped'; consecutive: number; why: string }
 
 export type SessionKind = 'primary' | 'subagent'
 

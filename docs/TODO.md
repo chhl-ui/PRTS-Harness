@@ -84,7 +84,24 @@
 
 结论原文：**学得会了，但还是不会自己动。** 三条按「改动性质」排序——第一条是产品边界，后两条是接线。
 
-- [ ] **① 时钟 / 自主唤醒（架构级，先定产品边界）**
+- [x] **① 时钟 / 自主唤醒（2026-11-10 落地，方案 B 离屏自主）**
+  **落地**：`src\runtime\wake-clock.ts`（调度）+ `src\runtime\start.ts`（接线）；
+  单测 `test\runtime\wake-clock.test.ts`（W1—W9）、live `test\runtime\wake-clock-live.test.ts`（CL1，真起回合 + 审计留痕）。
+  **博士批准的取舍**：方案 B——时钟自己起离屏会话（`prts-clock-<ts>-<rand>`），
+  不依赖任何活跃会话，客户端断开也能触发。
+  **四项语义**：① 会话身份每次唯一（复用 id 会撞 `SessionAlreadyExistsError`）；
+  ② **不绑任务、不动账本**（自主回合只说一句话，不产生工作项）；③ 审计 actor
+  `{kind:'system',component:'clock'}`，事件 `clock.fired` / `clock.stopped`；
+  ④ 费用走 dsh 自己的 usage 记录，不记进任何任务预算。
+  **节流与自停**：`PRTS_CLOCK_MIN_GAP_MS`（默认 30min）、`PRTS_CLOCK_DAILY_CAP`（默认 8）、
+  连续失败 3 次自停（不自动恢复）。数据源：`mem_intents` 到期 + 停滞任务
+  （blocked/verifying 超 `PRTS_CLOCK_STALE_HOURS`，默认 2h）。
+  **首版只说不做**：正文明确「不要调用工具」，且不改变模型可调用面——K2a 照常兜底。
+  `PRTS_CLOCK=off` 关闭；测试上下文默认关（`NODE_TEST_CONTEXT`），live 测试用 `PRTS_CLOCK=on` 打开。
+  **未做/已知**：④「长时间未见」情感事件源仍是独立项（本版未接）；`PRTS_CLOCK_STALE_HOURS=0`
+  表达不出来（`envNum` 要求 `>0`，传 0 静默回落 2h，已实测）。
+  ——以下为落地前的判断，保留作背景——
+  ~~现状：全仓无 cron/定时器~~（已过时，`memory-scheduler` 与 `wake-clock` 都是定时器形态）。
   现状：全仓无 cron/定时器（`grep -rn "cron|scheduleJob|wakeup|autonomous" src` 只命中注释与 memory 表的 CHECK）。
   所有"主动"行为都挂在 `agent/pre-step` 或 `agent/turn-stopping`，**必须先有人开口**。
   缺的是「无人时能否主动做事」这个产品决定 + 一个调度器组件。
@@ -106,6 +123,12 @@
   没有时钟就做不了——与 ① 同一前置。
 
 ## H. 已闭环（本会话）
+
+- [x] **时钟（§G2 ①）落地**（2026-11-10，方案 B 离屏自主）：`src\runtime\wake-clock.ts`
+  + `start.ts` 接线 + K4 事件 `clock.fired`/`clock.stopped`。live 测试证明**模型真被调用**
+  （不只是消息入队——`inbox.append` 不唤醒，只有 `agent.followup` 唤醒）。
+  偏离计划：计划按 A 方案写的（复用活跃会话），博士选了 B（离屏自主），所以第 4 步
+  「chat.ts 注册活跃 agent」整条取消，改为时钟自己 `agents.create`。
 
 - [x] **模型后端切换**（`cc8a6b4` + 桌面端 `f654e59`）：侧栏「模型后端」磁贴 / 终端 `/model`，
   写 `<dataRoot>\model-profile.json`，`chat-serve` 启动时读并覆盖 env。
