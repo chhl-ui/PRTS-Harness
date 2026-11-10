@@ -48,6 +48,21 @@ function streamFrame(payload: unknown): AssistantStreamFrame | undefined {
 }
 
 /**
+ * payload 里的 agent 属于哪个会话。
+ *
+ * **必须按它过滤**：`ctx.events` 是根 context 的事件总线，`agent/assistant-stream`
+ * 会收到**所有** agent 的流。时钟（`wake-clock.ts`）起的是离屏会话，它说话时
+ * 那些 delta 会流到同一个 handler——2026-11-10 真机实测，终端上出现的是
+ * 「博士，任务…需要你介入处理。你好，博士。」两句拼在同一行，人分不清哪句
+ * 是回答自己。返回 undefined 表示 payload 没有会话信息，此时不过滤（保持旧行为）。
+ */
+function payloadSessionId(payload: unknown): string | undefined {
+  const session = (payload as { agent?: { session?: { id?: unknown } } })?.agent?.session
+  const id = session?.id
+  return typeof id === 'string' && id !== '' ? id : undefined
+}
+
+/**
  * 取一帧的增量文本：只认 chunk 帧里的 text-delta。
  * 特意不放宽到 block-end 的 `block: { type: 'text', text }`——那样同一次回复会被算两遍
  * （text-delta 一遍 + 组装后的 block 又一遍），终端上就是重复输出。
@@ -1011,6 +1026,10 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
   // 已知限制：重试会起新 attempt 从头重发 delta，而已写入的终端内容撤不回来，
   // 此时终端上可能看到重复片段——本轮不做终端回滚。
   const off = events?.on('agent/assistant-stream', (e: unknown) => {
+    // 只显示本会话 agent 的文本：根 context 的总线会收到所有 agent（含时钟的
+    // 离屏会话），不过滤就会把别人会话的回复打进当前终端。
+    const from = payloadSessionId(e)
+    if (from !== undefined && from !== sessionId) return
     const frame = streamFrame(e)
     if (frame === undefined) return
     if (frame.attemptId !== attemptId) {
