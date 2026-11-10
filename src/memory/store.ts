@@ -1838,6 +1838,65 @@ export class MemoryStore {
     return rows.map(toIntentRow)
   }
 
+  /**
+   * **惦记着的事**：重要、且很久没被提起的事实。
+   *
+   * 这是给时钟（`wake-clock.ts`）的第三路数据源，也是唯一一条**不看时间截止**的：
+   * 到期意图看 `fire_at_ms`、停滞任务看 `updatedAt`，而这里看的是 `importance`
+   * ——「这件事在我心里有分量，而且我很久没想起它了」。
+   *
+   * 在此之前 `importance` 只是一个存着的字段：`9980ad5` 给它装上了赋值者
+   * （情绪效价决定写入强度），但没有人读它。这个查询是第一个读者。
+   *
+   * ## 为什么这次是真的「像人」一点了
+   *
+   * 闹钟的触发理由是「时间到了」，这里的触发理由是「我惦记」。同一个定时器，
+   * 读的东西不一样，说出来的话就不一样。
+   *
+   * ## 为什么阈值默认高于基线
+   *
+   * 默认 `minImportance = 0.6`，高于 `assertFact` 的 0.5 兜底。基线重要性的事实
+   * 是「记下了但不特别」——把它们全算进候选，等于每次 tick 都可能念叨一件普通旧事。
+   * 想让旧数据也参与，得先回填 importance（另一步）。
+   *
+   * `access_count` 不参与筛选：它衡量「被用过几次」，而这里要的是「多久没碰」。
+   * 两者混进一个分数会让「常用但很久没提」和「重要但没碰过」分不开。
+   */
+  lonelyFacts(opts: {
+    nowMs: number
+    /** 重要性下限，默认 0.6（高于基线 0.5）。 */
+    minImportance?: number
+    /** 至少多久没被访问过，默认 14 天。NULL 的 last_access_ms 视为「从未提起」。 */
+    minIdleMs?: number
+    /** 最多几条，默认 5。 */
+    limit?: number
+  }): Array<{ factId: string; text: string; importance: number; lastAccessMs: number | null }> {
+    const minImportance = opts.minImportance ?? 0.6
+    const minIdleMs = opts.minIdleMs ?? 14 * 86_400_000
+    const limit = Math.max(1, opts.limit ?? 5)
+    const idleBefore = opts.nowMs - minIdleMs
+    const rows = this.db.prepare(
+      `SELECT f.fact_id, b.body AS text, f.importance, f.last_access_ms
+         FROM mem_facts f JOIN mem_bodies b ON b.body_ref = f.body_ref
+        WHERE f.scope = ? AND f.deleted_at_ms IS NULL AND f.retired_at_ms IS NULL
+          AND f.importance >= ?
+          AND (f.last_access_ms IS NULL OR f.last_access_ms <= ?)
+        ORDER BY f.importance DESC, COALESCE(f.last_access_ms, 0) ASC
+        LIMIT ?`,
+    ).all(SCOPE, minImportance, idleBefore, limit) as Array<{
+      fact_id: string
+      text: string
+      importance: number
+      last_access_ms: number | null
+    }>
+    return rows.map((r) => ({
+      factId: r.fact_id,
+      text: r.text,
+      importance: r.importance,
+      lastAccessMs: r.last_access_ms,
+    }))
+  }
+
   vectorStats(): Array<{ ownerKind: string; model: string; count: number }> {
     return this.db.prepare(
       `SELECT owner_kind AS ownerKind, model, COUNT(*) AS count

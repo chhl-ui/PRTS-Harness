@@ -1278,6 +1278,28 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
         } catch (error) {
           console.error(`[prts] clock: 任务列表读取失败：${error instanceof Error ? error.message : String(error)}`)
         }
+        // 3) 惦记着的事：重要性高、且很久没被提起。
+        //    这是唯一一条**不看时间截止**的理由——前两路读的是「到点了」，这里读的是
+        //    「我惦记」。同一个定时器，读的东西不一样，说出来的话就不一样。
+        //    一次只挑一条：把「惦记的事」列成清单念出来，又变回闹钟了。
+        try {
+          const idleDays = envNum('PRTS_CLOCK_FACT_IDLE_DAYS', 14)
+          const minImportance = envNum('PRTS_CLOCK_FACT_MIN_IMPORTANCE', 0.6)
+          const picked = memory.lonelyFacts({
+            nowMs,
+            minImportance,
+            minIdleMs: idleDays * 86_400_000,
+          })
+          for (const f of picked) {
+            // 提过就别再提：`proactive_mentions` 的冷却（默认 7 天）本来就是为
+            // 「这条记忆刚说过」准备的，时钟复用它，而不是另造一套去重。
+            if (proactiveMentions?.isCoolingDown(f.factId, nowMs) === true) continue
+            due.push({ kind: 'fact', refId: f.factId, text: `你记着的一件事：${f.text}` })
+            break
+          }
+        } catch (error) {
+          console.error(`[prts] clock: 记忆检索失败：${error instanceof Error ? error.message : String(error)}`)
+        }
         return due
       },
       deliver: async (reason) => {
@@ -1313,6 +1335,22 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
             memory.markFired({ actor: 'system', intentId: reason.refId, firedAtMs: nowMs, sessionId: sessionId ?? '' })
           } catch (error) {
             console.error(`[prts] clock: markFired 失败（${reason.refId}）：${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+        if (reason.kind === 'fact') {
+          // 记一条「提过」的留痕，冷却期从这一刻算。记失败不撤投递——
+          // 话说出去了，不能因为记账失败再让它重复一遍（与 intent 侧同一纪律）。
+          try {
+            proactiveMentions?.record({
+              sessionId: sessionId ?? '',
+              turn: 0,
+              memoryId: reason.refId,
+              kind: 'fact',
+              score: 1,
+              mentionedAtMs: nowMs,
+            })
+          } catch (error) {
+            console.error(`[prts] clock: 记忆提起留痕失败（${reason.refId}）：${error instanceof Error ? error.message : String(error)}`)
           }
         }
         try {

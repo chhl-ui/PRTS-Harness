@@ -28,6 +28,8 @@ const ENV_KEYS = [
   'PRTS_CLOCK_INTERVAL_MS',
   'PRTS_CLOCK_MIN_GAP_MS',
   'PRTS_CLOCK_DAILY_CAP',
+  'PRTS_CLOCK_FACT_MIN_IMPORTANCE',
+  'PRTS_CLOCK_FACT_IDLE_DAYS',
 ] as const
 
 test('CL1 时钟起离屏回合：模型真被调用，clock.fired 进审计，任务被记成已提醒', async () => {
@@ -102,6 +104,72 @@ test('CL1 时钟起离屏回合：模型真被调用，clock.fired 进审计，�
     } finally {
       db.close()
     }
+  } finally {
+    await app?.dispose()
+    for (const k of ENV_KEYS) {
+      const v = saved.get(k)
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    tmp.cleanup()
+  }
+})
+
+test('CL2 第三路：重要性高的旧记忆成为触发理由（不看时间截止）', async () => {
+  const tmp = makeTmp('prts-clock-fact-')
+  const dataRoot = join(tmp.dir, 'data')
+  const ws = join(tmp.dir, 'ws')
+  mkdirSync(dataRoot, { recursive: true })
+  mkdirSync(ws, { recursive: true })
+
+  const saved = new Map<string, string | undefined>()
+  for (const k of ENV_KEYS) saved.set(k, process.env[k])
+  process.env.PRTS_CLOCK = 'on'
+  process.env.PRTS_CLOCK_INTERVAL_MS = '3600000'
+  process.env.PRTS_CLOCK_MIN_GAP_MS = '0'
+  // 阈值调到刚好能接住下面这条 0.9 的事实；不设会让默认 0.6 也能过，但显式写出来
+  // 才能证明旋钮真的接到代码上。
+  process.env.PRTS_CLOCK_FACT_MIN_IMPORTANCE = '0.8'
+  process.env.PRTS_CLOCK_FACT_IDLE_DAYS = '1'
+
+  let app: Awaited<ReturnType<typeof startRuntime>> | undefined
+  try {
+    app = await startRuntime({
+      configPath: prtsYml, dataRoot, workspace: ws, mode: 'normal',
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+    })
+    scriptedLlmPlugin([{ text: '这件事我一直记着。' }]).apply(app.ctx as Context)
+    await new Promise((r) => setTimeout(r, 100))
+
+    const clock = app.clock
+    assert.ok(clock !== undefined, 'PRTS_CLOCK=on 时时钟必须存在')
+    const memory = app.memory
+    assert.ok(memory !== undefined, '记忆库必须可用')
+
+    // 一条高重要性事实：没有任何任务、没有到期意图 —— 唯一可能的理由就是它。
+    const factId = memory.assertFact({
+      actor: 'system',
+      subject: '博士',
+      predicate: '说过',
+      object: '想在冬天去看一次极光',
+      provenance: 'stated',
+      confirmationBasis: 'owner-stated',
+      origin: 'live',
+      importance: 0.9,
+    })
+
+    const streamed: unknown[] = []
+    app.ctx.events?.on?.('agent/assistant-stream', (e: unknown) => streamed.push(e))
+
+    const fired = await clock.tick()
+    assert.equal(fired.length, 1, '应当投递一条')
+    assert.equal(fired[0]?.kind, 'fact', '理由必须是「惦记着的事」，不是到期或停滞')
+    assert.equal(fired[0]?.refId, factId)
+    assert.ok(streamed.length > 0, '模型必须真的产出内容')
+
+    // 提过一次之后进冷却：下一次 tick 不该再提同一条（否则每 30 分钟念叨同一件事）。
+    const again = await clock.tick()
+    assert.equal(again.length, 0, '同一条记忆冷却期内不得重复提起')
   } finally {
     await app?.dispose()
     for (const k of ENV_KEYS) {

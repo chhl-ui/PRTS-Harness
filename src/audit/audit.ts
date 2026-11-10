@@ -199,8 +199,8 @@ function validateEvent(e: AuditEvent): void {
       if (e.sessionId !== undefined) nonEmpty(e.sessionId, 'sessionId')
       nonEmpty(e.refId, 'refId')
       nonEmpty(e.text, 'text')
-      if (e.reasonKind !== 'intent' && e.reasonKind !== 'stale-task') {
-        raise('INVALID_INPUT', 'reasonKind must be intent|stale-task')
+      if (e.reasonKind !== 'intent' && e.reasonKind !== 'stale-task' && e.reasonKind !== 'fact') {
+        raise('INVALID_INPUT', 'reasonKind must be intent|stale-task|fact')
       }
       return
     case 'clock.stopped':

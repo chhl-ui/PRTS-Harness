@@ -43,7 +43,7 @@ export type AuditEvent =
    * 而对话会滚掉。`sessionId` 是本次离屏会话的 id，`refId` 是被说的那条
    * intent / task——不记正文来源，只记指针，审计链不该长成第二份记忆库。
    */
-  | { kind: 'clock.fired'; sessionId?: string; reasonKind: 'intent' | 'stale-task'; refId: string; text: string }
+  | { kind: 'clock.fired'; sessionId?: string; reasonKind: 'intent' | 'stale-task' | 'fact'; refId: string; text: string }
   /** 时钟连续失败到阈值而自停。停是重要事实：它在没人看的时候停止了自主行为。 */
   | { kind: 'clock.stopped'; consecutive: number; why: string }
 

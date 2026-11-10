@@ -100,6 +100,14 @@
   `PRTS_CLOCK=off` 关闭；测试上下文默认关（`NODE_TEST_CONTEXT`），live 测试用 `PRTS_CLOCK=on` 打开。
   **未做/已知**：④「长时间未见」情感事件源仍是独立项（本版未接）；`PRTS_CLOCK_STALE_HOURS=0`
   表达不出来（`envNum` 要求 `>0`，传 0 静默回落 2h，已实测）。
+  **2026-11-10 补第三路数据源「惦记着的事」**：`MemoryStore.lonelyFacts`（`store.ts`）——
+  读 `importance` + `last_access_ms`，是唯一一条**不看时间截止**的理由。阈值
+  `PRTS_CLOCK_FACT_MIN_IMPORTANCE`（默认 0.6，基线 0.5 的事实不进候选）、
+  `PRTS_CLOCK_FACT_IDLE_DAYS`（默认 14）；去重复用 `proactive_mentions` 的冷却（7 天），
+  不另造一套。一次只挑一条、提过就闭嘴。测试 `test/memory/lonely-facts.test.ts`（L1—L6）+
+  `wake-clock-live.test.ts` 的 CL2（真机起回合 + 冷却生效）。
+  **注意**：生产库现有 9 条事实 importance 全是 0.5，**这条路径目前不会触发**——
+  要么等新事实（情绪写入后 importance 可 >0.6），要么回填旧数据（未做）。
   ——以下为落地前的判断，保留作背景——
   ~~现状：全仓无 cron/定时器~~（已过时，`memory-scheduler` 与 `wake-clock` 都是定时器形态）。
   现状：全仓无 cron/定时器（`grep -rn "cron|scheduleJob|wakeup|autonomous" src` 只命中注释与 memory 表的 CHECK）。

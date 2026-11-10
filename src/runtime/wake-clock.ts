@@ -31,7 +31,11 @@
  */
 /** 一条「该说点什么」的原因。 */
 export interface WakeReason {
-  kind: 'intent' | 'stale-task'
+  /**
+   * `intent` / `stale-task` 看时间（到期、停滞）；`fact` 看重要性（惦记着、久未提起）。
+   * 后者是唯一一条**不看时间截止**的理由——它让同一个定时器不再只说"到点了"。
+   */
+  kind: 'intent' | 'stale-task' | 'fact'
   /** 要说出去的正文（不含指令前缀，前缀由装配层统一加）。 */
   text: string
   /** 源对象 id（intent id / task id），供留痕与去重。 */
