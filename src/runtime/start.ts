@@ -1255,14 +1255,20 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
             if (task.phase !== 'blocked' && task.phase !== 'verifying') continue
             if (typeof task.updatedAt !== 'number' || !Number.isFinite(task.updatedAt)) continue
             if (nowMs - task.updatedAt < clockStaleMs) continue
-            const hours = Math.round((nowMs - task.updatedAt) / 3_600_000)
+            const elapsed = nowMs - task.updatedAt
+            // 小于 1 小时用分钟。真机实测（2026-11-10 探针）模型会把正文原样念出来，
+            // 而 `Math.round(0.36s / 3600000)` = 「已经 0 小时」——那种措辞会让她
+            // 显得没在认真看时间。阈值调到 2h 的生产配置不会命中这一档，但配置可改。
+            const age = elapsed < 3_600_000
+              ? `${Math.max(1, Math.round(elapsed / 60_000))} 分钟`
+              : `${Math.round(elapsed / 3_600_000)} 小时`
             const title = typeof task.title === 'string' && task.title !== '' ? task.title : task.id
             due.push({
               kind: 'stale-task',
               refId: task.id,
               text: task.phase === 'verifying'
-                ? `任务「${title}」等你验收，已经 ${hours} 小时`
-                : `任务「${title}」被阻塞，已经 ${hours} 小时`,
+                ? `任务「${title}」等你验收，已经 ${age}`
+                : `任务「${title}」被阻塞，已经 ${age}`,
             })
           }
         } catch (error) {
