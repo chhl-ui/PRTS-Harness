@@ -109,3 +109,40 @@ export function shouldRetire(
   if (effective >= floor) return null
   return { factId: input.factId, importance: input.importance, recordedAtMs: input.recordedAtMs, effective, ageDays }
 }
+
+/** 情绪效价对初始重要性的影响幅度：valence = ±1 时相对基准偏离 0.35。 */
+const VALENCE_WEIGHT = 0.35
+/** 无情绪知识时的基准重要性——与 `assertFact` 的 `input.importance ?? 0.5` 同一个数。 */
+const BASE_IMPORTANCE = 0.5
+
+/**
+ * 由写入时的情绪效价折算事实的**初始**重要性。
+ *
+ * ## 为什么需要它
+ *
+ * `mem_facts.importance` 在此之前没有任何赋值者：生产库 9 条事实全是 0.5
+ * （`assertFact` 的 `input.importance ?? 0.5` 兜底）。全库同等重要 = 系统眼里
+ * 没有「什么值得想起」，于是任何「主动」都只能读「到期清单」——那是闹钟，不是人。
+ *
+ * ## 方向从哪来
+ *
+ * `docs/TODO.md` §G2 ② 的判据：「同一段记忆在负效价下写入时重要性低于平静时」。
+ * 所以 valence=+1 → 0.85，0 → 0.5（与旧兜底一致），-1 → 0.15。
+ * 上下夹在 [0.1, 0.95]：不让一次好心情把琐事钉成身份级（1.0），
+ * 也不让一次低落把它压到退役线（0.05）以下——重要性是写入强度，不是判决。
+ *
+ * ## 已知近似（写在这里，不藏在注释角落）
+ *
+ * 巩固是异步的：回合结束 3 秒后跑，或进程启动时跑积压。所以这里拿到的是
+ * **巩固那一刻**的情绪，不是原始对话发生时的情绪——`mem_turns` 目前没有
+ * 时间维的情绪快照。对「回合刚结束」这一档，误差约等于零；对「启动补历史」
+ * 那一档，是近似。要精确就得在 turn 落库时记效价，那是下一层的事。
+ *
+ * 取不到情绪（没有情绪库、读失败、值非法）时返回 0.5：**不假装有情绪**。
+ */
+export function importanceFromValence(valence: number | undefined): number {
+  if (valence === undefined || !Number.isFinite(valence)) return BASE_IMPORTANCE
+  const v = Math.min(1, Math.max(-1, valence))
+  const raw = BASE_IMPORTANCE + VALENCE_WEIGHT * v
+  return Math.min(0.95, Math.max(0.1, raw))
+}

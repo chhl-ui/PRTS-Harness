@@ -1200,6 +1200,10 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     idleMs: envNum('PRTS_CONSOLIDATE_IDLE_MS', 3000),
     rulesMaxTurns: envNum('PRTS_CONSOLIDATE_RULES_MAX', 500),
     factsLimit: envNum('PRTS_CONSOLIDATE_FACTS_MAX', 20),
+    // §G2 ② 第一处接线：写入时的情绪决定事实有多重。
+    // 记忆库不 import 情感库（`emotion/store.ts:24` 的隔离约束），所以取值函数在这里接。
+    // `get()` 返回的是**已按半衰期衰减**的当前状态——情绪本来就会淡，这正是要的语义。
+    ...(emotion === undefined ? {} : { currentValence: () => emotion?.get()?.valence }),
   })
 
   // §G2 ① 时钟（方案 B：离屏自主）。`PRTS_CLOCK=off` 整体关闭。

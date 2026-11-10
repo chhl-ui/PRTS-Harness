@@ -38,6 +38,11 @@ export interface MemorySchedulerDeps {
    * 抽取（q38）是两个模型，探活/可用性各自判定。缺席时跳过嵌入阶段。
    */
   embedder?: () => Promise<Embedder | undefined>
+  /**
+   * 当前情绪效价（-1..1）提供者。**记忆库不 import 情感库**，所以由装配层接线；
+   * 缺席或返回 undefined 时事实落 0.5（旧行为）。见 `memory/lifecycle.ts:importanceFromValence`。
+   */
+  currentValence?: () => number | undefined
   /** 回合结束后多少毫秒视为空闲，默认 3000。 */
   idleMs?: number
   /** 每次运行规则巩固的 turn 预算，默认 500。 */
@@ -124,6 +129,10 @@ export function attachMemoryScheduler(deps: MemorySchedulerDeps): MemorySchedule
           const r = await deps.store.consolidateFacts({
             generator: gen, limit: factsLimit, batchSize: factsBatch,
             actor: 'system', signal: abort.signal,
+            // 情绪只在「刚结束一回合」时才对得上（那正是 turn-stopping 触发的这一档）；
+            // 启动 kick 补历史时拿到的是当下的情绪，属已知近似——
+            // 取舍写在 `memory/lifecycle.ts:importanceFromValence` 的注释里。
+            ...(deps.currentValence === undefined ? {} : { emotionValence: deps.currentValence }),
           })
           stats.factsTurns += r.turns
           stats.factsAdded += r.added

@@ -24,7 +24,7 @@ import {
 } from './consolidate.ts'
 import { ensureSessionsBuilt, openMemoryDb } from './schema.ts'
 import {
-  decayedImportance, shouldRetire,
+  decayedImportance, shouldRetire, importanceFromValence,
   IMPORTANCE_HALF_LIFE_DAYS, RETIRE_IMPORTANCE_FLOOR, RETIRE_MIN_AGE_DAYS,
   type RetireCandidate,
 } from './lifecycle.ts'
@@ -677,6 +677,17 @@ export class MemoryStore {
     batchSize?: number
     actor?: ActorKind
     signal?: AbortSignal
+    /**
+     * 写入时的情绪效价（-1..1）提供者。
+     *
+     * **记忆库不 import 情感库**——那是 `emotion/store.ts:24` 明写的隔离约束
+     * （「情感不污染事实」）。所以这里只接一个取值函数，由装配层接线：
+     * start.ts 传 `() => emotion?.get()?.valence`。
+     *
+     * 缺席 / 读失败 → 事实落 0.5（旧行为不变）。有值时按
+     * `lifecycle.ts:importanceFromValence` 折算，负效价下写入的事实更轻。
+     */
+    emotionValence?: () => number | undefined
   }): Promise<{
     turns: number
     extracted: number
@@ -725,6 +736,11 @@ export class MemoryStore {
       const parsed = await extractFacts(opts.generator, promptTurns, existingSlots)
       skipped += parsed.skipped
       extracted += parsed.facts.length
+      // 每批取一次情绪：批次之间有 await，跨批可能隔了一段时间；同一批内不再重复读。
+      // 读失败按「没有情绪」处理——情绪库打不开不该让巩固整批失败。
+      let batchValence: number | undefined
+      try { batchValence = opts.emotionValence?.() } catch { batchValence = undefined }
+      const batchImportance = importanceFromValence(batchValence)
       for (const f of parsed.facts) {
         const srcTurn = f.sourceIndex === null ? undefined : batch[f.sourceIndex]
         this.assertFact({
@@ -733,6 +749,9 @@ export class MemoryStore {
           predicate: f.predicate,
           object: f.object,
           slot: f.slot,
+          // 写入时的情绪决定这条事实有多重（§G2 ②）。负效价下提取的事实更轻，
+          // 平静/正效价下更重——判据见 lifecycle.ts:importanceFromValence。
+          importance: batchImportance,
           // 模型抽的不是主人明说的：库里的 CHECK 白名单禁止 stated + model-inferred
           provenance: 'inferred',
           confirmationBasis: 'model-inferred',
