@@ -36,6 +36,7 @@ import { attachToolLoopAudit } from './tool-loop-audit.ts'
 import { isSandboxDenial } from './tool-denial.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
 import { attachWakeClock, type WakeClock, type WakeReason } from './wake-clock.ts'
+import { applyClockToolPolicy, clockPromptGuidance, clockToolPolicy, createClockToolState } from './clock-tools.ts'
 import { createAbsenceSignal } from './emotion-absence.ts'
 import { createMemoryRecallSignal, attachFailureMention } from './emotion-memory.ts'
 import { Authority, classify } from '../authority/index.ts'
@@ -1237,16 +1238,53 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   const clockStaleMs = envNum('PRTS_CLOCK_STALE_HOURS', 2) * 3_600_000
   const clockModel = process.env.PRTS_CLOCK_MODEL ?? 'deepseek-chat'
   /**
+   * 自主会话的工具面（allow-list，见 `clock-tools.ts`）。
+   *
+   * `setup` 在 agent 发布前执行（`dsh-agent/lib/types/index.d.ts:105`），拿到的是
+   * 这次会话的 scoped context，`get('tools')` 即 scoped tools 服务，可以
+   * `restrict({ allow })`。fail-closed：拿不到限制入口就抛错——`deliver` 抛错
+   * 会被调度器记成一次投递失败，宁可这次不说，也不能静默退回全量工具。
+   *
+   * **名单要与真实注册集合取交集**：`prts_skill_list` / recall / intent 这几组都是
+   * 条件注册的（技能链断裂、记忆库打不开时那些工具根本不存在），而 `restrict`
+   * 对未注册的工具名抛错。静态名单直接交给它，等于让一个模块的 fail-closed 降级
+   * 把时钟打死：每次 tick 记一次投递失败，连续失败后时钟自停。这里把各工具工厂
+   * 回报的 `names` 汇总成 `registered`，只有真注册了的名字才写进 allow。
+   *
+   * 与 K2a 的分工：`restrict` 管「这次会话看不见哪些工具」，`Authority.guard`
+   * 管「看见了也未必能动得了手」。两层互补，别把任何一层当成另一层。
+   */
+  const clockRegisteredTools = new Set<string>([
+    ...taskTools.names,
+    ...(memoryTools?.names ?? []),
+    ...sessionTools.names,
+    ...(intentTools?.names ?? []),
+    ...(skillTools?.names ?? []),
+    // 联网工具也纳进汇总：白名单将来若加 `prts_web_*`，交集不会把它静默删掉
+    // （`webTools` 只在 Firecrawl key 存在时创建；缺省时这些名字本来就不该进 allow）。
+    ...(webTools?.names ?? []),
+  ])
+  const clockTools = clockToolPolicy(process.env, clockRegisteredTools)
+  /** 降级状态：restrict 失败降成空集时，同一轮的提示词不再宣称工具可用。 */
+  const clockToolState = createClockToolState()
+  const clockSetup = clockTools === undefined
+    ? undefined
+    : (agentCtx: { get(name: string): unknown }): void => {
+      applyClockToolPolicy(agentCtx.get('tools'), clockTools, clockToolState)
+    }
+  /**
    * 自主动机消息的正文。
    *
-   * 「不要调用任何工具」不是在请求模型自律——它只是把意图说清楚。真正的强制点
-   * 是 `Authority.guard`：模型真去调 write/shell 仍逐条走 K2a，本版没有为它
-   * 新开任何授权。两件事别混：这里管的是「她大概率只说一句」，guard 管的是
-   * 「她真动手也会被挡住」。
+   * 工具面已经由上面的 `clockSetup` 在机制上收窄：名单外的工具对这次会话不可见，
+   * 模型连调都调不到。正文由 `clockPromptGuidance` 用**同一份策略**生成——
+   * 名单里没有的工具（技能链断了、记忆库没开）不写进提示词；回退模式
+   * （`PRTS_CLOCK_TOOLS=off`）下工具面根本没收紧，也就不谎称「其他工具不可用」。
+   * 提示词不能替代机制，也不该在机制缺席时假装在场。
    */
   const clockPrompt = (reason: WakeReason): string =>
     `[自主动机] 这不是博士在说话，是时钟到点了。\n${reason.text}\n`
-    + '请只用一到两句话把这件事告诉博士；不要调用任何工具，不要创建或修改任务，不要展开分析。'
+    + clockPromptGuidance(clockTools, clockToolState)
+    + '然后用一到两句话把这件事告诉博士，不要展开分析。'
   // 测试上下文默认关：`node --test` 会为每个测试文件起一个 `startRuntime`，而时钟的
   // 启动 kick 是 `setTimeout(0)`——立刻就会去 create 一个离屏 agent。那会让几十个
   // 既有测试凭空多出一条后台会话，且结果取决于临时库里有没有到期项，不可预测。
@@ -1333,6 +1371,9 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
           // 与 `/dispatch` 同一取法（chat-serve 的 dispatch 也是硬编码 provider）。
           // provider id 硬编码是既有事实（TODO.md §I），profile 化了要一起改。
           agentOptions: { provider: 'deepseek-official', model: clockModel },
+          // 机制边界：这次会话只看见白名单里的工具（`clock-tools.ts`）。
+          // `PRTS_CLOCK_TOOLS=off` 时 clockSetup 为 undefined，退回旧的全量工具面。
+          ...(clockSetup === undefined ? {} : { setup: clockSetup }),
         } as never)
         try {
           await handle.agent.followup(createUserMessage({

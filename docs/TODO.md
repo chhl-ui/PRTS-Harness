@@ -111,6 +111,21 @@
   `wake-clock-live.test.ts` 的 CL2（真机起回合 + 冷却生效）。
   **注意**：生产库现有 9 条事实 importance 全是 0.5，**这条路径目前不会触发**——
   要么等新事实（情绪写入后 importance 可 >0.6），要么回填旧数据（未做）。
+  **2026-11-11 自主性第二步（L2a/L2b）：自主会话的工具面白名单（机制边界）**——
+  `src\runtime\clock-tools.ts` + `start.ts` 的 `agents.create({setup})`：离屏会话在发布前
+  调 `tools.restrict({ allow })`，名单外的工具对它**不可见**。此前 L1 的「不要调用任何工具」
+  只是正文请求（机制上全量工具可用），这一步把边界从提示词搬到机制。
+  白名单 6 个：`prts_memory_recall` / `prts_session_recall` / `prts_task_list` /
+  `prts_intent_list` / `prts_skill_list`（五个只读）+ `prts_intent_create`（唯一的写：
+  给自己安排未来提醒，写 `mem_intents`，博士可 `/intent` 查看与取消）。
+  两条工程约束：① **名单与真实注册集合取交集**——技能链断/记忆库打不开时那些工具
+  根本没注册，而 `restrict` 对未注册名抛错；直接交静态名单会把「一个模块降级」放大成
+  「时钟每次 tick 失败、连续失败后自停」。② 降级兜底——`restrict` 仍失败时退**空集**重试
+  （更窄，绝不更宽），同一轮提示词跟着降级，不再宣称工具可用。
+  回滚开关 `PRTS_CLOCK_TOOLS=off`（只认字面量 off，拼错保持收紧）。
+  **验证**：CT1—CT4（常量与 env 语义）、G1—G7（条件注册 / 降级 / 提示词与机制一致）、
+  CL5—CL6（真实运行时：`prts_intent_create` 真落库 / `pwsh` 不执行、文件不产生）。
+  **未做**：L2c（写文件/跑命令）、L2d（账本状态机）仍不开——判断力未验证。
   ——以下为落地前的判断，保留作背景——
   ~~现状：全仓无 cron/定时器~~（已过时，`memory-scheduler` 与 `wake-clock` 都是定时器形态）。
   现状：全仓无 cron/定时器（`grep -rn "cron|scheduleJob|wakeup|autonomous" src` 只命中注释与 memory 表的 CHECK）。
