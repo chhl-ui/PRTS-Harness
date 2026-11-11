@@ -836,8 +836,13 @@ async function runModel(deps: ChatDeps, arg: string): Promise<void> {
  * 入口能看见**，博士只能靠「她今天怎么没说话」猜。看不见的自主系统，主人不敢
  * 放手，所以这条命令补的就是那个观察位。
  *
- * 三种形态，都不触发模型回合（分发处 continue 掉）：
- * - 未注入 clock → 明确报不可用，不静默；
+ * 四种形态，都不触发模型回合（分发处 continue 掉）：
+ * - `/clock log` → 读审计链的 `clock.fired` 打最近 10 条。`stats()` 只数当前进程，
+ *   重启一次「她昨天自动说了什么」就没了，而审计链里一直存着——这条补的是历史面。
+ *   库缺 / 只读打开失败 / 表不存在一律按「没有记录」，owner 命令抛错会打崩 REPL。
+ *   **它排在时钟句柄判断之前**：读的是审计链，与进程内时钟无关，PRTS_CLOCK=off
+ *   时恰恰最需要它。脏 payload（老库里的 `null`、类型不对的字段）只跳过那一条。
+ * - 未注入 clock → 明确报不可用，不静默（`/clock` 与 `/clock tick` 仍适用）；
  * - `/clock` → 读 `stats()` 打几行，自停要在那一行里写清（不能当作正常运行）；
  * - `/clock tick` → 真调一次 `tick()` 并逐条报告投递内容。空结果**不代表坏**：
  *   闸门（silent-limit）、最小间隔、日上限都照常生效，输出里要说清这层歧义。
@@ -846,6 +851,49 @@ async function runModel(deps: ChatDeps, arg: string): Promise<void> {
  * 失败本身是后台事（`wake-clock.ts` 只计数不自停冒泡）。
  */
 async function runClock(deps: ChatDeps, arg: string): Promise<void> {
+  // 历史面必须排在时钟句柄判断**之前**：`/clock log` 读的是审计链，不依赖进程内
+  // 时钟。PRTS_CLOCK=off、测试上下文、记忆库没打开时，恰恰最需要看「她昨天自动
+  // 说了什么」——放在 `clock === undefined` 之后，历史面就正好在最有用的场景里消失。
+  if (arg === 'log') {
+    const dbPath = deps.dbPath
+    if (dbPath === undefined) {
+      deps.out('[prts] 未配置 core.sqlite，读不到时钟历史\n')
+      deps.onIdle?.()
+      return
+    }
+    // 库不存在 / 只读打开失败 / 表不存在 → 一律当作「没有记录」。
+    // 这里的 catch 是硬要求：owner 命令抛错会把整个 REPL 打崩，而这里的失败
+    // 只说明「历史读不到」，不是「时钟坏了」。
+    let records: ReturnType<AuditLog['query']> = []
+    let audit: AuditLog | undefined
+    try {
+      audit = AuditLog.open(dbPath, { readOnly: true })
+      records = audit.query({ kinds: ['clock.fired'], limit: 10 })
+    } catch {
+      records = []
+    } finally {
+      try { audit?.close() } catch { /* 只读连接关闭失败不影响已读到的内容 */ }
+    }
+    // 库里存的是历史 JSON，不是当下的类型：老库可能有 `payload_json = null`、
+    // 数组、或字段类型不对。逐字段收窄，一条脏记录只被跳过，不能让整个 REPL
+    // 在 `r.event.kind` 上抛 TypeError。
+    let printed = 0
+    for (const r of records) {
+      const event = r.event as unknown
+      if (event === null || typeof event !== 'object') continue
+      const e = event as { kind?: unknown; reasonKind?: unknown; text?: unknown }
+      if (e.kind !== 'clock.fired') continue
+      const reasonKind = typeof e.reasonKind === 'string' ? e.reasonKind : '?'
+      const text = typeof e.text === 'string' ? e.text : ''
+      deps.out(`[prts] ${new Date(r.ts).toLocaleString()} · ${reasonKind} — ${text}\n`)
+      printed += 1
+    }
+    // records 非空但全被跳过（整库都是脏 payload）时也要给「还没有」，
+    // 否则这条命令零行输出，看起来像卡住了。
+    if (printed === 0) deps.out('[prts] 还没有主动开口的记录\n')
+    deps.onIdle?.()
+    return
+  }
   const clock = deps.clock
   if (clock === undefined) {
     deps.out('[prts] 时钟未启用（PRTS_CLOCK=off、测试上下文，或记忆库未打开）\n')
@@ -876,7 +924,7 @@ async function runClock(deps: ChatDeps, arg: string): Promise<void> {
   if (s.lastReason !== null) {
     deps.out(`[prts]   上次理由：${s.lastReason.kind} — ${s.lastReason.text}\n`)
   }
-  deps.out('[prts] 用法：/clock tick 手动跑一次（运维/验证用）\n')
+  deps.out('[prts] 用法：/clock tick 手动跑一次 · /clock log 查看最近 10 次主动开口\n')
   deps.onIdle?.()
 }
 

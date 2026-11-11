@@ -133,6 +133,8 @@ try {
       ledger: app.ledger,
       // §G2 时钟：与 chat-main 同一入口——远端客户端也要能看见时钟状态与手动 tick。
       clock: app.clock,
+      // `/clock log` 读审计链要 core.sqlite 路径——与 chat-main 同一口径。
+      dbPath: app.dbPath,
       authority: app.authority,
       approvalBridge: app.approvalBridge,
       draftTaskForSession: app.draftTaskForSession,

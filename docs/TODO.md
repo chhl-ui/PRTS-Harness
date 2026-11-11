@@ -148,6 +148,14 @@
   `chat-main.ts:95` 与 `chat-serve.ts:135` 注入 `app.clock`——本地与远端两个入口都能看到。
   **验证**：CLK1—CLK4（`test\cli\clock-command.test.ts`）+ 写工补的 5 条边界
   （`test\cli\clock-command-cases.test.ts`：只读视图不隐式 tick、未自停不误报、tick 抛错后 REPL 仍可用）。
+  **同日补 `/clock log`（历史面）**：`stats()` 只有当前进程的数，重启后「她昨天自动说了什么」
+  就没了，而审计链里一直存着 `clock.fired`。`/clock log` 用 `AuditLog.open(dbPath,{readOnly:true})`
+  的 `query({kinds:['clock.fired'],limit:10})` 读最近 10 条；库缺/只读失败/表空一律按
+  「还没有主动开口的记录」，脏 payload（`event===null`）逐条跳过且不冒充记录。
+  **历史面不依赖进程内时钟**：`arg==='log'` 分支在 `clock===undefined` 检查之前——
+  `PRTS_CLOCK=off` 时恰恰最需要看昨天说过什么。`chat-serve.ts` 同步补 `dbPath`，
+  远端客户端也能读。验证：CLK10—CLK12 + CLK13—CLK17（`test\cli\clock-log-history.test.ts`）
+  + CLK18—CLK20（时钟关闭可读、脏 payload 不崩、usage 行可发现）。
   ——以下为落地前的判断，保留作背景——
   ~~现状：全仓无 cron/定时器~~（已过时，`memory-scheduler` 与 `wake-clock` 都是定时器形态）。
   现状：全仓无 cron/定时器（`grep -rn "cron|scheduleJob|wakeup|autonomous" src` 只命中注释与 memory 表的 CHECK）。
