@@ -31,6 +31,12 @@ export interface SkillInjectionDeps {
   limit?: number
   /** 短于这么多字符的查询不匹配：两个字的问题谈不上「相关任务」。 */
   minQueryChars?: number
+  /**
+   * 查会话当前绑定的未结任务（DESIGN-04）。只读，接 `ledger.taskForSession`。
+   * 提供时把 taskId 落进 offer 载荷——它是效果归因的连接键。缺省或读失败
+   * 一律按「没绑任务」处理：offer 照记（计入提供次数），只是不参与归因。
+   */
+  taskForSession?: (sessionId: string) => { id: string } | undefined
 }
 
 export interface SkillInjection {
@@ -122,7 +128,11 @@ export function attachSkillInjection(hookCtx: HookContext, deps: SkillInjectionD
   const rawLimit = deps.limit ?? 3
   const limit = Number.isFinite(rawLimit) && rawLimit >= 1 ? Math.floor(rawLimit) : 3
   const minQueryChars = deps.minQueryChars ?? 4
-  /** 同一会话里已经注入过的技能：重复注入只占上下文，没有新信息。 */
+  /**
+   * 同一 (会话, 任务) 里已经注入过的技能：重复注入只占上下文，没有新信息。
+   * 键含任务（DESIGN-04）：新任务绑定 = 新的工作上下文，相关技能值得再提一次，
+   * 那次提供也要记上自己的 taskId，否则新任务的结局归因不到它。
+   */
   const injected = new Map<string, Set<string>>()
   /** 已提醒过的候选：跨会话共用（候选是库级事实，不是会话级状态）。 */
   const candidateSeen = new Set<string>()
@@ -148,7 +158,13 @@ export function attachSkillInjection(hookCtx: HookContext, deps: SkillInjectionD
 
       const queryTokens = new Set(tokenize(query))
       if (queryTokens.size === 0) return decision
-      const seen = injected.get(sessionId) ?? new Set<string>()
+      // 绑定任务只读取一次；读失败按无任务处理，不阻断注入（技能是增强不是闸门）。
+      let taskId: string | undefined
+      if (deps.taskForSession !== undefined && sessionId !== '') {
+        try { taskId = deps.taskForSession(sessionId)?.id } catch { /* 按无任务处理 */ }
+      }
+      const dedupKey = `${sessionId}\u0000${taskId ?? ''}`
+      const seen = injected.get(dedupKey) ?? new Set<string>()
       const ranked = deps.store
         .list({ phase: 'active' })
         .map((s) => ({ s, score: score(queryTokens, s) }))
@@ -168,14 +184,21 @@ export function attachSkillInjection(hookCtx: HookContext, deps: SkillInjectionD
       injectedSteps.add(stepKey)
       for (const s of ranked) {
         seen.add(s.id)
-        // 使用信号：`seen` 保证同一会话每条只记一次。写失败不得影响这一轮的回答——
+        // 使用信号：`seen` 挡住进程内重复，`hasOffered` 挡住重启后的重复
+        // （进程内 Map 重启即丢，链不会丢）。写失败不得影响这一轮的回答——
         // 信号丢了只是少一条观测，注入失败才是真的坏。
         try {
-          deps.store.recordOffered({ kind: 'model', sessionId }, { id: s.id, revision: s.revision })
+          if (sessionId !== '' && !deps.store.hasOffered(s.id, sessionId, taskId)) {
+            deps.store.recordOffered(
+              { kind: 'model', sessionId },
+              { id: s.id, revision: s.revision },
+              { sessionId, ...(taskId === undefined ? {} : { taskId }) },
+            )
+          }
         } catch { /* 观测失败不阻断注入 */ }
       }
       if (candidate !== undefined) candidateSeen.add(candidate.id)
-      injected.set(sessionId, seen)
+      injected.set(dedupKey, seen)
       // active 做法与候选提醒合并成一条消息：两条 user message 会让模型把它们
       // 当成两轮独立输入，候选提示容易被误读成「已生效的做法」。
       const blocks: string[] = []

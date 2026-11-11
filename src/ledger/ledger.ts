@@ -803,8 +803,12 @@ export class Ledger {
 
   rebuildProjections(): void {
     this.tx(() => {
+      // 三张子表都外键引用 tasks，必须先清空再删 tasks。
+      // 2026-11-10 A7 实测：漏掉 task_bindings 时，凡有会话绑定的账本
+      // 重建即报 FOREIGN KEY constraint failed（无绑定的单测测不出来）。
       this.db.exec('DELETE FROM evidence')
       this.db.exec('DELETE FROM task_steps')
+      this.db.exec('DELETE FROM task_bindings')
       this.db.exec('DELETE FROM tasks')
       const rows = this.db.prepare('SELECT * FROM ledger_events ORDER BY seq').all() as unknown as EventDbRow[]
       for (const r of rows) applyEvent(this.db, eventOf(r))
@@ -814,6 +818,31 @@ export class Ledger {
   exportDoc(): LedgerExportDoc {
     const rows = this.db.prepare('SELECT * FROM ledger_events ORDER BY seq').all() as unknown as EventDbRow[]
     return { format: 'prts-ledger/1', events: rows.map(eventOf) }
+  }
+
+  /**
+   * 验收结局的窄口径读通道（DESIGN-04 技能效果归因）。只读链，无 actor，不动投影。
+   *
+   * 映射：owner-accepted / verified{ok:true} → success；owner-rejected /
+   * verified{ok:false} → failure。**claimDone 不算**——它是模型自报，判据要求
+   * 成功数来自验收而非自述；cancelled / stopped 是博士决策，不是成败，也不收。
+   * 先拒后收的任务会产出两条记录（failure + success），归因按回合计数。
+   */
+  outcomeEvents(): Array<{ seq: number; taskId: TaskId; outcome: 'success' | 'failure'; ts: number }> {
+    const rows = this.db.prepare(
+      `SELECT seq, task_id, kind, payload_json, ts FROM ledger_events
+        WHERE kind IN ('task.owner-accepted', 'task.owner-rejected', 'task.verified') ORDER BY seq`,
+    ).all() as unknown as Array<{ seq: number; task_id: string; kind: string; payload_json: string; ts: number }>
+    const out: Array<{ seq: number; taskId: TaskId; outcome: 'success' | 'failure'; ts: number }> = []
+    for (const r of rows) {
+      const outcome: 'success' | 'failure' = r.kind === 'task.owner-accepted'
+        ? 'success'
+        : r.kind === 'task.owner-rejected'
+          ? 'failure'
+          : ((JSON.parse(r.payload_json) as { ok?: unknown }).ok === true ? 'success' : 'failure')
+      out.push({ seq: r.seq, taskId: r.task_id as TaskId, outcome, ts: r.ts })
+    }
+    return out
   }
 
   static importDoc(dbPath: string, doc: LedgerExportDoc): Ledger {

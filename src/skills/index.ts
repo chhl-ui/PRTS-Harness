@@ -3,6 +3,7 @@ export { SkillStore } from './store.ts'
 export { applySkillEvent } from './fold.ts'
 export { openSkillDb } from './schema.ts'
 export type {
+  OfferRecord,
   SkillActor,
   SkillEvaluation,
   SkillEventKind,

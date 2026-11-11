@@ -28,6 +28,7 @@ import { PersonaStore } from '../persona/index.ts'
 import { SkillStore } from '../skills/index.ts'
 import { EmotionStore } from '../emotion/index.ts'
 import { createEmotionSignals } from '../runtime/emotion-signals.ts'
+import { attribute } from '../runtime/skill-attribution.ts'
 import type { SkillPhase, SkillSnapshot, SkillVerdict } from '../skills/index.ts'
 import { listProfiles, readProfile, writeProfile } from '../runtime/model-profile.ts'
 import type { Authority } from '../authority/index.ts'
@@ -799,12 +800,11 @@ async function runPersona(deps: ChatDeps, arg: string): Promise<void> {
 /*
  * ---- V1-09 技能库：owner 通道（评估 / 采用 / 拒绝 / 退役 / 恢复）----
  *
- * 为什么需要它：全生命周期在库层已完整（`src/skills/store.ts`），模型侧刻意只拿到
- * `prts_skill_propose` / `prts_skill_list`（`src/runtime/skill-tools.ts` 头注释：
- * 「模型能自己采用经验，等于能自己给自己加能力」）。但 evaluate/adopt 的 owner
- * 入口此前一处都没有——`grep -rn "\.adopt(\|\.evaluate(" src` 除 skills 模块自身外
- * 零命中，于是生产库里那条候选（`C:\prts-data\skills.sqlite`，phase=candidate，
- * evaluations=[]）从提出起永远停在原地。这条命令补的就是那个缺失的执行者位。
+ * 为什么需要它：全生命周期在库层已完整（`src/skills/store.ts`）。2026-11-09
+ * 放开后模型侧也有全套七个工具（`src/runtime/skill-tools.ts`），但放开的前提是
+ * 技能不授予权限；博士这条命令面是人工闸门——随时能撤任何一条，不依赖模型自觉。
+ * 历史上 evaluate/adopt 曾只有库层实现、没有任何执行者入口，生产库里那条候选
+ * 从提出起永远停在原地；这条命令补的就是那个缺失的执行者位。
  *
  * 生效边界与 `/persona` 相反：技能注入是 `attachSkillInjection` 每轮
  * `list({ phase: 'active' })`（`src/runtime/skill-inject.ts`），不是启动期装配，
@@ -813,7 +813,8 @@ async function runPersona(deps: ChatDeps, arg: string): Promise<void> {
  * 为什么命令自开连接而不是复用运行时的 store：`ChatDeps` 不带 skills 句柄，且
  * 技能库与 `/persona` 同层（owner 直连 SQLite）。两条连接读同一文件不冲突——
  * 写只发生在 REPL 空闲时，注入层只读；跨连接可见性由 `test/cli/skill-command.test.ts`
- * 的 K3 守着。
+ * 的 K3 守着。效果归因（DESIGN-04）也在这层算：skills 连接 + deps.ledger 两边
+ * 读通道凑齐，join 在 `runtime/skill-attribution.ts` 的纯函数里。
  */
 const SKILL_PHASES: readonly string[] = ['candidate', 'active', 'retired', 'rejected']
 const SKILL_VERDICTS: readonly string[] = ['adopt', 'reject', 'needs-work']
@@ -897,10 +898,23 @@ async function runSkill(deps: ChatDeps, arg: string): Promise<void> {
       const sourceRefs = s.sourceRefs ?? []
       if (sourceRefs.length > 0) deps.out(`   来源：${sourceRefs.join(', ')}\n`)
       // 使用信号：采用之后到底有没有被用起来。这是观测，不是效果证明——
-      // 「提供过 N 次」不等于「每次都有用」，效果归因需要任务级埋点。
+      // 「提供过 N 次」不等于「每次都有用」。效果归因见下一行（DESIGN-04）。
       const usage = store.usageStats(s.id)
       deps.out(`   提供过：${usage.offered} 次`
         + (usage.lastOfferedAt === null ? '\n' : `（最近 ${new Date(usage.lastOfferedAt).toISOString().slice(0, 16).replace('T', ' ')}）\n`))
+      // 任务归因：结局只认账本验收（ownerAccept / verified），不认模型自报。
+      // 相关性非因果——多技能同任务各记一份，措辞里必须写明，免得数字被当成因果证据。
+      if (deps.ledger === undefined) {
+        deps.out('   任务归因：不可用（未配置 ledger）\n')
+      } else {
+        try {
+          const attr = attribute(store.offers(), deps.ledger.outcomeEvents()).get(s.id)
+          deps.out(`   任务归因：成功 ${attr?.success ?? 0} · 失败 ${attr?.failure ?? 0}`
+            + '（相关性非因果；结局来自账本验收）\n')
+        } catch {
+          deps.out('   任务归因：不可用（读链失败）\n')
+        }
+      }
       if (s.evaluations.length === 0) deps.out('   评估：尚无\n')
       else for (const e of s.evaluations) deps.out(`   评估：${e.verdict}——${e.basis}\n`)
       if (s.retireReason !== undefined) deps.out(`   退役理由：${s.retireReason}\n`)

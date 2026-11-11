@@ -89,3 +89,71 @@ test('SU4 未知技能 / 过期 revision 不能记提供', () => {
     assert.throws(() => c.store.recordOffered(model(), { id, revision: 999 }), /revision|STALE/i)
   } finally { c.tmp.cleanup(c.store) }
 })
+
+test('SU5 context 落载荷：offers() 读回 sessionId + taskId（DESIGN-04 连接键）', () => {
+  const c = open()
+  try {
+    const id = activate(c.store)
+    const rev = c.store.get(id)?.revision ?? 0
+    c.store.recordOffered(model('sess-a'), { id, revision: rev }, { sessionId: 'sess-a', taskId: 'task-1' })
+    const rows = c.store.offers()
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].skillId, id)
+    assert.equal(rows[0].sessionId, 'sess-a')
+    assert.equal(rows[0].taskId, 'task-1')
+    assert.equal(c.store.usageStats(id).offered, 1, '提供次数口径不变')
+    assert.equal(c.store.get(id)?.phase, 'active', '带 context 的提供仍不是状态变更')
+    assert.equal(c.store.verifyChain().ok, true)
+  } finally { c.tmp.cleanup(c.store) }
+})
+
+test('SU6 旧格式兼容：不传 context 的 offer，sessionId 从 actor 兜底，taskId 缺席', () => {
+  const c = open()
+  try {
+    const id = activate(c.store)
+    const rev = c.store.get(id)?.revision ?? 0
+    c.store.recordOffered(model('sess-old'), { id, revision: rev })
+    const rows = c.store.offers()
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].sessionId, 'sess-old', '旧事件载荷没有 sessionId，actor 里有')
+    assert.equal(rows[0].taskId, undefined, '没有连接键就不主张关联')
+  } finally { c.tmp.cleanup(c.store) }
+})
+
+test('SU7 hasOffered：按 (会话, 任务) 精确匹配，重启去重的依据', () => {
+  const c = open()
+  try {
+    const id = activate(c.store)
+    const rev = c.store.get(id)?.revision ?? 0
+    c.store.recordOffered(model('sess-a'), { id, revision: rev }, { sessionId: 'sess-a', taskId: 'task-1' })
+    c.store.recordOffered(model('sess-a'), { id, revision: rev }, { sessionId: 'sess-a' })
+    assert.equal(c.store.hasOffered(id, 'sess-a', 'task-1'), true)
+    assert.equal(c.store.hasOffered(id, 'sess-a', 'task-2'), false, '换任务 = 新上下文，没记过')
+    assert.equal(c.store.hasOffered(id, 'sess-b', 'task-1'), false, '换会话不算')
+    assert.equal(c.store.hasOffered(id, 'sess-a'), true, '无任务提供匹配 undefined')
+    assert.equal(c.store.hasOffered(id, 'sess-b'), false)
+  } finally { c.tmp.cleanup(c.store) }
+})
+
+test('SU8 context 校验：空 sessionId / 空 taskId 拒写，失败路径不留痕', () => {
+  const c = open()
+  try {
+    const id = activate(c.store)
+    const rev = c.store.get(id)?.revision ?? 0
+    assert.throws(() => c.store.recordOffered(model(), { id, revision: rev }, { sessionId: ' ' }), /sessionId/i)
+    assert.throws(() => c.store.recordOffered(model(), { id, revision: rev }, { sessionId: 's', taskId: '' }), /taskId/i)
+    assert.equal(c.store.usageStats(id).offered, 0, '被拒的调用不记事件')
+  } finally { c.tmp.cleanup(c.store) }
+})
+
+test('SU9 重建投影后 offers() 不变：归因读的是链', () => {
+  const c = open()
+  try {
+    const id = activate(c.store)
+    const rev = c.store.get(id)?.revision ?? 0
+    c.store.recordOffered(model('sess-a'), { id, revision: rev }, { sessionId: 'sess-a', taskId: 'task-1' })
+    const before = c.store.offers()
+    c.store.rebuildProjections()
+    assert.deepEqual(c.store.offers(), before)
+  } finally { c.tmp.cleanup(c.store) }
+})

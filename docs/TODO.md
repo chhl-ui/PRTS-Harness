@@ -129,11 +129,23 @@
   `mem_turns` 没有时间维情绪快照。回合刚结束那档误差≈0；启动 kick 补积压那档是近似。
   精确做法要在 turn 落库时记效价，是下一层的事。
   **剩两处**：记忆命中不引发情绪；提到反复失败的项目时情绪有可观测变化。
-- [ ] **③ 效果反馈（半成，剩下这一半是归因）**
-  已有：`skill.offered` + `usageStats`（提供次数）；情感事件源三类（turn 收尾 / accept / reject）。
-  缺：**「这条技能用过之后任务成没成」**——采用仍是闭眼自评，采用之后没有回音。
-  做法：把"本会话提供给模型的技能"与"任务收尾结果（claimDone / ownerAccept / ownerReject）"关联。
-  判据：`/skill show` 能显示「提供 N 次，其中 M 次任务成功」，且 M 来自账本而非模型自述。
+- [x] **③ 效果反馈（2026-11-10 落地，归因这一半补上了）**
+  原缺口：「这条技能用过之后任务成没成」——采用是闭眼自评，采用之后没有回音。
+  **落地**：offer 载荷补 `{sessionId, taskId?}`（`skills/store.ts` recordOffered context）；
+  注入层查 `ledger.taskForSession` 带任务上下文、(会话,任务) 去重 + 链去重防重启重复
+  （`runtime/skill-inject.ts`）；读侧 `Ledger.outcomeEvents()` 窄口径结局通道 +
+  `SkillStore.offers()` + 纯函数 `attribute()`（`runtime/skill-attribution.ts`）读时 join，
+  零新事件种类、零新投影；`/skill show` 显示「任务归因：成功 X · 失败 Y（相关性非因果）」。
+  **口径**：只认验收结局（owner-accepted / owner-rejected / verified ok±）；
+  **claimDone 不算**——它是模型自报，判据要求 M 来自验收而非自述（做法句与判据句冲突时以判据句为准）。
+  cancelled / stopped 不归因；无 taskId 的 offer 计 N 不归因；不溯及历史。
+  **验证**：设计文档 `设计和计划\PRTS-DESIGN-04-SKILL-ATTRIBUTION-2026-11-10.md`（A1–A7）；
+  新增/扩展测试 24 条（AT1–AT9 / OE1–OE4 / SU5–SU9 / SI11–SI14 / K9–K10），全量 969/969 过；
+  `npm run verify:skill` 真实路径二跑全绿（真模型注入→claimDone→accept→show 成功 1，
+  两库重建数字不变、链校验过；usage in 2592 / out 447）。
+  **顺带修了一个既有缺陷**：A7 首跑撞出 `rebuildProjections` 漏清 `task_bindings`——
+  凡有会话绑定的账本重建即报外键错（原单测不带绑定测不出来）。已修 + OE4 回归。
+  **生产注意**：上线初期归因数字全 0 是预期——历史 offer 无 taskId（普查 offered=0），不溯及。
 - [ ] **④ 情感事件源第四类：长时间未见**（依赖 ① 的时钟）
   §5.1 要求的四类里已接三类（error / turn 收尾 / 博士反馈），缺「长时间未见」。
   没有时钟就做不了——与 ① 同一前置。

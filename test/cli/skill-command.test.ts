@@ -1,19 +1,20 @@
 /**
- * `/skill` 命令的 CLI 级验收：候选可见、评估可记、采用生效、退役可回退。
+ * `/skill` 命令的 CLI 级验收：候选可见、评估可记、采用生效、退役可回退、效果归因。
  *
  * 为什么要有这条命令：技能库的全生命周期在库层已有（`src/skills/store.ts`：
- * propose / evaluate / adopt / reject / retire / restore），模型侧只拿到
- * `prts_skill_propose` 与 `prts_skill_list`（`src/runtime/skill-tools.ts` 刻意不暴露
- * 评估与采用）。而 chat 侧此前零入口——`grep -c skill src/cli/chat.ts` 是 0，
- * `grep -rn "\.adopt(\|\.evaluate(" src` 除 skills 模块自身外零命中。
- * 结果就是生产库里那条候选（`C:\prts-data\skills.sqlite`，phase=candidate，
- * evaluations=[]）从提出起永远停在原地——评估动作没有任何执行者。
+ * propose / evaluate / adopt / reject / retire / restore）。2026-11-09 放开后
+ * 模型侧也有全套工具，但博士这条命令面是人工闸门——随时能撤任何一条。
+ * 历史上 evaluate/adopt 曾零执行者入口，生产库里那条候选从提出起永远停在原地；
+ * 这条命令补的就是那个缺失的执行者位。
  *
  * 生效边界与 `/persona` 不同：技能注入走 `attachSkillInjection` 的每轮
  * `store.list({ phase: 'active' })`（`src/runtime/skill-inject.ts`），
  * 不是启动期装配，所以**采用后下一轮就生效**，不需要重启。
  * 但这条命令与运行时是两个连接——必须验证另一连接能看到这次采用，
  * 否则「命令写进去了、注入层看不见」会变成静默失效。
+ *
+ * K9/K10（DESIGN-04）：`/skill show` 的任务归因数字必须来自账本验收事件，
+ * 措辞必须标明相关性非因果。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -22,6 +23,8 @@ import { join } from 'node:path'
 import { runChat } from '../../src/cli/chat.ts'
 import { SkillStore } from '../../src/skills/index.ts'
 import type { SkillId, SkillSnapshot } from '../../src/skills/index.ts'
+import { Ledger } from '../../src/ledger/index.ts'
+import { initCoreDb } from '../../src/core/init.ts'
 import { makeTmp } from '../support/tmp.ts'
 import type { Context } from '@deepseek-ai/cordis'
 
@@ -113,6 +116,7 @@ async function chat(
   dataRoot: string,
   state: FakeState,
   cmds: string[],
+  ledger?: Ledger,
 ): Promise<string> {
   const printed: string[] = []
   await runChat({
@@ -122,6 +126,7 @@ async function chat(
     cwd: dataRoot,
     dataRoot,
     sessionId: 'sess-a',
+    ...(ledger === undefined ? {} : { ledger }),
   })
   return printed.join('')
 }
@@ -273,6 +278,77 @@ test('K8 /skill show 显示使用信号——采用之后有没有被用起来',
     const text = await chat(dataRoot, state, [`/skill show ${shortId(id)}`])
     assert.match(text, /提供过：2 次/, `应显示提供次数，实际：${text}`)
     assert.match(text, /最近/, `应显示最后一次提供的时间，实际：${text}`)
+    assert.match(text, /任务归因：不可用/, `没配 ledger 需要如实说明，实际：${text}`)
     assert.equal(state.followups, 0)
   } finally { t.cleanup() }
+})
+
+test('K9 /skill show 任务归因：offer 带任务键 + 账本验收 → 成功 1（DESIGN-04）', async () => {
+  const t = makeTmp('prts-skill-9-')
+  const dataRoot = join(t.dir, 'data')
+  const { dbPath, id } = seed(dataRoot)
+  const corePath = join(dataRoot, 'core.sqlite')
+  initCoreDb(corePath)
+  const ledger = Ledger.open(corePath)
+  try {
+    const created = ledger.create(OWNER, { title: '对账', objective: '核对归档与文档', acceptance: { kind: 'owner-confirm' } })
+    const active = ledger.activate(OWNER, { id: created.id, revision: created.revision })
+    // 注入层在真实运行时里做的事：提供时把绑定任务落进 offer 载荷。
+    const s = SkillStore.open(dbPath)
+    try {
+      const snap = s.get(id)
+      assert.ok(snap !== undefined)
+      s.recordOffered(
+        { kind: 'model', sessionId: 'sess-x' },
+        { id, revision: snap.revision },
+        { sessionId: 'sess-x', taskId: active.id },
+      )
+    } finally { s.close() }
+    const v = ledger.claimDone({ kind: 'model', sessionId: 'sess-x' }, { id: active.id, revision: active.revision })
+    ledger.ownerAccept({ id: v.id, revision: v.revision })
+
+    const state = makeAgent('sess-a')
+    const text = await chat(dataRoot, state, [`/skill show ${shortId(id)}`], ledger)
+    assert.match(text, /提供过：1 次/, `应显示提供次数，实际：${text}`)
+    assert.match(text, /任务归因：成功 1 · 失败 0/, `成功数应来自账本验收，实际：${text}`)
+    assert.match(text, /相关性非因果/, `措辞必须标明不是因果证据，实际：${text}`)
+    assert.equal(state.followups, 0)
+  } finally { ledger.close(); t.cleanup() }
+})
+
+test('K10 先拒后收：失败与成功各记一回合；claimDone 本身不算成功', async () => {
+  const t = makeTmp('prts-skill-10-')
+  const dataRoot = join(t.dir, 'data')
+  const { dbPath, id } = seed(dataRoot)
+  const corePath = join(dataRoot, 'core.sqlite')
+  initCoreDb(corePath)
+  const ledger = Ledger.open(corePath)
+  try {
+    const created = ledger.create(OWNER, { title: '对账', objective: '核对归档与文档', acceptance: { kind: 'owner-confirm' } })
+    const active = ledger.activate(OWNER, { id: created.id, revision: created.revision })
+    const s = SkillStore.open(dbPath)
+    try {
+      const snap = s.get(id)
+      assert.ok(snap !== undefined)
+      s.recordOffered(
+        { kind: 'model', sessionId: 'sess-x' },
+        { id, revision: snap.revision },
+        { sessionId: 'sess-x', taskId: active.id },
+      )
+    } finally { s.close() }
+    const v = ledger.claimDone({ kind: 'model', sessionId: 'sess-x' }, { id: active.id, revision: active.revision })
+
+    // 只 claimDone 还没裁决：模型自报不算成功。
+    const mid = await chat(dataRoot, makeAgent('sess-a'), [`/skill show ${shortId(id)}`], ledger)
+    assert.match(mid, /任务归因：成功 0 · 失败 0/, `claimDone 不是验收，实际：${mid}`)
+
+    const rej = ledger.ownerReject({ id: v.id, revision: v.revision }, '数字对不上')
+    const afterReject = await chat(dataRoot, makeAgent('sess-a'), [`/skill show ${shortId(id)}`], ledger)
+    assert.match(afterReject, /任务归因：成功 0 · 失败 1/, `驳回应记一回合失败，实际：${afterReject}`)
+
+    const v2 = ledger.claimDone({ kind: 'model', sessionId: 'sess-x' }, { id: rej.id, revision: rej.revision })
+    ledger.ownerAccept({ id: v2.id, revision: v2.revision })
+    const done = await chat(dataRoot, makeAgent('sess-a'), [`/skill show ${shortId(id)}`], ledger)
+    assert.match(done, /任务归因：成功 1 · 失败 1/, `先拒后收 = 两个回合，实际：${done}`)
+  } finally { ledger.close(); t.cleanup() }
 })

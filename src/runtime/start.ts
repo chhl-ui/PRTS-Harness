@@ -1044,8 +1044,9 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     },
   )
 
-  // V1-09：模型侧只有 propose / list。evaluate / adopt / retire / restore
-  // 一律不注册——技能是能力扩张，采用与否是博士的决策（与账本「只能建 draft」同构）。
+  // V1-09：模型侧全套七个动作（2026-11-09 放开，见 skills/store.ts 头注释）。
+  // 放开的前提是技能不授予权限——注入的只是建议文本，真正拦得住模型的是 K2a 守卫；
+  // 人工闸门退到 /skill（博士随时可撤）与哈希链（逐条可 verify）。
   const skillTools = skills === undefined ? undefined : createSkillTools(tools, { store: skills })
 
   // ⑥ 子任务上下文：模型侧 prts_subtask。派生闸与深度上限在工具内；
@@ -1060,13 +1061,14 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   })
 
   // V1-09 第二半：已采用的技能按当前问题推进上下文。只注入 `active`——
-  // `candidate` 是博士没批准的做法，注入它等于让模型执行未获批准的经验。
+  // `candidate` 是还没被任何人采用的提案，注入它等于让模型执行未生效的经验。
   // 与记忆/提醒/开场重建各自独立注册，一条链挂了不牵连其余三条。
+  // taskForSession（DESIGN-04）：提供时把绑定任务落进 offer 载荷，效果归因的连接键。
   const skillInjection = skills === undefined ? undefined : attachSkillInjection(
     ctx as unknown as {
       on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
     },
-    { store: skills },
+    { store: skills, taskForSession: (sid) => ledger.taskForSession(sid) },
   )
 
   // V1-05 表达层：当前情绪作为一句提示推进上下文。注入正文里写死了

@@ -240,3 +240,86 @@ test('SI10 候选提醒每会话每条只出现一次；采用后转成 active �
     } finally { inj.dispose() }
   } finally { c.tmp.cleanup(c.store) }
 })
+
+test('SI11 会话绑了任务 → offer 载荷带 taskId（DESIGN-04 归因连接键）', async () => {
+  const c = open()
+  try {
+    activated(c.store)
+    const h = fakeHookCtx()
+    const inj = attachSkillInjection(h.ctx, {
+      store: c.store,
+      taskForSession: () => ({ id: 'task-1' }),
+    })
+    try {
+      await h.fire(payloadOf('改共享模块的函数签名', 'sess-a'), async () => enter([]))
+      const rows = c.store.offers()
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0].sessionId, 'sess-a')
+      assert.equal(rows[0].taskId, 'task-1', '提供时的绑定任务必须落载荷，否则结局连不回来')
+    } finally { inj.dispose() }
+  } finally { c.tmp.cleanup(c.store) }
+})
+
+test('SI12 换任务 = 新上下文：重新注入，新 offer 带新 taskId', async () => {
+  const c = open()
+  try {
+    activated(c.store)
+    let bound = 'task-1'
+    const h = fakeHookCtx()
+    const inj = attachSkillInjection(h.ctx, {
+      store: c.store,
+      taskForSession: () => ({ id: bound }),
+    })
+    try {
+      const first = await h.fire(payloadOf('改共享模块的函数签名', 'sess-a', 1, 1), async () => enter([])) as { messages: unknown[] }
+      assert.equal(first.messages.length, 1)
+      bound = 'task-2'
+      const second = await h.fire(payloadOf('改共享模块的函数签名', 'sess-a', 2, 1), async () => enter([])) as { messages: unknown[] }
+      assert.equal(second.messages.length, 1, '新任务下相关技能值得再提一次')
+      const rows = c.store.offers()
+      assert.equal(rows.length, 2)
+      assert.deepEqual(rows.map((r) => r.taskId), ['task-1', 'task-2'], '各次提供带各自的任务键')
+    } finally { inj.dispose() }
+  } finally { c.tmp.cleanup(c.store) }
+})
+
+test('SI13 taskForSession 抛错不阻断注入：按无任务处理，offer 照记', async () => {
+  const c = open()
+  try {
+    activated(c.store)
+    const h = fakeHookCtx()
+    const inj = attachSkillInjection(h.ctx, {
+      store: c.store,
+      taskForSession: () => { throw new Error('账本打不开') },
+    })
+    try {
+      const d = await h.fire(payloadOf('改共享模块的函数签名', 'sess-a'), async () => enter([])) as { messages: unknown[] }
+      assert.equal(d.messages.length, 1, '技能是增强不是闸门')
+      const rows = c.store.offers()
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0].taskId, undefined, '读不到绑定就不主张关联')
+    } finally { inj.dispose() }
+  } finally { c.tmp.cleanup(c.store) }
+})
+
+test('SI14 重启不重复记 offer：进程内 Map 丢了，链上 hasOffered 还在', async () => {
+  const c = open()
+  try {
+    activated(c.store)
+    const h1 = fakeHookCtx()
+    const inj1 = attachSkillInjection(h1.ctx, { store: c.store, taskForSession: () => ({ id: 'task-1' }) })
+    try {
+      await h1.fire(payloadOf('改共享模块的函数签名', 'sess-a', 1, 1), async () => enter([]))
+    } finally { inj1.dispose() }
+    assert.equal(c.store.offers().length, 1)
+
+    // 模拟 supervisor 重启：新实例、同一会话同一任务、回合继续。
+    const h2 = fakeHookCtx()
+    const inj2 = attachSkillInjection(h2.ctx, { store: c.store, taskForSession: () => ({ id: 'task-1' }) })
+    try {
+      const d = await h2.fire(payloadOf('改共享模块的函数签名', 'sess-a', 2, 1), async () => enter([])) as { messages: unknown[] }
+      assert.equal(d.messages.length, 1, '上下文重建后文本要重新注入')
+      assert.equal(c.store.offers().length, 1, '但 offer 不重记——N 不因重启虚增')
+    } finally { inj2.dispose() }
+  } finally { c.tmp.cleanup(c.store) }
+})

@@ -17,11 +17,11 @@ export type SkillId = string & { readonly __brand: 'SkillId' }
 export type SkillPhase = 'candidate' | 'active' | 'retired' | 'rejected'
 
 /**
- * 谁能做哪件事，与账本同构：
- * - `model` 只能 `propose`（像账本里只能建 draft）
- * - `owner` 才能 `evaluate` / `adopt` / `reject` / `retire` / `restore`
- *
- * 这条边界的意义是产品级的：「越用越熟练」不能变成「模型自己给自己加能力」。
+ * 谁能做哪件事：2026-11-09 两次放开后，全生命周期对 owner 与 model 开放
+ * （依据与前提见 `store.ts` 头注释）。放开的前提是技能不授予权限——它只是
+ * 注入上下文的建议文本，真正拦得住模型的是 K2a 守卫。一旦技能携带工具、
+ * 数据源或授权路径，`requireWriter` 必须改回 owner-only：到那时
+ * 「越用越熟练」才真成了「模型自己给自己加能力」。
  */
 export type SkillActor = { kind: 'owner' } | { kind: 'model'; sessionId: string }
 
@@ -73,6 +73,8 @@ export type SkillEventKind =
    *
    * 不是状态变更——`fold.ts` 里是 no-op，相位与 revision 都不动。存在的理由是
    * 「采用之后有没有被用起来」此前完全不可观测，而观测它不需要新增表。
+   * DESIGN-04 起载荷携带 `{sessionId, taskId?}`：taskId 是效果归因的连接键，
+   * 提供时从账本 `taskForSession` 读来；旧事件没有这两个字段，读通道从 actor 兜底。
    */
   | 'skill.offered'
 
@@ -92,4 +94,17 @@ export interface SkillEventRow {
 export interface SkillRef {
   id: SkillId
   revision: number
+}
+
+/**
+ * 提供记录的读通道形态（`SkillStore.offers`，DESIGN-04）。
+ *
+ * `taskId` 缺席有两种合法情形：提供时该会话没绑任务；事件是 DESIGN-04 之前
+ * 记的旧格式。两者都计入提供次数，但都不参与归因——没有连接键就不主张关联。
+ */
+export interface OfferRecord {
+  skillId: SkillId
+  sessionId?: string
+  taskId?: string
+  ts: number
 }

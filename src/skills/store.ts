@@ -49,7 +49,7 @@ import { raise } from '../ledger/errors.ts'
 import { applySkillEvent } from './fold.ts'
 import { openSkillDb } from './schema.ts'
 import type {
-  SkillActor, SkillEvaluation, SkillEventKind, SkillId, SkillPhase, SkillProposal,
+  OfferRecord, SkillActor, SkillEvaluation, SkillEventKind, SkillId, SkillPhase, SkillProposal,
   SkillRef, SkillSnapshot, SkillVerdict,
 } from './types.ts'
 
@@ -215,18 +215,57 @@ export class SkillStore {
   /**
    * 记一次「本轮把这条技能提供给了模型」。
    *
-   * 幂等不由库保证：调用方（`skill-inject`）按会话去重，同一技能同一会话只记一次。
-   * revision 用当前值而不是 +1——提供不是状态变更，推进 revision 会让后续
-   * `evaluate`/`retire` 的乐观并发检查误报 `STALE_REVISION`。
+   * 幂等不由库保证：调用方（`skill-inject`）按「会话 × 任务」去重，并先查
+   * `hasOffered` 防止重启后重复记。revision 用当前值而不是 +1——提供不是状态变更，
+   * 推进 revision 会让后续 `evaluate`/`retire` 的乐观并发检查误报 `STALE_REVISION`。
+   *
+   * `context`（DESIGN-04）把提供时的会话与绑定任务落进载荷：taskId 是效果归因的
+   * 连接键，没有它「用过之后成没成」永远连不起来。可选——旧调用方不传也不破。
    */
-  recordOffered(actor: SkillActor, ref: SkillRef): void {
+  recordOffered(actor: SkillActor, ref: SkillRef, context?: { sessionId: string; taskId?: string }): void {
     const s = this.mustSkill(ref)
+    const sessionId = context === undefined ? undefined : nonEmpty(context.sessionId, 'context.sessionId')
+    const taskId = context?.taskId === undefined ? undefined : nonEmpty(context.taskId, 'context.taskId')
     this.tx(() => {
       this.append(s.id, s.revision, 'skill.offered', actor, {
         by: actor,
         atMs: Date.now(),
+        ...(sessionId === undefined ? {} : { sessionId }),
+        ...(taskId === undefined ? {} : { taskId }),
       })
     })
+  }
+
+  /**
+   * 全部提供记录（DESIGN-04 归因的读通道）。只查链，不建投影——与 usageStats
+   * 同口径：offered 是观测事件，重建投影不需要它，但它必须留在链上。
+   *
+   * 旧事件载荷没有 sessionId/taskId：sessionId 从 actor 兜底（model actor 自带），
+   * taskId 缺席即缺席，不猜。
+   */
+  offers(): OfferRecord[] {
+    const rows = this.db.prepare(
+      "SELECT skill_id, actor_json, payload_json, ts FROM skill_events WHERE kind = 'skill.offered' ORDER BY seq",
+    ).all() as unknown as Array<{ skill_id: string; actor_json: string; payload_json: string; ts: number }>
+    return rows.map((r) => this.parseOffer(r.skill_id, r.actor_json, r.payload_json, r.ts))
+  }
+
+  /**
+   * 这条技能在这个 (会话, 任务) 上下文里是否已记过提供（DESIGN-04）。
+   *
+   * 注入层在记 offer 前查它：进程内去重 Map 重启即丢，链不会丢——没有这道查，
+   * supervisor 每重启一次 N 就虚增一次。taskId 传 undefined 匹配无任务的提供。
+   * 技能量级个位数到几十条，按 skill_id 索引过滤后逐条解析的成本可忽略。
+   */
+  hasOffered(id: SkillId, sessionId: string, taskId?: string): boolean {
+    const rows = this.db.prepare(
+      "SELECT actor_json, payload_json FROM skill_events WHERE skill_id = ? AND kind = 'skill.offered'",
+    ).all(id) as unknown as Array<{ actor_json: string; payload_json: string }>
+    for (const r of rows) {
+      const o = this.parseOffer(id, r.actor_json, r.payload_json, 0)
+      if (o.sessionId === sessionId && o.taskId === taskId) return true
+    }
+    return false
   }
 
   /**
@@ -322,6 +361,22 @@ export class SkillStore {
     const s = this.get(id)
     if (s === undefined) raise('NOT_FOUND', `skill ${id} vanished after write`)
     return s
+  }
+
+  /** offered 事件 → OfferRecord：载荷优先，actor 兜底 sessionId，taskId 不猜。 */
+  private parseOffer(skillId: string, actorJson: string, payloadJson: string, ts: number): OfferRecord {
+    const payload = JSON.parse(payloadJson) as { sessionId?: unknown; taskId?: unknown }
+    const actor = JSON.parse(actorJson) as SkillActor
+    const sessionId = typeof payload.sessionId === 'string' && payload.sessionId !== ''
+      ? payload.sessionId
+      : (actor.kind === 'model' && actor.sessionId !== '' ? actor.sessionId : undefined)
+    const taskId = typeof payload.taskId === 'string' && payload.taskId !== '' ? payload.taskId : undefined
+    return {
+      skillId: skillId as SkillId,
+      ...(sessionId === undefined ? {} : { sessionId }),
+      ...(taskId === undefined ? {} : { taskId }),
+      ts,
+    }
   }
 
   private append(skillId: SkillId, revision: number, kind: SkillEventKind, actor: SkillActor, payload: unknown): void {
