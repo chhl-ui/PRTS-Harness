@@ -78,6 +78,17 @@ export interface WakeClockDeps {
   dailyCap?: number
   /** 连续失败到这个次数就自停，默认 3。 */
   maxFailures?: number
+  /**
+   * 博士最后一次真实发言的时刻（`MemoryStore.lastOwnerTurnAtMs` 同一口径：
+   * 已排除 `prts-clock-*` / `subtask-*` 合成会话）。`undefined` = 从没说过话。
+   * 不提供则应答闸门不工作（无法判断有没有被接住，就不该猜）。
+   */
+  lastOwnerTurnAtMs?(): number | undefined
+  /**
+   * 应答闸门阈值：连续几次开口无人回应后，只保留到期的意图（博士自己定的
+   * 时间承诺），其余提醒闭嘴。默认 `DEFAULT_SILENT_LIMIT`（2）；`0` 关闭闸门。
+   */
+  silentLimit?: number
 }
 
 export interface WakeClockStats {
@@ -88,6 +99,11 @@ export interface WakeClockStats {
   stopped: boolean
   lastFiredAtMs: number | null
   lastReason: WakeReason | null
+  /**
+   * 连续几次开口没被接住（DESIGN-09）。只在「准备开口」时判断：投递成功后
+   * 保持不清零，只有博士在最后一次开口之后说过话才归零。
+   */
+  unanswered: number
 }
 
 export interface WakeClock {
@@ -106,18 +122,36 @@ const DEFAULT_INTERVAL_MS = 60_000
 const DEFAULT_MIN_GAP_MS = 30 * 60_000
 const DEFAULT_DAILY_CAP = 8
 const DEFAULT_MAX_FAILURES = 3
+/** 应答闸门默认阈值：连续两次无人回应就只留 intent。 */
+export const DEFAULT_SILENT_LIMIT = 2
+
+/**
+ * 解析应答闸门阈值（`PRTS_CLOCK_SILENT_LIMIT`）。
+ *
+ * 为什么单独一个函数、为什么不复用 `start.ts` 的 `envNum`：`envNum` 要求
+ * `> 0`，而 `0` 在这里是**有意义的取值**（显式关掉闸门）。走 `envNum` 会让
+ * 「关掉」被静默回落成「按默认开」——主人以为自己关了闸门，其实没关。
+ * 空值 / 非法值（含负数、小数）才回落默认。
+ */
+export function parseSilentLimit(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_SILENT_LIMIT
+  const n = Number(raw)
+  return Number.isInteger(n) && n >= 0 ? n : DEFAULT_SILENT_LIMIT
+}
 
 export function attachWakeClock(deps: WakeClockDeps): WakeClock {
   const intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS
   const minGapMs = deps.minGapMs ?? DEFAULT_MIN_GAP_MS
   const dailyCap = deps.dailyCap ?? DEFAULT_DAILY_CAP
   const maxFailures = deps.maxFailures ?? DEFAULT_MAX_FAILURES
+  // `0` 是有意义的取值（关掉闸门），不能用 `||` 兜底。
+  const silentLimit = deps.silentLimit ?? DEFAULT_SILENT_LIMIT
   const now = deps.now ?? (() => Date.now())
   const log = deps.log ?? ((msg: string) => console.error(msg))
 
   const stats: WakeClockStats = {
     ticks: 0, fired: 0, skipped: 0, failures: 0, stopped: false,
-    lastFiredAtMs: null, lastReason: null,
+    lastFiredAtMs: null, lastReason: null, unanswered: 0,
   }
   /** 自然日计数：跨日自动归零（用本地日期，博士看的是本地时间）。 */
   let dayKey = ''
@@ -187,7 +221,32 @@ export function attachWakeClock(deps: WakeClockDeps): WakeClock {
     }
     if (due.length === 0) return []
 
-    const first = due[0] as WakeReason
+    // —— 应答闸门（DESIGN-09）：她会看自己说的话有没有被接住。
+    // 判断只在「准备开口」时做：没有到期项就不算开口，不累积 streak
+    // （否则闲置一夜后第一次有到期项就被误挡）。
+    const lastAt = stats.lastFiredAtMs
+    const readOwnerAt = deps.lastOwnerTurnAtMs
+    if (silentLimit > 0 && lastAt !== null && readOwnerAt !== undefined) {
+      try {
+        const ownerAt = readOwnerAt()
+        // 只认**最后一次开口之后**说过的话：更早的发言代表不了这次被接住。
+        if (ownerAt === undefined || ownerAt <= lastAt) stats.unanswered += 1
+        else stats.unanswered = 0
+      } catch (error) {
+        // 读不到博士的发言时间 ≠ 没人接。故障时不判断（不累积也不清零），
+        // 免得库偶发失败变成「她从此不提醒了」。
+        try {
+          log(`[clock] 应答检查失败（不计入 streak）：${error instanceof Error ? error.message : String(error)}`)
+        } catch { /* 日志失败也不能影响调度 */ }
+      }
+    }
+    // 无人回应到阈值 → 只留博士自己定的时间承诺：提醒是打扰，可以等博士回来；
+    // 承诺是约定，迟到就是失约。
+    const silentBlocked = silentLimit > 0 && stats.unanswered >= silentLimit
+    const eligible = silentBlocked ? due.filter((r) => r.kind === 'intent') : due
+    if (eligible.length === 0) { stats.skipped += 1; return [] }
+
+    const first = eligible[0] as WakeReason
     inTick = true
     let clockSessionId: string | void
     try {

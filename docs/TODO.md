@@ -126,6 +126,19 @@
   **验证**：CT1—CT4（常量与 env 语义）、G1—G7（条件注册 / 降级 / 提示词与机制一致）、
   CL5—CL6（真实运行时：`prts_intent_create` 真落库 / `pwsh` 不执行、文件不产生）。
   **未做**：L2c（写文件/跑命令）、L2d（账本状态机）仍不开——判断力未验证。
+  **2026-11-11 自主性第三步（反馈闭环）：应答闸门（DESIGN-09）**——
+  时钟开始看自己说的话有没有被接住。`wake-clock.ts` 新增 `deps.lastOwnerTurnAtMs`
+  （口径复用 `MemoryStore.lastOwnerTurnAtMs`，排除 prts-clock-*/subtask-*）与
+  `deps.silentLimit`（默认 2，0=关闭）；`stats.unanswered` 记连续未获回应的开口数。
+  规则：**有到期项时**判断「上次开口之后博士有没有说话」——没有则 streak+1，有则归零；
+  连续到 `silentLimit` 次只保留 `kind==='intent'` 的到期项（博士自己定的时间承诺必须准时），
+  其余（停滞任务/惦记的事）闭嘴，直到博士开口。due 为空时不累积 streak——
+  闲置一夜后第一次有到期项不该被误挡。
+  **验证**：W13—W17（单元）+ S1—S6（`test\runtime\clock-silent-limit.test.ts`：默认阈值、
+  streak 单调、缺 `lastOwnerTurnAtMs` 时闸门不工作、0 关闭、`parseSilentLimit` 允许 0）。
+  接线：`start.ts:1452` 传 `lastOwnerTurnAtMs`、`:1453` 传 `silentLimit`；
+  `PRTS_CLOCK_SILENT_LIMIT` 单独解析（`envNum` 要求 >0，传 0 会被静默吃掉——第二个同类坑）。
+  **未做**：回应质量（她只知道有没有人理，不知道自己说得好不好）。
   ——以下为落地前的判断，保留作背景——
   ~~现状：全仓无 cron/定时器~~（已过时，`memory-scheduler` 与 `wake-clock` 都是定时器形态）。
   现状：全仓无 cron/定时器（`grep -rn "cron|scheduleJob|wakeup|autonomous" src` 只命中注释与 memory 表的 CHECK）。

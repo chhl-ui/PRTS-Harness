@@ -231,3 +231,101 @@ test('W12 守卫优先于 onTick：closed / 自停 / 重入时不跑检查', asy
   assert.equal(callsC, 1, '重入的 tick 被守卫跳过，检查不重复跑')
   assert.equal(c.fired.length, 1)
 })
+
+// ---------------------------------------------------------------- 应答闸门（DESIGN-09）
+//
+// 时钟现在会看反馈：连续几次开口博士都没理，就只保留「到期的意图」——
+// 那是博士自己定的时间承诺，必须准时；其余提醒在她明显不在的时候不打扰。
+
+test('W13 连续两次开口无人回应 → 非 intent 的提醒闭嘴', async () => {
+  let ownerAt: number | undefined
+  const r = rig({ minGapMs: 0, silentLimit: 2, lastOwnerTurnAtMs: () => ownerAt })
+  r.setDue([{ kind: 'stale-task', text: '任务卡住了', refId: 't1' }])
+
+  // 第一次开口：上次投递是 null，闸门不生效。
+  await r.clock.tick()
+  assert.equal(r.delivered.length, 1)
+
+  // 博士没说话：第二次仍允许（streak=1）。
+  r.setNow(1_000_000 + 10_000)
+  await r.clock.tick()
+  assert.equal(r.delivered.length, 2)
+
+  // 第三次：streak=2 → 达到 silentLimit，闭嘴。
+  r.setNow(1_000_000 + 20_000)
+  const third = await r.clock.tick()
+  assert.deepEqual(third, [])
+  assert.equal(r.delivered.length, 2, '连续两轮无人回应后不再打扰')
+  assert.equal(r.clock.stats().unanswered, 2)
+})
+
+test('W14 博士回应一次 → streak 归零，恢复开口', async () => {
+  let ownerAt: number | undefined
+  const r = rig({ minGapMs: 0, silentLimit: 2, lastOwnerTurnAtMs: () => ownerAt })
+  r.setDue([{ kind: 'fact', text: '惦记着的事', refId: 'f1' }])
+
+  await r.clock.tick() // 第一次开口（lastFiredAtMs=1_000_000）
+  r.setNow(1_100_000); await r.clock.tick() // streak=1
+  r.setNow(1_200_000); await r.clock.tick() // streak=2 → 挡
+  assert.equal(r.delivered.length, 2)
+
+  // 博士在最后一次投递之后说过话 → 下次判断时 streak 归零。
+  ownerAt = 1_150_000 + 100_000
+  r.setNow(1_300_000)
+  const after = await r.clock.tick()
+  assert.equal(after.length, 1, '博士一开口就该恢复')
+  assert.equal(r.clock.stats().unanswered, 0)
+})
+
+test('W15 silentLimit=0 关闭应答闸门（旧行为可复现）', async () => {
+  const r = rig({ minGapMs: 0, dailyCap: 10, silentLimit: 0, lastOwnerTurnAtMs: () => undefined })
+  r.setDue([{ kind: 'stale-task', text: 'x', refId: 't1' }])
+  for (let i = 0; i < 5; i++) {
+    r.setNow(1_000_000 + i * 10_000)
+    await r.clock.tick()
+  }
+  assert.equal(r.delivered.length, 5, '关掉闸门后与历史行为一致')
+})
+
+test('W16 到期的意图不受应答闸门影响：博士自己定的承诺必须说', async () => {
+  const r = rig({ minGapMs: 0, dailyCap: 10, silentLimit: 1, lastOwnerTurnAtMs: () => undefined })
+  r.setDue([{ kind: 'stale-task', text: '卡住', refId: 't1' }])
+  await r.clock.tick() // 第一次开口
+  r.setNow(1_010_000)
+  const blocked = await r.clock.tick()
+  assert.deepEqual(blocked, [], 'stale-task 在无人回应时被挡')
+
+  // 同一批 due 里混一条 intent：只投 intent，且它不算「被挡」。
+  r.setDue([
+    { kind: 'stale-task', text: '卡住', refId: 't1' },
+    { kind: 'intent', text: '该吃药了', refId: 'i1' },
+  ])
+  r.setNow(1_020_000)
+  const got = await r.clock.tick()
+  assert.equal(got.length, 1)
+  assert.equal(got[0]?.kind, 'intent')
+  assert.equal(r.clock.stats().fired, 2)
+})
+
+test('W17 没有到期项时不累积 streak：没准备开口就不算开口', async () => {
+  let ownerAt: number | undefined
+  const r = rig({ minGapMs: 0, silentLimit: 1, lastOwnerTurnAtMs: () => ownerAt })
+  r.setDue([{ kind: 'stale-task', text: 'x', refId: 't1' }])
+  await r.clock.tick() // 第一次开口
+  assert.equal(r.clock.stats().unanswered, 0)
+
+  // due 为空：连续多次 tick 不该把 streak 推高（否则一旦有到期项就被误挡）。
+  r.setDue([])
+  for (let i = 0; i < 5; i++) {
+    r.setNow(1_000_000 + (i + 1) * 10_000)
+    await r.clock.tick()
+  }
+  assert.equal(r.clock.stats().unanswered, 0)
+
+  // 下一次真有到期项时才判断：streak 变 1 → 达到限值，挡掉。
+  r.setDue([{ kind: 'stale-task', text: 'x', refId: 't1' }])
+  r.setNow(1_100_000)
+  const got = await r.clock.tick()
+  assert.deepEqual(got, [])
+  assert.equal(r.clock.stats().unanswered, 1)
+})

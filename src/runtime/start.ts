@@ -35,7 +35,7 @@ import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachToolLoopAudit } from './tool-loop-audit.ts'
 import { isSandboxDenial } from './tool-denial.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
-import { attachWakeClock, type WakeClock, type WakeReason } from './wake-clock.ts'
+import { attachWakeClock, parseSilentLimit, type WakeClock, type WakeReason } from './wake-clock.ts'
 import { applyClockToolPolicy, clockPromptGuidance, clockToolPolicy, createClockToolState } from './clock-tools.ts'
 import { createAbsenceSignal } from './emotion-absence.ts'
 import { createMemoryRecallSignal, attachFailureMention } from './emotion-memory.ts'
@@ -1292,6 +1292,11 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // `sandbox/provider.ts:59` 同一套，不另造环境变量）。
   const clockDisabled = process.env.PRTS_CLOCK === 'off'
     || (process.env.PRTS_CLOCK !== 'on' && process.env.NODE_TEST_CONTEXT !== undefined)
+  /**
+   * 应答闸门阈值（DESIGN-09）：连续几次开口无人回应后，只保留到期的意图。
+   * 解析规则见 `parseSilentLimit`——`0` 有意义（关掉闸门），不能用 `envNum`。
+   */
+  const clockSilentLimit = parseSilentLimit(process.env.PRTS_CLOCK_SILENT_LIMIT)
   const clock: WakeClock | undefined =
     (memory === undefined || clockDisabled) ? undefined : attachWakeClock({
       collectDue: (nowMs: number): WakeReason[] => {
@@ -1441,6 +1446,11 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       intervalMs: envNum('PRTS_CLOCK_INTERVAL_MS', 60_000),
       minGapMs: envNum('PRTS_CLOCK_MIN_GAP_MS', 30 * 60_000),
       dailyCap: envNum('PRTS_CLOCK_DAILY_CAP', 8),
+      // 应答闸门（DESIGN-09）：她会看自己说的话有没有被接住。取法与 absence
+      // signal 同一口径——`lastOwnerTurnAtMs()` 已排除 prts-clock-* / subtask-*
+      // 合成会话，否则系统自己说话就会把 streak 清零。
+      lastOwnerTurnAtMs: () => memory.lastOwnerTurnAtMs(),
+      silentLimit: clockSilentLimit,
     })
   clock?.start()
 
