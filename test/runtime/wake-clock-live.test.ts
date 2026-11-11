@@ -30,6 +30,7 @@ const ENV_KEYS = [
   'PRTS_CLOCK_DAILY_CAP',
   'PRTS_CLOCK_FACT_MIN_IMPORTANCE',
   'PRTS_CLOCK_FACT_IDLE_DAYS',
+  'PRTS_MISS_AFTER_HOURS',
 ] as const
 
 test('CL1 时钟起离屏回合：模型真被调用，clock.fired 进审计，任务被记成已提醒', async () => {
@@ -170,6 +171,141 @@ test('CL2 第三路：重要性高的旧记忆成为触发理由（不看时间�
     // 提过一次之后进冷却：下一次 tick 不该再提同一条（否则每 30 分钟念叨同一件事）。
     const again = await clock.tick()
     assert.equal(again.length, 0, '同一条记忆冷却期内不得重复提起')
+  } finally {
+    await app?.dispose()
+    for (const k of ENV_KEYS) {
+      const v = saved.get(k)
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    tmp.cleanup()
+  }
+})
+
+test('CL3 ④ 长时间未见：tick 只写情绪不说话，一次离别一条（真实 runtime）', async () => {
+  const tmp = makeTmp('prts-absence-live-')
+  const dataRoot = join(tmp.dir, 'data')
+  const ws = join(tmp.dir, 'ws')
+  mkdirSync(dataRoot, { recursive: true })
+  mkdirSync(ws, { recursive: true })
+
+  const saved = new Map<string, string | undefined>()
+  for (const k of ENV_KEYS) saved.set(k, process.env[k])
+  process.env.PRTS_CLOCK = 'on'
+  process.env.PRTS_CLOCK_INTERVAL_MS = '3600000' // 定时器不插手：本测手动 tick
+  process.env.PRTS_CLOCK_MIN_GAP_MS = '0'
+  process.env.PRTS_MISS_AFTER_HOURS = '1' // 阈值旋钮真的接到装配层
+
+  let app: Awaited<ReturnType<typeof startRuntime>> | undefined
+  try {
+    app = await startRuntime({
+      configPath: prtsYml, dataRoot, workspace: ws, mode: 'normal',
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+    })
+    scriptedLlmPlugin([{ text: '本测不该用到模型。' }]).apply(app.ctx as Context)
+    await new Promise((r) => setTimeout(r, 100)) // 启动 kick 空转（此时无博士记录，不写）
+
+    const clock = app.clock
+    assert.ok(clock !== undefined, 'PRTS_CLOCK=on 时时钟必须存在')
+    const memory = app.memory
+    assert.ok(memory !== undefined, '记忆库必须可用')
+
+    // 种一条 2 小时前的博士发言：超过 1 小时阈值。没有任何到期意图/停滞任务/
+    // 高重要性事实 → collectDue 为空，说话路径不该被走到。
+    const seededAt = Date.now() - 2 * 3_600_000
+    memory.recordTurn({
+      actor: 'system', sessionId: 'sess-owner', turnIndex: 0, speaker: 'user',
+      text: '博士两小时前说的话', occurredAtMs: seededAt,
+    })
+    assert.equal(memory.lastOwnerTurnAtMs(), seededAt, '数据源必须读到种子')
+
+    const streamed: unknown[] = []
+    app.ctx.events?.on?.('agent/assistant-stream', (e: unknown) => streamed.push(e))
+
+    const emotionDb = join(dataRoot, 'emotion.sqlite')
+    const missEvents = (): Array<{ actor_json: string; payload_json: string; ts: number }> => {
+      const db = new DatabaseSync(emotionDb, { readOnly: true })
+      try {
+        return db.prepare(
+          `SELECT actor_json, payload_json, ts FROM emotion_events
+            WHERE kind = 'emotion.updated' AND json_extract(actor_json, '$.component') = 'long-absence'
+            ORDER BY seq`,
+        ).all() as never
+      } finally {
+        db.close()
+      }
+    }
+
+    const before = Date.now()
+    const fired = await clock.tick()
+    assert.deepEqual(fired, [], '没有到期理由：不得投递')
+    assert.equal(streamed.length, 0, '④ 只写情绪，不起回合、不调模型')
+
+    const chain = missEvents()
+    assert.equal(chain.length, 1, '超阈值必须写一条想念')
+    const actor = JSON.parse(chain[0].actor_json) as { kind: string; component: string }
+    assert.deepEqual(actor, { kind: 'system', component: 'long-absence' })
+    const payload = JSON.parse(chain[0].payload_json) as { valence: number; label: string; reason: string }
+    assert.equal(payload.label, '想念')
+    assert.equal(payload.valence, -0.15)
+    assert.match(payload.reason, /2 小时没出现/)
+    assert.ok(chain[0].ts >= before && chain[0].ts <= Date.now(), 'ts 必须是本次 tick 的时刻')
+
+    // 一次离别一条：博士没回来，再 tick 不重复写。
+    await clock.tick()
+    assert.equal(missEvents().length, 1, '同一次离别不得重复写')
+    assert.equal(streamed.length, 0)
+  } finally {
+    await app?.dispose()
+    for (const k of ENV_KEYS) {
+      const v = saved.get(k)
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    tmp.cleanup()
+  }
+})
+
+test('CL4 PRTS_CLOCK=off：④ 随宿主一起不工作（不写情绪）', async () => {
+  const tmp = makeTmp('prts-absence-off-')
+  const dataRoot = join(tmp.dir, 'data')
+  const ws = join(tmp.dir, 'ws')
+  mkdirSync(dataRoot, { recursive: true })
+  mkdirSync(ws, { recursive: true })
+
+  const saved = new Map<string, string | undefined>()
+  for (const k of ENV_KEYS) saved.set(k, process.env[k])
+  process.env.PRTS_CLOCK = 'off'
+  process.env.PRTS_MISS_AFTER_HOURS = '1'
+
+  let app: Awaited<ReturnType<typeof startRuntime>> | undefined
+  try {
+    app = await startRuntime({
+      configPath: prtsYml, dataRoot, workspace: ws, mode: 'normal',
+      patches: [{ id: 'llm-deepseek', disabled: true }],
+    })
+    scriptedLlmPlugin([{ text: '本测不该用到模型。' }]).apply(app.ctx as Context)
+    await new Promise((r) => setTimeout(r, 100))
+
+    assert.equal(app.clock, undefined, 'PRTS_CLOCK=off 时时钟必须缺席')
+    const memory = app.memory
+    assert.ok(memory !== undefined, '记忆库必须可用')
+    memory.recordTurn({
+      actor: 'system', sessionId: 'sess-owner', turnIndex: 0, speaker: 'user',
+      text: '博士两小时前说的话', occurredAtMs: Date.now() - 2 * 3_600_000,
+    })
+    await new Promise((r) => setTimeout(r, 200)) // 没有定时器，等也不会有检查
+
+    const db = new DatabaseSync(join(dataRoot, 'emotion.sqlite'), { readOnly: true })
+    try {
+      const rows = db.prepare(
+        `SELECT count(*) AS c FROM emotion_events
+          WHERE kind = 'emotion.updated' AND json_extract(actor_json, '$.component') = 'long-absence'`,
+      ).get() as { c: number }
+      assert.equal(rows.c, 0, '时钟关着时不得写想念')
+    } finally {
+      db.close()
+    }
   } finally {
     await app?.dispose()
     for (const k of ENV_KEYS) {

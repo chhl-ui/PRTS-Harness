@@ -61,6 +61,13 @@ export interface WakeClockDeps {
   onFailure?(error: unknown, consecutive: number): void
   /** 连续失败到阈值而自停时调用一次。 */
   onStopped?(why: string, consecutive: number): void
+  /**
+   * 每次 tick 的系统侧检查（§G2 ④ 情感事件源挂这里）。在守卫之后、
+   * **说话闸门（minGap/dailyCap）之前**调用——情绪不是说话，不该被说话的
+   * 节流挡住。抛错只 log，不计投递失败、不触自停：检查是增强不是闸门。
+   * closed / inTick / 自停时不跑（守卫提前 return）。
+   */
+  onTick?(nowMs: number): void
   log?(msg: string): void
   now?(): number
   /** 轮询间隔，默认 60 秒。 */
@@ -154,6 +161,12 @@ export function attachWakeClock(deps: WakeClockDeps): WakeClock {
 
     const key = todayKey(at)
     if (key !== dayKey) { dayKey = key; dayCount = 0 }
+
+    try { deps.onTick?.(at) } catch (error) {
+      try {
+        log(`[clock] onTick 检查失败（不计投递失败）：${error instanceof Error ? error.message : String(error)}`)
+      } catch { /* 日志失败也不能影响调度 */ }
+    }
 
     if (stats.lastFiredAtMs !== null && at - stats.lastFiredAtMs < minGapMs) {
       stats.skipped += 1

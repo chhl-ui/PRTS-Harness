@@ -1963,6 +1963,26 @@ export class MemoryStore {
 
 
   /**
+   * 博士最后一次真实发言的时刻（§G2 ④ 长时间未见的判定数据源）。
+   *
+   * 排除 `prts-clock-*` / `subtask-*`：这两类合成会话的 user 消息也落
+   * mem_turns（时钟 followup、子任务派工），不排除的话系统自己说话会把
+   * 「未见时长」清零。occurred_at_ms 为 NULL 的行不算「见过」——时间缺失
+   * 不能当成在场。
+   */
+  lastOwnerTurnAtMs(): number | undefined {
+    const row = this.db.prepare(
+      `SELECT MAX(t.occurred_at_ms) AS lastAtMs
+         FROM mem_turns t
+        WHERE t.scope = ? AND t.speaker = 'user' AND t.deleted_at_ms IS NULL
+          AND t.occurred_at_ms IS NOT NULL
+          AND t.session_id NOT LIKE 'prts-clock-%'
+          AND t.session_id NOT LIKE 'subtask-%'`,
+    ).get(SCOPE) as { lastAtMs: number | null }
+    return row.lastAtMs === null ? undefined : row.lastAtMs
+  }
+
+  /**
    * 按会话取 turn（含正文），供摘要生成使用。
    *
    * 正文走 `mem_bodies`（与 `readBodyForForget` 同一条外置路线），所以这里 LEFT JOIN。

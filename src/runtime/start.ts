@@ -36,6 +36,7 @@ import { attachToolLoopAudit } from './tool-loop-audit.ts'
 import { isSandboxDenial } from './tool-denial.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
 import { attachWakeClock, type WakeClock, type WakeReason } from './wake-clock.ts'
+import { createAbsenceSignal } from './emotion-absence.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { openProactiveStore, type ProactiveStore } from '../proactive/index.ts'
 import { openReminderStore, type ReminderStore } from '../reminders/index.ts'
@@ -1374,6 +1375,15 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
           console.error(`[prts] clock: 停止留痕失败：${error instanceof Error ? error.message : String(error)}`)
         }
       },
+      // §G2 ④ 长时间未见 → 情感（DESIGN-06）：每次 tick 检查，不受说话闸门
+      // 限制；只写情绪不说话。时钟 off / 记忆库缺 → 本边随宿主一起不工作。
+      ...(emotion === undefined ? {} : {
+        onTick: createAbsenceSignal({
+          emotion,
+          lastOwnerTurnAtMs: () => memory.lastOwnerTurnAtMs(),
+          afterMs: envNum('PRTS_MISS_AFTER_HOURS', 24) * 3_600_000,
+        }),
+      }),
       intervalMs: envNum('PRTS_CLOCK_INTERVAL_MS', 60_000),
       minGapMs: envNum('PRTS_CLOCK_MIN_GAP_MS', 30 * 60_000),
       dailyCap: envNum('PRTS_CLOCK_DAILY_CAP', 8),

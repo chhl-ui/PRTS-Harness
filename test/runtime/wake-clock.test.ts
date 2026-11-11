@@ -170,3 +170,64 @@ test('W9 collectDue 抛错不进 deliver、计入失败（不能把库故障当�
   assert.equal(r.delivered.length, 0)
   assert.equal(r.failures.length, 1)
 })
+
+test('W10 说话闸门（minGap/dailyCap）不挡 onTick：情绪不是说话', async () => {
+  const ticks: number[] = []
+  const r = rig({
+    minGapMs: 60_000, dailyCap: 1,
+    onTick: (at) => { ticks.push(at) },
+  })
+  r.setDue([reason('a')])
+  await r.clock.tick() // 投递一条，dailyCap 用满
+  r.setNow(1_000_000 + 1_000) // minGap 内 + cap 已满，双重闸门
+  const second = await r.clock.tick()
+  assert.deepEqual(second, [])
+  assert.equal(r.delivered.length, 1)
+  assert.deepEqual(ticks, [1_000_000, 1_001_000], '两次 tick 都必须跑系统侧检查')
+})
+
+test('W11 onTick 抛错只 log：不计投递失败、不触自停、不挡投递', async () => {
+  const r = rig({
+    maxFailures: 1,
+    onTick: () => { throw new Error('emotion boom') },
+  })
+  r.setDue([reason('a')])
+  const got = await r.clock.tick()
+  assert.equal(got.length, 1, '检查失败不能挡住说话')
+  assert.equal(r.failures.length, 0)
+  assert.equal(r.clock.stats().failures, 0)
+  assert.equal(r.clock.stats().stopped, false)
+  assert.equal(r.stopped.length, 0)
+})
+
+test('W12 守卫优先于 onTick：closed / 自停 / 重入时不跑检查', async () => {
+  // closed：stop() 之后手动 tick 也不跑检查
+  let callsA = 0
+  const a = rig({ onTick: () => { callsA += 1 } })
+  a.clock.stop()
+  await a.clock.tick()
+  assert.equal(callsA, 0)
+
+  // 自停：失败那次检查跑过，自停后的 tick 不再跑
+  let callsB = 0
+  const b = rig({ maxFailures: 1, onTick: () => { callsB += 1 } })
+  b.setDue([reason('a')])
+  b.failTimes(-1)
+  await b.clock.tick()
+  assert.equal(b.clock.stats().stopped, true)
+  await b.clock.tick()
+  assert.equal(callsB, 1, '自停后的 tick 不得再跑检查')
+
+  // 重入：deliver 等待期间又来一个 tick，内层被守卫跳过
+  let callsC = 0
+  let clockC: ReturnType<typeof attachWakeClock> | undefined
+  const c = rig({
+    onTick: () => { callsC += 1 },
+    deliver: async () => { await clockC?.tick() },
+  })
+  clockC = c.clock
+  c.setDue([reason('a')])
+  await c.clock.tick()
+  assert.equal(callsC, 1, '重入的 tick 被守卫跳过，检查不重复跑')
+  assert.equal(c.fired.length, 1)
+})

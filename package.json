@@ -12,6 +12,7 @@
     "verify:memory": "node --disable-warning=ExperimentalWarning scripts/verify-memory-regression.mjs",
     "verify:skill": "node --disable-warning=ExperimentalWarning scripts/verify-skill-attribution.mjs",
     "verify:emotion": "node --disable-warning=ExperimentalWarning scripts/verify-emotion-outcome.mjs",
+    "verify:absence": "node --disable-warning=ExperimentalWarning scripts/verify-emotion-absence.mjs",
     "secret:set": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/set-secret.ps1",
     "secret:del": "powershell -NoProfile -Command \"cmdkey /delete:PRTS/DeepSeek\"",
     "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\"",

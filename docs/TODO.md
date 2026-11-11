@@ -97,8 +97,10 @@
   （blocked/verifying 超 `PRTS_CLOCK_STALE_HOURS`，默认 2h）。
   **首版只说不做**：正文明确「不要调用工具」，且不改变模型可调用面——K2a 照常兜底。
   `PRTS_CLOCK=off` 关闭；测试上下文默认关（`NODE_TEST_CONTEXT`），live 测试用 `PRTS_CLOCK=on` 打开。
-  **未做/已知**：④「长时间未见」情感事件源仍是独立项（本版未接）；`PRTS_CLOCK_STALE_HOURS=0`
+  **未做/已知**：`PRTS_CLOCK_STALE_HOURS=0`
   表达不出来（`envNum` 要求 `>0`，传 0 静默回落 2h，已实测）。
+  ④「长时间未见」情感事件源已于 2026-11-10 接上（DESIGN-06，见 §G2 ④ 条目）——
+  寄生时钟 `onTick`，只写情绪不说话，不占 dailyCap。
   **2026-11-10 补第三路数据源「惦记着的事」**：`MemoryStore.lonelyFacts`（`store.ts`）——
   读 `importance` + `last_access_ms`，是唯一一条**不看时间截止**的理由。阈值
   `PRTS_CLOCK_FACT_MIN_IMPORTANCE`（默认 0.6，基线 0.5 的事实不进候选）、
@@ -160,9 +162,21 @@
   必败（生产 owner-rejected=0、旧测试只走 /accept，一直没露）；已修 + 三条回归。
   设计文档 `设计和计划\PRTS-DESIGN-05-LEARNING-TO-EMOTION-2026-11-10.md`（含参考库审查：
   全库 30 项目无「验收结局→持久情感」实现，自建；最接近的 Tianshu vigor 层不持久、非验收粒度）。
-- [ ] **④ 情感事件源第四类：长时间未见**（依赖 ① 的时钟）
-  §5.1 要求的四类里已接三类（error / turn 收尾 / 博士反馈），缺「长时间未见」。
-  没有时钟就做不了——与 ① 同一前置。
+- [x] **④ 情感事件源第四类：长时间未见**（2026-11-10 落地，DESIGN-06；依赖 ① 的时钟）
+  §5.1 四类事件源至此接齐（error / turn 收尾 / 博士反馈 / 长时间未见）。
+  时钟新增 `onTick` 依赖（守卫后、说话闸门前；抛错只 log 不计投递失败），
+  每次 tick 经 `memory.lastOwnerTurnAtMs()`（排除 prts-clock-*/subtask-* 合成会话、
+  已删、NULL 时间戳）+ `emotion.lastEventAtMs('long-absence')`（链上去重，零新状态）
+  → 纯函数 `shouldWriteMiss` → 超 24h（`PRTS_MISS_AFTER_HOURS`）写一条
+  「想念」-0.15/0.25，actor system{long-absence}。**只写情绪不说话**：不起离屏会话、
+  不占 dailyCap；博士回来第一回合由既有 emotion-inject 自然带出语气。
+  一次离别只写一条，回来后再离别才写第二条；重启/重建后判定不变。
+  **验证**：新增 18 测试（AB1–AB13 / W10–W12 / CL3–CL4），全量 **1003/1003**；
+  `npm run verify:absence` 26 断言全绿、零模型调用（含合成会话污染对照、
+  重开库去重、两库重建链逐字节不变）。
+  设计文档 `设计和计划\PRTS-DESIGN-06-LONG-ABSENCE-EMOTION-2026-11-10.md`（含参考库审查：
+  全库 29+11 仓无「缺席时长→持久情绪」实现，自建；阈值与 mood 为待验证假设）。
+  **下游解冻**：M→E（记忆→情感）的前置（④ 验收过）已满足，按博士批准的「④→M→E 连开」继续。
 
 ## H. 已闭环（本会话）
 
