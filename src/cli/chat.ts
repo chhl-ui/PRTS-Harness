@@ -29,6 +29,7 @@ import { SkillStore } from '../skills/index.ts'
 import { EmotionStore } from '../emotion/index.ts'
 import { createEmotionSignals } from '../runtime/emotion-signals.ts'
 import { attribute } from '../runtime/skill-attribution.ts'
+import { selectOutcomeMood, type OutcomeMoodSelection } from '../runtime/emotion-skill-outcome.ts'
 import type { SkillPhase, SkillSnapshot, SkillVerdict } from '../skills/index.ts'
 import { listProfiles, readProfile, writeProfile } from '../runtime/model-profile.ts'
 import type { Authority } from '../authority/index.ts'
@@ -405,18 +406,40 @@ function targetRef(deps: ChatDeps, id: string, sessionId: string): { id: never; 
  * 产物），不在账本层设硬门槛；但必须让人在知情下决定，故无证据时额外提示。
  */
 /**
- * 博士反馈 → 情绪（架构需求 §5.1 四类事件里的「博士的反馈」）。
+ * 验收/驳回 → 情绪（架构需求 §5.1；DESIGN-05 学习→情感）。
  *
  * 与 `/persona` 同层：自开一次短连接写同一 `emotion.sqlite`，写完即关。
  * 失败一律吞掉——验收/驳回的结果是账本事实，不能因为情绪库打不开就改变裁决。
+ *
+ * 任务有在场技能（offer 带该 taskId，DESIGN-04 的连接键）时写 skill-outcome
+ * 情绪，替代当次的泛化反馈——全量覆盖语义下连写两条等于第一条白写（D3）。
+ * 无技能在场走既有 owner-feedback，行为逐字不变。技能库读失败按无技能回退：
+ * 情绪是增强，不是闸门。
  */
-function recordOwnerFeedback(deps: ChatDeps, kind: 'accept' | 'reject', reason: string): void {
+function recordOutcomeEmotion(deps: ChatDeps, taskId: string, kind: 'accept' | 'reject', reason: string): void {
   let store: EmotionStore | undefined
   try {
     store = EmotionStore.open(process.env.PRTS_EMOTION_DB ?? join(deps.dataRoot, 'emotion.sqlite'))
-    const signals = createEmotionSignals({ store })
-    if (kind === 'accept') signals.onOwnerAccept(reason)
-    else signals.onOwnerReject(reason)
+    let selected: OutcomeMoodSelection | null = null
+    let skills: SkillStore | undefined
+    try {
+      skills = SkillStore.open(process.env.PRTS_SKILLS_DB ?? join(deps.dataRoot, 'skills.sqlite'))
+      selected = selectOutcomeMood(skills.offers(), taskId, kind === 'accept' ? 'success' : 'failure')
+    } catch { /* 技能库读失败按无技能处理 */ } finally { skills?.close() }
+    if (selected !== null) {
+      const ids = selected.skillIds.map(skillShortId).join('、')
+      store.update(
+        { kind: 'system', component: 'skill-outcome' },
+        {
+          ...selected.mood,
+          reason: `任务 ${taskId} ${kind === 'accept' ? '验收通过' : `被驳回：${reason}`}；在场技能：${ids}`,
+        },
+      )
+    } else {
+      const signals = createEmotionSignals({ store })
+      if (kind === 'accept') signals.onOwnerAccept(reason)
+      else signals.onOwnerReject(reason)
+    }
   } catch { /* 情绪写失败不影响裁决 */ } finally { store?.close() }
 }
 
@@ -442,7 +465,7 @@ async function runAccept(deps: ChatDeps, id: string, sessionId: string): Promise
     }
     const accepted = deps.ledger.ownerAccept({ id: snap.id, revision: snap.revision })
     deps.out(`[prts] 已验收 ${accepted.id}（${accepted.phase}）\n`)
-    recordOwnerFeedback(deps, 'accept', `任务 ${accepted.id} 验收通过`)
+    recordOutcomeEmotion(deps, accepted.id, 'accept', `任务 ${accepted.id} 验收通过`)
   } catch (error) {
     deps.out(`[prts] 验收失败：${error instanceof Error ? error.message : String(error)}\n`)
   }
@@ -462,9 +485,9 @@ async function runReject(deps: ChatDeps, id: string, reason: string, sessionId: 
   }
   try {
     const ref = targetRef(deps, id, sessionId)
-    const snap = deps.ledger.ownerReject(ref.id, reason.trim())
+    const snap = deps.ledger.ownerReject(ref, reason.trim())
     deps.out(`[prts] 已驳回 ${snap.id}（${snap.phase}）：${reason.trim()}\n`)
-    recordOwnerFeedback(deps, 'reject', reason.trim())
+    recordOutcomeEmotion(deps, snap.id, 'reject', reason.trim())
   } catch (error) {
     deps.out(`[prts] 驳回失败：${error instanceof Error ? error.message : String(error)}\n`)
   }
