@@ -195,6 +195,7 @@ export class EmotionStore {
     const label = requireText(given?.label, 'label')
     const reason = requireText(given?.reason, 'reason')
     const atMs = given?.atMs === undefined ? Date.now() : requireTimestamp(given.atMs, 'atMs')
+    const refId = given?.refId === undefined ? undefined : requireText(given.refId, 'refId')
     return this.tx(() => {
       const current = this.get()
       if (current === undefined && this.eventCount() > 0) {
@@ -205,7 +206,10 @@ export class EmotionStore {
           'emotion projection is missing while the event chain is not empty — call rebuildProjections()')
       }
       const revision = current === undefined ? 1 : current.revision + 1
-      this.append(revision, 'emotion.updated', actor, { valence, arousal, label, reason }, atMs)
+      this.append(revision, 'emotion.updated', actor, {
+        valence, arousal, label, reason,
+        ...(refId === undefined ? {} : { refId }),
+      }, atMs)
       const next = this.get()
       if (next === undefined) raise('NOT_FOUND', 'emotion state vanished right after write')
       return next
@@ -242,6 +246,29 @@ export class EmotionStore {
     if (current === undefined) return ''
     const now = nowMs === undefined ? Date.now() : requireTimestamp(nowMs, 'nowMs')
     return moodSentence(decayed(current, now, this.halfLifeMs))
+  }
+
+  /**
+   * 链上某个 system component 最近一次写入的时刻（§G2 ④ 去重用）。
+   * 事实来源是链不是投影：重建、重启后判定不变。json_extract 查链有先例
+   * （memory/store.ts 的 deletion 清单）。
+   * 传 refId 时收窄到「该 component 且 payload.refId 等于它」的最新一条
+   * （M→E 的 per-fact / per-task 去重，DESIGN-07 D5/D8）。
+   */
+  lastEventAtMs(component: string, refId?: string): number | undefined {
+    const row = (refId === undefined
+      ? this.db.prepare(
+        `SELECT ts FROM emotion_events
+          WHERE kind = 'emotion.updated' AND json_extract(actor_json, '$.component') = ?
+          ORDER BY seq DESC LIMIT 1`,
+      ).get(component)
+      : this.db.prepare(
+        `SELECT ts FROM emotion_events
+          WHERE kind = 'emotion.updated' AND json_extract(actor_json, '$.component') = ?
+            AND json_extract(payload_json, '$.refId') = ?
+          ORDER BY seq DESC LIMIT 1`,
+      ).get(component, refId)) as { ts: number } | undefined
+    return row?.ts
   }
 
   // ---------- 链与重建 ----------

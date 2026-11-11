@@ -70,6 +70,11 @@ export interface EmotionUpdateInput {
   label: string
   reason: string
   atMs?: number
+  /**
+   * 这条情绪关联的对象 id（记忆 factId / 任务 taskId 等）。进链 payload，
+   * 供 `lastEventAtMs(component, refId)` 做 per-对象去重；投影不读它。
+   */
+  refId?: string
 }
 
 /** `emotion_events` 的一行。`seq` 参与哈希，`verifyChain` 必须原样回填。 */

@@ -37,6 +37,7 @@ import { isSandboxDenial } from './tool-denial.ts'
 import { attachMemoryScheduler, createOllamaProbe, type MemoryScheduler } from './memory-scheduler.ts'
 import { attachWakeClock, type WakeClock, type WakeReason } from './wake-clock.ts'
 import { createAbsenceSignal } from './emotion-absence.ts'
+import { createMemoryRecallSignal, attachFailureMention } from './emotion-memory.ts'
 import { Authority, classify } from '../authority/index.ts'
 import { openProactiveStore, type ProactiveStore } from '../proactive/index.ts'
 import { openReminderStore, type ReminderStore } from '../reminders/index.ts'
@@ -1119,6 +1120,16 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       : { configMaxTokens: Number(process.env.PRTS_MEMORY_INJECT_BUDGET) }),
   })
 
+  // M→E「顾虑」（DESIGN-07）：提到收尾连败 ≥2 的项目 → 前瞻性沉重。
+  // 注册在 memory-inject **之前**（外层）：waterfall 的 next() 后副作用逆注册序
+  // 执行，外层后写——同轮想起 + 顾虑两写时顾虑覆盖想起（更具体者胜）。
+  const failureMention = emotion === undefined || ledger === undefined ? undefined : attachFailureMention(
+    ctx as unknown as {
+      on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
+    },
+    { emotion, ledger },
+  )
+
   const memoryInjection = memory === undefined ? undefined : attachMemoryInjection(
     ctx as unknown as {
       on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
@@ -1128,6 +1139,8 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       budget: { maxTokens: injectBudgetTokens },
       ...(embedderResolver === undefined ? {} : { embedder: embedderResolver }),
       ...(reranker === undefined ? {} : { reranker }),
+      // M→E「想起」（DESIGN-07）：注入成功 → 旧事实进上下文 → 轻微暖意。
+      ...(emotion === undefined ? {} : { onHits: createMemoryRecallSignal({ emotion }) }),
     },
   )
 
@@ -1471,6 +1484,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       cost?.close()
       assembly?.dispose()
       memoryInjection?.dispose()
+      failureMention?.dispose()
       sessionRecall?.dispose()
       proactiveRecall?.dispose()
       proactiveMentions?.close()

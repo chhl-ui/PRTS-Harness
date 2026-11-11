@@ -74,6 +74,12 @@ export interface MemoryInjectionDeps {
     /** 估算一段文本的 token；缺省 `ceil(chars / 2)`（中文约 1 字 1 token，英文约 4 字符 1 token 的折中）。 */
     estimateTokens?: (text: string) => number
   }
+  /**
+   * 注入成功后的旁路观测（M→E「想起」情绪挂这里，DESIGN-07 D2）。
+   * 回调必须自吞异常：本模块的 catch 会丢掉整段注入，情绪不能成为记忆的
+   * 新失败面。调用点仍兜一层——与 recordOnce 的独立 try/catch 同一理由。
+   */
+  onHits?(hits: readonly MemoryHit[], ctx: { sessionId: string; nowMs: number }): void
 }
 
 export interface MemoryInjection {
@@ -306,6 +312,8 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
         limit,
         outcome: 'injected',
       })
+      // 旁路观测（想起情绪）：独立 try/catch——回调抛错不能把已算好的注入丢掉。
+      try { deps.onHits?.(hits, { sessionId, nowMs: Date.now() }) } catch { /* 契约上回调自吞，这里是结构性兜底 */ }
       return { ...decision, messages: [...decision.messages, injected] }
     } catch (error) {
       console.error(`[prts] memory inject failed: ${error instanceof Error ? error.message : String(error)}`)
