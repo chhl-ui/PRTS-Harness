@@ -56,6 +56,14 @@ export interface AssertFactInput {
    * 无 slot 时**不退回谓词匹配**：那正是拿铁误杀 polars 的事故形态。
    */
   supersedeSameSlot?: boolean
+  /**
+   * 派生来源任务 id（DESIGN-08 记忆↔学习）。经验事实由任务验收结局派生时带上，
+   * 进 fact.asserted **载荷**——fold 不读它（投影无 taskId 列），故重建不变。
+   * 跨模块契约 §4：任务↔记忆的关联由记忆侧建立（derived_from = taskId）。
+   */
+  derivedFromTaskId?: string
+  /** 派生来源的账本结局事件 seq（DESIGN-08）。同 derivedFromTaskId，载荷-only、重建不变。 */
+  outcomeSeq?: number
 }
 
 export interface RecordTurnInput {

@@ -287,6 +287,11 @@ export class MemoryStore {
       valid_to_ms: input.validToMs ?? null,
       // 规范化后空串统一落 NULL——「无槽」与「空槽」在库层不区分。
       slot: input.slot === undefined ? null : normalizeSlotKey(input.slot) || null,
+      // DESIGN-08 记忆↔学习：派生来源（taskId + 结局 seq）只在提供时进载荷。
+      // fold 的 fact.asserted 不读这两个字段（投影无对应列）→ 重建不变；
+      // 缺省时不写键，旧调用方的载荷逐字节不变。
+      ...(input.derivedFromTaskId === undefined ? {} : { derived_from_task_id: input.derivedFromTaskId }),
+      ...(input.outcomeSeq === undefined ? {} : { outcome_seq: input.outcomeSeq }),
     }
 
     this.db.exec('BEGIN IMMEDIATE')

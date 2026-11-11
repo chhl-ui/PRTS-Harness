@@ -30,6 +30,7 @@ import { EmotionStore } from '../emotion/index.ts'
 import { createEmotionSignals } from '../runtime/emotion-signals.ts'
 import { attribute } from '../runtime/skill-attribution.ts'
 import { selectOutcomeMood, type OutcomeMoodSelection } from '../runtime/emotion-skill-outcome.ts'
+import { buildExperienceFact, type ExperienceSkill } from '../runtime/memory-experience.ts'
 import type { SkillPhase, SkillSnapshot, SkillVerdict } from '../skills/index.ts'
 import { listProfiles, readProfile, writeProfile } from '../runtime/model-profile.ts'
 import type { Authority } from '../authority/index.ts'
@@ -415,16 +416,25 @@ function targetRef(deps: ChatDeps, id: string, sessionId: string): { id: never; 
  * 情绪，替代当次的泛化反馈——全量覆盖语义下连写两条等于第一条白写（D3）。
  * 无技能在场走既有 owner-feedback，行为逐字不变。技能库读失败按无技能回退：
  * 情绪是增强，不是闸门。
+ *
+ * DESIGN-08 记忆↔学习：同一结局再写一条可召回的经验事实（②，独立 try/catch）。
+ * 情绪进情感状态（瞬时语气），经验进记忆（可积累）——同源同一在场口径，两者写
+ * 失败都吞，裁决不受影响。
  */
 function recordOutcomeEmotion(deps: ChatDeps, taskId: string, kind: 'accept' | 'reject', reason: string): void {
   let store: EmotionStore | undefined
   try {
     store = EmotionStore.open(process.env.PRTS_EMOTION_DB ?? join(deps.dataRoot, 'emotion.sqlite'))
     let selected: OutcomeMoodSelection | null = null
+    let experienceSkills: ExperienceSkill[] = []
     let skills: SkillStore | undefined
     try {
       skills = SkillStore.open(process.env.PRTS_SKILLS_DB ?? join(deps.dataRoot, 'skills.sqlite'))
       selected = selectOutcomeMood(skills.offers(), taskId, kind === 'accept' ? 'success' : 'failure')
+      if (selected !== null) {
+        // 复用同一次技能库连接解析标题（D3）；标题缺省回退短 id 在纯函数里做。
+        experienceSkills = selected.skillIds.map((id) => ({ id, title: skills?.get(id)?.title }))
+      }
     } catch { /* 技能库读失败按无技能处理 */ } finally { skills?.close() }
     if (selected !== null) {
       const ids = selected.skillIds.map(skillShortId).join('、')
@@ -435,12 +445,41 @@ function recordOutcomeEmotion(deps: ChatDeps, taskId: string, kind: 'accept' | '
           reason: `任务 ${taskId} ${kind === 'accept' ? '验收通过' : `被驳回：${reason}`}；在场技能：${ids}`,
         },
       )
+      // ② 经验事实：独立于情绪写，记忆失败不牵连已写的情绪与裁决。
+      recordExperienceFact(deps, taskId, kind, experienceSkills)
     } else {
       const signals = createEmotionSignals({ store })
       if (kind === 'accept') signals.onOwnerAccept(reason)
       else signals.onOwnerReject(reason)
     }
   } catch { /* 情绪写失败不影响裁决 */ } finally { store?.close() }
+}
+
+/**
+ * DESIGN-08 记忆↔学习：把验收结局写成经验事实（记忆侧 derived_from=taskId）。
+ *
+ * deps.memory / deps.ledger 未注入时跳过（与 /memory 命令同款可用性约定）；
+ * 写失败吞掉——记忆是增强不是闸门，验收裁决与情绪写都不受它影响（D8）。
+ * outcomeSeq 取该任务最新结局事件的 seq（钩子紧随 ownerAccept/ownerReject 触发，
+ * 链上最后一条即本次结局）。
+ */
+function recordExperienceFact(
+  deps: ChatDeps, taskId: string, kind: 'accept' | 'reject', skills: readonly ExperienceSkill[],
+): void {
+  if (deps.memory === undefined || deps.ledger === undefined) return
+  try {
+    const taskTitle = deps.ledger.get(taskId as never).title
+    const outcomes = deps.ledger.outcomeEvents().filter((e) => e.taskId === taskId)
+    const outcomeSeq = outcomes.length > 0 ? outcomes[outcomes.length - 1].seq : undefined
+    const fact = buildExperienceFact({
+      taskId,
+      outcome: kind === 'accept' ? 'success' : 'failure',
+      taskTitle,
+      skills,
+      outcomeSeq,
+    })
+    if (fact !== null) deps.memory.assertFact(fact)
+  } catch { /* 记忆写失败不影响裁决与情绪 */ }
 }
 
 async function runAccept(deps: ChatDeps, id: string, sessionId: string): Promise<void> {
