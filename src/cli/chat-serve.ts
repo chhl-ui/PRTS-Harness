@@ -131,6 +131,8 @@ try {
       dataRoot,
       sessionId: serveSessionId,
       ledger: app.ledger,
+      // §G2 时钟：与 chat-main 同一入口——远端客户端也要能看见时钟状态与手动 tick。
+      clock: app.clock,
       authority: app.authority,
       approvalBridge: app.approvalBridge,
       draftTaskForSession: app.draftTaskForSession,

@@ -139,6 +139,15 @@
   接线：`start.ts:1452` 传 `lastOwnerTurnAtMs`、`:1453` 传 `silentLimit`；
   `PRTS_CLOCK_SILENT_LIMIT` 单独解析（`envNum` 要求 >0，传 0 会被静默吃掉——第二个同类坑）。
   **未做**：回应质量（她只知道有没有人理，不知道自己说得好不好）。
+  **2026-11-11 自主性第四步：`/clock` 观察位**——时钟会自主开口、会判断有没有人回应、
+  会自停，但状态全在进程内（`WakeClockStats`），博士没有任何入口能看见。
+  `/clock` 读 `stats()` 打 tick/开口/跳过/连续未回应/失败/上次开口/上次理由；
+  `/clock tick` 手动跑一次并逐条报告投递内容（空结果会说明可能被节流或闸门挡住；
+  `tick()` 抛错被兜住，不打崩 REPL）。未注入时钟时明确报「时钟未启用」，不静默。
+  `ChatDeps` 新增可选 `clock?: WakeClock`（`chat.ts:848` 实现、`:1378` 分发）；
+  `chat-main.ts:95` 与 `chat-serve.ts:135` 注入 `app.clock`——本地与远端两个入口都能看到。
+  **验证**：CLK1—CLK4（`test\cli\clock-command.test.ts`）+ 写工补的 5 条边界
+  （`test\cli\clock-command-cases.test.ts`：只读视图不隐式 tick、未自停不误报、tick 抛错后 REPL 仍可用）。
   ——以下为落地前的判断，保留作背景——
   ~~现状：全仓无 cron/定时器~~（已过时，`memory-scheduler` 与 `wake-clock` 都是定时器形态）。
   现状：全仓无 cron/定时器（`grep -rn "cron|scheduleJob|wakeup|autonomous" src` 只命中注释与 memory 表的 CHECK）。

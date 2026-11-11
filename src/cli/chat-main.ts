@@ -91,6 +91,8 @@ try {
     dataRoot,
     // 账本句柄来自 startRuntime（W0）。不传的话 /task 系列命令会在终端里报不可用。
     ledger: app.ledger,
+    // §G2 时钟（未启用时为 undefined）：`/clock` 的观察位靠它；不传则命令报不可用。
+    clock: app.clock,
     // P0-2a：所有者记忆命令（/memory /forget /correct）——同库同句柄，不再开第二个 store。
     memory: app.memory,
     dbPath: app.dbPath,

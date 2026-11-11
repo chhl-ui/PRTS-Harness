@@ -35,6 +35,7 @@ import type { SkillPhase, SkillSnapshot, SkillVerdict } from '../skills/index.ts
 import { listProfiles, readProfile, writeProfile } from '../runtime/model-profile.ts'
 import type { Authority } from '../authority/index.ts'
 import type { ApprovalBridge } from '../runtime/start.ts'
+import type { WakeClock } from '../runtime/wake-clock.ts'
 
 const NL = String.fromCharCode(10)
 
@@ -227,6 +228,12 @@ export interface ChatDeps {
     provider: string
     model: string
   }
+  /**
+   * 自主时钟（§G2 / DESIGN-09）。注入后 `/clock` 才有观察位：读 `stats()` 或
+   * 手动 `tick()` 一次。未注入（PRTS_CLOCK=off、记忆库没打开、测试上下文）时
+   * 命令明确报不可用——静默什么都不做会让人以为时钟停摆。
+   */
+  clock?: WakeClock
   /**
    * 本会话最近一次模型创建的 draft 任务（来自 startRuntime）。
    * 无参 /task-approve 靠它寻址——draft 不绑定会话，指针是唯一入口。
@@ -822,6 +829,58 @@ async function runModel(deps: ChatDeps, arg: string): Promise<void> {
 }
 
 /**
+ * `/clock [tick]`：自主时钟的 owner 侧观察窗（DESIGN-09 的配套）。
+ *
+ * 为什么需要它：时钟会自主开口、在受限工具面里查和记、判断自己说的话有没有被
+ * 接住、连续失败自停——这些状态全在进程内（`WakeClockStats`），此前**没有任何
+ * 入口能看见**，博士只能靠「她今天怎么没说话」猜。看不见的自主系统，主人不敢
+ * 放手，所以这条命令补的就是那个观察位。
+ *
+ * 三种形态，都不触发模型回合（分发处 continue 掉）：
+ * - 未注入 clock → 明确报不可用，不静默；
+ * - `/clock` → 读 `stats()` 打几行，自停要在那一行里写清（不能当作正常运行）；
+ * - `/clock tick` → 真调一次 `tick()` 并逐条报告投递内容。空结果**不代表坏**：
+ *   闸门（silent-limit）、最小间隔、日上限都照常生效，输出里要说清这层歧义。
+ *
+ * `tick()` 失败必须被这里兜住：owner 命令抛错会把整个 REPL 打崩，而时钟投递
+ * 失败本身是后台事（`wake-clock.ts` 只计数不自停冒泡）。
+ */
+async function runClock(deps: ChatDeps, arg: string): Promise<void> {
+  const clock = deps.clock
+  if (clock === undefined) {
+    deps.out('[prts] 时钟未启用（PRTS_CLOCK=off、测试上下文，或记忆库未打开）\n')
+    deps.onIdle?.()
+    return
+  }
+  if (arg === 'tick') {
+    let fired: Awaited<ReturnType<WakeClock['tick']>>
+    try {
+      fired = await clock.tick()
+    } catch (error) {
+      deps.out(`[prts] 手动 tick 失败：${error instanceof Error ? error.message : String(error)}\n`)
+      deps.onIdle?.()
+      return
+    }
+    if (fired.length === 0) {
+      deps.out('[prts] 这一次没有可投递的到期项（或刚被节流/闸门挡住）\n')
+    } else {
+      for (const r of fired) deps.out(`[prts] 已投递：${r.kind} — ${r.text}\n`)
+    }
+    deps.onIdle?.()
+    return
+  }
+  const s = clock.stats()
+  deps.out(`[prts] 时钟：tick ${s.ticks} · 开口 ${s.fired} · 跳过 ${s.skipped} · 连续未回应 ${s.unanswered}\n`)
+  deps.out(`[prts]   失败 ${s.failures}${s.stopped ? '（已自停，重启进程恢复）' : ''}\n`)
+  deps.out(`[prts]   上次开口：${s.lastFiredAtMs === null ? '从未' : new Date(s.lastFiredAtMs).toLocaleString()}\n`)
+  if (s.lastReason !== null) {
+    deps.out(`[prts]   上次理由：${s.lastReason.kind} — ${s.lastReason.text}\n`)
+  }
+  deps.out('[prts] 用法：/clock tick 手动跑一次（运维/验证用）\n')
+  deps.onIdle?.()
+}
+
+/**
  * `/persona [预设名]`：查看 / 切换当前人格预设（owner 通道）。
  *
  * 为什么需要它：切换能力在库层已有（`PersonaStore.switchTo`，`persona/store.ts:185`），
@@ -1313,6 +1372,11 @@ export async function runChat(deps: ChatDeps): Promise<ChatResult> {
           for (const r of rows) deps.out(renderSessionLine(r) + '\n')
         }
         deps.onIdle?.()
+        continue
+      }
+      // ---- 自主时钟的观察位（owner 通道；只读统计或手动 tick 一次）----
+      if (line === '/clock' || line.startsWith('/clock ')) {
+        await runClock(deps, line.slice('/clock'.length).trim())
         continue
       }
       // ---- 人格预设查看/切换（owner 通道；重启后生效）----
