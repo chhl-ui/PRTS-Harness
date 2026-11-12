@@ -2564,8 +2564,6 @@ export class MemoryStore {
           ...(input.chain === undefined ? {} : { chain: input.chain }),
           ...(input.chains === undefined ? {} : { chains: [...input.chains] }),
           ...(input.droppedChains === undefined ? {} : { dropped_chains: [...input.droppedChains] }),
-          ...(input.usedTokens === undefined ? {} : { used_tokens: input.usedTokens }),
-          ...(input.contextWindow === undefined ? {} : { context_window: input.contextWindow }),
         },
       })
       this.db.exec('COMMIT')
