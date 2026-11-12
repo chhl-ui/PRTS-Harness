@@ -7,15 +7,47 @@
 - **V1-11 语音移出初版**（2026-11-05 决定）：`src/` 里零音频代码（`tts|speech|audio|voice` 无一命中），
   判据「按键说话往返 / 播报可打断 / 打断不等于取消任务」没有实现基础。改为**后续作为插件单独做**。
   理由：语音是可选能力，不该拖住核心；它同时是 V1-01「可选功能插件化」的第一个真实用例。
-- **本地生成（Strata）冻结**（2026-11-09 决定，2026-11-12 复查更正）：`prts_memory_summarize` 需要本地生成端点（默认
-  `127.0.0.1:8080`）。本机 Strata 跑 `qwen3.8-flash-next-iq3_xxs`（40 GiB 权重），
-  **prompt >~70 token 的批处理路径执行非法指令、引擎瞬间退出（退出码 3221225501 = `0xC000001D`，
-  非法指令；prompt ≤66 token 正常）**，与上游 Niko1221/Strata issue #5604 同签名（未修）。
-  原记的 `0xC0000409` 系误记（那是 strata 警告文案里的 #1607 场景码，不是本机实测码）；commit 嫌疑也已排除——
-  页面文件已扩到 32–64 GB（commit 65.9→93.6 GiB）后同路径照崩。引擎 0.1.56 与 0.1.59 均复现；
-  `--vram-reserve-mib 1088`、`--prefill 2048`、`STRATA_PIN_RESERVE_MIB=3072`、`STRATA_NO_IQ*`、
-  `STRATA_PREFILL_CPU_SHARE=0` 均无效。
-  **决定：本地生成等上游引擎修复，或换 NInfer / Ollama 底座**（27B 权重在别的引擎上无此 bug）。
+- **本地生成（Strata）已解封**（2026-11-12 根因定位 + 绕行实测通过）：`prts_memory_summarize` 需要本地生成端点（默认
+  `127.0.0.1:8080`）。本机 Strata 跑 `qwen3.8-flash-next-iq3_xxs`（40 GiB 权重）。
+  **根因**（ctypes 附加调试器实测，非推测）：`cublasLt64_13.dll+0x1ea98e9` 的 host 代码在
+  `cublasLtTSSMatmulAlgoGetHeuristic`（cublasGemmEx 内部启发式评分）里执行 `vbroadcastss zmm`（EVEX）。
+  NVIDIA 的 dispatch 只查 CPUID（本机 AVX512F=1）没查 XGETBV——本机 Windows 对 AMD 不开 ZMM XCR0
+  （XCR0=7，bit5-7 全 0），EVEX 指令全机 #UD → 引擎退出码 `0xC000001D`。上游 issue #5604 同签名。
+  **修法（实测）**：起服务前设 `CUBLASLT_DISABLE_CPU_INSTRUCTIONS_MASK=1`——bit0 关掉那段 host ISA
+  路径（纯 ctypes 探针与真实 serve 双验证：191/860/92-token prompt 全部正常出结果；曾固化进
+  `Desktop\Strata-FlashNext.bat`）。`0xFF`/`-1` 亦可，`0xE0` 不够。
+  **永久修复（已做，2026-11-12 验证）**：根子的根子是 **BCD `{current}` 上有一条
+  `xsaveremovefeature = 0xFFFFFFFFFFFFFFF8`**——把 XCR0 除 bit0-2 外全剥掉（疑似 Windows 崩溃恢复自动写入
+  或调优残留）。`bcdedit /deletevalue {current} xsaveremovefeature` + 重启后 `XCR0=0xe7`、EVEX 实测可执行
+  （`C:\local-llm\check-xstate.py`），裸跑无 env 的 serve 191-token prompt 正常出结果。**注意：本机这版
+  Windows (26200) 内核不读社区流传的 `EnabledXStateFeatures` 注册表值**（写了无效，ntoskrnl 里无此字符串；
+  BCD `xsaveaddfeature0-7`/`xsavepolicy`/`xsaveremovefeature`/`xsavedisable` 才是真实机制，
+  `xsaveaddfeature0-2=5,6,7` 已作为冗余保险留在 BCD）。
+  **已排除的修法**：换 3 版 cublasLt（Ollama/KVMem 同款 bug）、`STRATA_MMQ_KQ=0`、`STRATA_WMMA_GEMM`
+  /`STRATA_PF_GEMM`/`STRATA_DENSE_MMQ`/`STRATA_BF16_TC`（均为 HIP-only 或不改启发式）、`--prefill 64/32`。
+  **决定（更新）**：本地生成恢复可用，Strata 继续当默认底座；上游报 issue #5604 附崩点证据待提。
+- **整机冻结根因与辅助模型兼并（2026-11-12 夜）**：22:24:56「Virtual Memory Minimum Too Low」弹窗后
+  系统无响应硬重启（Kernel-Power 41）。根因：Strata（~44GB RSS）+ Ollama `q38-gsq-iq3s`（~12–15GB，
+  巩固调度器空闲时拉起做事实抽取，全核 CPU）同时驻留 → 62GB 物理内存击穿、93.6GB 提交上限顶穿。
+  **不是第一次**：同一弹窗 11-05/11-06 也出现过。**注意**：llama.cpp 系（Ollama 的 `llama-server.exe`
+  `ggml-cpu-zen4.dll`）19:47 也崩过一次 `0xC000001D`——在 BCD 修复之前，与 cublasLt 同一 XCR0 根因。
+  **兼并决定（博士批准）**：事实抽取改走 Strata 不复拉第二个模型——
+  - `start.ts`：新增 `PRTS_CONSOLIDATE_BACKEND=openai`（默认 `ollama` 不变），openai 后端用
+    `OpenAIGenerator`（默认 `http://127.0.0.1:8080/v1`，`PRTS_CONSOLIDATE_BASE` 可覆盖），
+    探活打 `${base}/models`（`createOllamaProbe` 加了 `path` 参数）。
+  - `generate.ts`：`OpenAIGenerator` 发 `chat_template_kwargs:{enable_thinking:false}`——
+    llama.cpp 系实测支持；不关时事实抽取 prompt 会把 token 全烧在 `reasoning_content`，
+    服务端 predict 上限截断后 `content:null` 整条作废（与 OllamaGenerator 的 `think:false` 同一原因）。
+  - 三处 `deepseek-chat` 硬编码改随 `PRTS_LLM_MODEL`：`start.ts`（prts_subtask）、`start.ts`（时钟，
+    `PRTS_CLOCK_MODEL` 仍显式优先）、`chat-serve.ts`（/dispatch）。
+  - 用户 env 已设 `PRTS_CONSOLIDATE_BACKEND=openai`、`PRTS_CONSOLIDATE_MODEL=qwen3.8-flash-next-iq3_xxs`、
+    `PRTS_CONSOLIDATE_TIMEOUT_MS=180000`。
+  - **实测**：serve + Strata 端到端，`mem_facts` 28→41 行，含「user|使用|Devin Desktop」等真实抽取。
+  - Ollama 现在只剩 `bge-m3` 嵌入一个职责（~1GB，可与 Strata 共存；没起时语义路自动降级字面检索）。
+  - **Strata 上下文已核实 = 262144**：`AppData\Local\Strata\launch\iq3_xxs-256k.json` 传 `--max-context 262144`
+    （KV int8、resident 32768、expert-cache auto 占 8.11GB VRAM），health 端点同值——
+    profile 的 `contextWindow: 262144` 不再是「来自口述」，是实测值。
+  - **纪律**：本地只许「Strata + bge-m3」共存；任何 ≥10GB 的第二个模型（q38、NInfer）与 Strata 互斥。
 
 ## A. 实现 vs 验收（初版 18 项）
 

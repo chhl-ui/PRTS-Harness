@@ -318,9 +318,17 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
 
   const bootPatches = [...(o.patches ?? [])]
   if (personaPrefix !== '') {
+    // 后端标识（2026-11-12）：模型从内部看不到自己的 provider——实测它只能
+    // 枚举机器上跑着的服务去猜。把 profileEnv 注入的两个 env 拼成一行事实，
+    // 「你跑在哪个模型上」才有可答的锚点。
+    const llmModel = process.env.PRTS_LLM_MODEL ?? 'deepseek-chat'
+    const llmBase = process.env.DEEPSEEK_BASE_URL ?? ''
+    const backendLine = llmBase === ''
+      ? `\n运行时事实：你的推理后端是 DeepSeek 官方 API（模型 ${llmModel}）。`
+      : `\n运行时事实：你的推理后端是本地模型服务 ${llmBase}（模型 ${llmModel}），不是 DeepSeek 官方 API。`
     bootPatches.push({
       id: 'system-prompt',
-      config: { includeHarnessIdentity: false, includeRuntimeContext: false, personaPrefix },
+      config: { includeHarnessIdentity: false, includeRuntimeContext: false, personaPrefix: personaPrefix + backendLine },
     })
   }
   if (backend === 'appcontainer') bootPatches.push({ id: 'sandbox', disabled: true })
@@ -1062,7 +1070,9 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     workspace: o.workspace,
     dataRoot: o.dataRoot,
     provider: 'deepseek-official',
-    model: 'deepseek-chat',
+    // 模型名跟随 profile：PRTS_LLM_MODEL 由 profileEnv 注入（strata 时指向本地模型），
+    // 未设时回落官方默认——与 chat.ts 的取法一致。
+    model: process.env.PRTS_LLM_MODEL ?? 'deepseek-chat',
   })
 
   // V1-09 第二半：已采用的技能按当前问题推进上下文。只注入 `active`——
@@ -1287,17 +1297,36 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 其余旋钮：PRTS_OLLAMA_URL（默认 http://127.0.0.1:11434，与向量路共用探活）、
   // PRTS_CONSOLIDATE_IDLE_MS、PRTS_CONSOLIDATE_RULES_MAX、PRTS_CONSOLIDATE_FACTS_MAX。
   const consolidateModel = process.env.PRTS_CONSOLIDATE_MODEL
+  // 事实抽取后端（2026-11-12）：`PRTS_CONSOLIDATE_BACKEND=openai` 改走 OpenAI 兼容
+  // 端点（默认 Strata :8080/v1，由 PRTS_CONSOLIDATE_BASE 覆盖），与
+  // prts_memory_summarize 复用同一台模型进程。原因：Strata（~44GB）与 Ollama
+  // q38（~12GB）同时驻留顶穿了 62GB 物理内存 + 32GB 页文件的提交上限，
+  // 2026-11-12 22:24 实测 "Virtual Memory Minimum Too Low" 后整机冻结。
+  // 兼并后 Ollama 只剩 bge-m3（~1GB）做嵌入，可与 Strata 共存。
+  // openai 模式探活改打 `${base}/models`（OpenAI 端点的就绪语义），
+  // 探活不过同样降级为当轮只跑规则巩固。
+  const consolidateBackend = process.env.PRTS_CONSOLIDATE_BACKEND ?? 'ollama'
+  const consolidateBase = process.env.PRTS_CONSOLIDATE_BASE
+  const consolidateProbe = consolidateBackend === 'openai'
+    ? createOllamaProbe({ baseUrl: consolidateBase ?? 'http://127.0.0.1:8080/v1', path: '/models' })
+    : ollamaProbe
   const memoryScheduler = (memory === undefined || process.env.PRTS_CONSOLIDATE === 'off') ? undefined : attachMemoryScheduler({
     store: memory,
     events: events as { on(name: string, fn: (payload: unknown) => void): () => void } | undefined,
     ...(consolidateModel === undefined ? {} : {
-      generator: async () => (await ollamaProbe())
-        ? new OllamaGenerator({
-          baseUrl: ollamaUrl,
-          model: consolidateModel === '' ? 'q38-gsq-iq3s' : consolidateModel,
-          // 60 s 封顶：巩固是后台事，一批卡住不该无限挂住调度器。
-          timeoutMs: envNum('PRTS_CONSOLIDATE_TIMEOUT_MS', 60_000),
-        })
+      generator: async () => (await consolidateProbe())
+        ? (consolidateBackend === 'openai'
+          ? new OpenAIGenerator({
+            ...(consolidateBase === undefined ? {} : { baseUrl: consolidateBase }),
+            model: consolidateModel === '' ? 'qwen3.8-flash-next-iq3_xxs' : consolidateModel,
+            timeoutMs: envNum('PRTS_CONSOLIDATE_TIMEOUT_MS', 60_000),
+          })
+          : new OllamaGenerator({
+            baseUrl: ollamaUrl,
+            model: consolidateModel === '' ? 'q38-gsq-iq3s' : consolidateModel,
+            // 60 s 封顶：巩固是后台事，一批卡住不该无限挂住调度器。
+            timeoutMs: envNum('PRTS_CONSOLIDATE_TIMEOUT_MS', 60_000),
+          }))
         : undefined,
     }),
     ...(embedderResolver === undefined ? {} : { embedder: embedderResolver, embedLimit: envNum('PRTS_EMBED_MAX', 200) }),
@@ -1323,7 +1352,9 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 账本与费用：v1 不绑任务、不动 ledger——自主回合只说一句话，不产生工作项；
   // 费用走 dsh 自己的 usage 记录，不记进任何任务预算。改这个口径要先改计划。
   const clockStaleMs = envNum('PRTS_CLOCK_STALE_HOURS', 2) * 3_600_000
-  const clockModel = process.env.PRTS_CLOCK_MODEL ?? 'deepseek-chat'
+  // PRTS_CLOCK_MODEL 显式覆盖优先；其次跟随 profile 的 PRTS_LLM_MODEL，
+  // 最后才是官方默认——否则切到本地后端后时钟还在请求不存在的 deepseek-chat。
+  const clockModel = process.env.PRTS_CLOCK_MODEL ?? process.env.PRTS_LLM_MODEL ?? 'deepseek-chat'
   /**
    * 自主会话的工具面（allow-list，见 `clock-tools.ts`）。
    *

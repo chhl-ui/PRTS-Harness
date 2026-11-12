@@ -141,6 +141,11 @@ export class OpenAIGenerator implements TextGenerator {
             messages: [{ role: 'user', content: prompt }],
             stream: false,
             temperature: 0,
+            // llama.cpp 系（Strata 实测支持）：关掉 qwen3 的 thinking——
+            // 与 OllamaGenerator 的 think:false 同一原因（2026-11-12 现场：
+            // 事实抽取 prompt 烧了 8006 token 全在 reasoning_content，
+            // 服务端 predict 上限截断后 content:null，抽取整条作废）。
+            chat_template_kwargs: { enable_thinking: false },
           }),
           signal: ctrl.signal,
         })

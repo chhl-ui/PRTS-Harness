@@ -200,13 +200,16 @@ export function attachMemoryScheduler(deps: MemorySchedulerDeps): MemorySchedule
 }
 
 /**
- * Ollama 探活器：本地生成器可用性的带缓存判定。
+ * 本地生成端点探活器：可用性的带缓存判定。
  *
- * 探活本身是一次 `/api/version` GET，毫秒级；缓存 60 s 让「Ollama 没起」
- * 期间的每轮巩固不至于都等满超时（超时默认 1.5 s，Ollama 不跑时每次都白等）。
+ * 探活本身是一次 GET，毫秒级；缓存 60 s 让「服务没起」期间的每轮巩固
+ * 不至于都等满超时（超时默认 1.5 s，服务不跑时每次都白等）。
+ * `path` 默认 Ollama 的 `/api/version`；OpenAI 兼容端点传 `/models`
+ * （Strata / llama.cpp / vLLM 都有这个 GET，语义同为「模型已就绪」）。
  */
-export function createOllamaProbe(opts: { baseUrl: string; timeoutMs?: number; cacheMs?: number; fetchImpl?: typeof fetch }): () => Promise<boolean> {
+export function createOllamaProbe(opts: { baseUrl: string; path?: string; timeoutMs?: number; cacheMs?: number; fetchImpl?: typeof fetch }): () => Promise<boolean> {
   const baseUrl = opts.baseUrl.replace(/\/+$/, '')
+  const path = opts.path ?? '/api/version'
   const timeoutMs = opts.timeoutMs ?? 1500
   const cacheMs = opts.cacheMs ?? 60_000
   const fetchImpl = opts.fetchImpl ?? fetch
@@ -217,7 +220,7 @@ export function createOllamaProbe(opts: { baseUrl: string; timeoutMs?: number; c
     const t = setTimeout(() => ctrl.abort(), timeoutMs)
     let up = false
     try {
-      const res = await fetchImpl(`${baseUrl}/api/version`, { signal: ctrl.signal })
+      const res = await fetchImpl(`${baseUrl}${path}`, { signal: ctrl.signal })
       up = res.ok
     } catch { up = false } finally { clearTimeout(t) }
     cached = { up, at: Date.now() }

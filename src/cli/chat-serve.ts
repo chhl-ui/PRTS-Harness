@@ -145,7 +145,8 @@ try {
       dispatch: {
         workspace,
         provider: 'deepseek-official',
-        model: 'deepseek-chat',
+        // 与 start.ts 子任务同一取法：跟随 PRTS_LLM_MODEL，不硬编码官方模型名。
+        model: process.env.PRTS_LLM_MODEL ?? 'deepseek-chat',
       },
       // 模型文本：与 out 互斥（A1 在 chat.ts 里做的分流），不会同时走两条。
       onAssistantDelta: (text) => term.pushModelDelta(text),
