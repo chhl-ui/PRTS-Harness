@@ -1166,9 +1166,12 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // `return null`（`dsh-compaction-basic/lib/index.js:932-935`）——两者一对，就能看出
   // 「该压却没压」。
   //
-  // 窗口取 adapter 的真实窗口，不用 `DSH_CONTEXT_WINDOW`：后者是注入预算的配置窗口
-  // （上面 `resolveTokenBudget` 用的那个，默认 1000000），拿它判压缩等于假设窗口无限，
-  // 正是 DSH 拿不到上下文容量时的那个毛病。
+  // 窗口来自 `ctx.llm.resolveModelInfo`，但 deepseek adapter 的返回值取自
+  // `config/prts.yml:20` 的 `defaultContextWindow`（`DSH_CONTEXT_WINDOW ?? 1000000`，
+  // 见 `dsh-llm-deepseek/lib/index.js:527-535`）——**它和上面的注入预算用的是同一个
+  // 配置值**，不是对模型能力的独立查询。默认 1000000 时阈值约 800K，实际会话永远触发
+  // 不到：这既解释了「生产 57 个会话零压缩记录」，也说明 §5.3 第③条「未知窗口不按无限
+  // 处理」在这一项上还没兑现。本层如实记录这个值，不替配置方假设真实窗口。
   //
   // 落点说明：这里只写 stderr，不写装配清单也不写审计链。两处语义都是为别的用途定的
   // （前者「材料装入」、后者「核心变更与拒绝」），硬塞会让读的人误解谁在说什么。
