@@ -331,6 +331,16 @@ export interface RecordInjectionInput {
   chains?: readonly string[]
   /** 仅装配器总账：因超预算被整链裁掉的链标识。 */
   droppedChains?: readonly string[]
+  /**
+   * 仅压缩决策（`chain: 'compaction'`）：本会话已用 token。
+   *
+   * 为什么借用本清单而不另开一张表：§5.3 第⑧条要的是「事后解释她当时为什么这么说」，
+   * 压缩和注入一样是装配决策——两者放同一条时间线上才解释得通。`fold.ts` 对它
+   * 是显式 no-op（纯观测、无投影行），所以加字段不影响任何重建结果。
+   */
+  usedTokens?: number
+  /** 仅压缩决策：模型真实窗口（adapter 提供，不是 `DSH_CONTEXT_WINDOW`）。 */
+  contextWindow?: number
 }
 
 /** V1-14 前瞻记忆：意图状态。`fired` 与 `cancelled` 是终态，不可互转。 */

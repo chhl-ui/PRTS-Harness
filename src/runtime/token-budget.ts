@@ -24,10 +24,15 @@
  * 装配器，本文件只做算术。
  */
 
-/** 输出预留默认值：给模型生成回答留的空间。 */
-const DEFAULT_OUTPUT_RESERVE = 8_192
+/**
+ * 输出预留默认值：给模型生成回答留的空间。
+ *
+ * 导出是因为压缩决策（`compaction-policy.ts`）要用同一对数——两处各写一遍迟早对不上，
+ * 而它们描述的是同一个物理量：窗口里留给生成的那部分。
+ */
+export const DEFAULT_OUTPUT_RESERVE = 8_192
 /** 安全余量默认值：token 估算会偏差，留一段缓冲避免刚好卡在窗口边缘。 */
-const DEFAULT_SAFETY_MARGIN = 2_048
+export const DEFAULT_SAFETY_MARGIN = 2_048
 /** 窗口未知时的保守预算上限：与任何真实模型的窗口相比都小，撑不爆。 */
 const DEFAULT_UNKNOWN_BUDGET_TOKENS = 4_000
 

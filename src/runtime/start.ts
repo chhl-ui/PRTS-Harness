@@ -30,7 +30,8 @@ import { attachSessionRecall } from './session-recall.ts'
 import { attachProactiveRecall } from './proactive-recall.ts'
 import { attachTaskReminder } from './task-reminder.ts'
 import { createSubtaskTool } from './subtask.ts'
-import { resolveTokenBudget } from './token-budget.ts'
+import { resolveTokenBudget, DEFAULT_OUTPUT_RESERVE, DEFAULT_SAFETY_MARGIN } from './token-budget.ts'
+import { attachCompactionPolicy } from './compaction-policy-attach.ts'
 import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachToolLoopAudit } from './tool-loop-audit.ts'
 import { isSandboxDenial } from './tool-denial.ts'
@@ -1158,6 +1159,71 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     { store: memory, ledger },
   )
 
+  // 压缩决策观测（架构需求 §5.3 ④）：把 DSH 的静默跳过变成看得见的判断。
+  //
+  // **只观测，不动作**：`compaction-basic` 照旧跑，本层记下同一时刻 PRTS 的判断。
+  // DSH 的 `compactIfNeeded` 在 `requestHeader` / `routedTarget` 为空时静默
+  // `return null`（`dsh-compaction-basic/lib/index.js:932-935`）——两者一对，就能看出
+  // 「该压却没压」。
+  //
+  // 窗口取 adapter 的真实窗口，不用 `DSH_CONTEXT_WINDOW`：后者是注入预算的配置窗口
+  // （上面 `resolveTokenBudget` 用的那个，默认 1000000），拿它判压缩等于假设窗口无限，
+  // 正是 DSH 拿不到上下文容量时的那个毛病。
+  //
+  // 落点说明：这里只写 stderr，不写装配清单也不写审计链。两处语义都是为别的用途定的
+  // （前者「材料装入」、后者「核心变更与拒绝」），硬塞会让读的人误解谁在说什么。
+  // 可查询的压缩账本应与 §5.3 ⑧ 的上下文清单一起设计，不在这里临时造一张。
+  const compactionRatio = (() => {
+    const raw = Number(process.env.PRTS_COMPACT_RATIO ?? '0.8')
+    // 与 `decideCompaction` 的分工：这里只负责「读得到一个数」，判定合法性是它的事。
+    return Number.isFinite(raw) ? raw : 0.8
+  })()
+  const compactionPolicy = attachCompactionPolicy(
+    ctx as unknown as {
+      on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
+    },
+    {
+      config: {
+        thresholdRatio: compactionRatio,
+        outputReserve: DEFAULT_OUTPUT_RESERVE,
+        safetyMargin: DEFAULT_SAFETY_MARGIN,
+        enabled: process.env.PRTS_COMPACT_POLICY !== 'off',
+      },
+      measure: (agent) => {
+        try {
+          const meter = (ctx as unknown as { get(n: string): unknown }).get('tokenMeter') as
+            { measure?: (s: unknown) => { totalTokens?: number } } | undefined
+          const m = meter?.measure?.((agent as { session?: unknown } | undefined)?.session)
+          return typeof m?.totalTokens === 'number' ? m.totalTokens : undefined
+        } catch { return undefined }
+      },
+      resolveWindow: async (agent) => {
+        try {
+          const header = (agent as { session?: { requestHeader?: () => unknown } } | undefined)
+            ?.session?.requestHeader?.() as { config?: { provider?: unknown; model?: unknown } } | undefined
+          const provider = header?.config?.provider
+          const model = header?.config?.model
+          if (typeof provider !== 'string' || typeof model !== 'string') return undefined
+          const llm = (ctx as unknown as { get(n: string): unknown }).get('llm') as
+            { resolveModelInfo?: (p: string, m: string) => Promise<{ context?: { contextWindow?: number } }> } | undefined
+          const info = await llm?.resolveModelInfo?.(provider, model)
+          const w = info?.context?.contextWindow
+          return typeof w === 'number' && w > 0 ? w : undefined
+        } catch { return undefined }
+      },
+      record: (row) => {
+        // 正常态不刷屏：`below-threshold` 每轮都会出现，`disabled` 是明确关掉。
+        if (row.action === 'skip') return
+        console.error(
+          `[prts] 压缩决策 ${row.action}${row.reason === undefined ? '' : `/${row.reason}`}`
+          + `${row.usedTokens === undefined ? '' : ` 已用 ${row.usedTokens}`}`
+          + `${row.contextWindow === undefined ? '' : ` 窗口 ${row.contextWindow}`}`
+          + `${row.sessionId === '' ? '' : ` 会话 ${row.sessionId}`}`,
+        )
+      },
+    },
+  )
+
   // V1-07 主动回忆：默认开启，`PRTS_PROACTIVE=off` 关闭（验收原文「可以关闭」）。
   // 与 memory-inject 是相反方向的克制：那条每轮都答，这条多数轮次不开口。
   const proactiveRecall = memory === undefined || proactiveMentions === undefined ? undefined : attachProactiveRecall(
@@ -1537,6 +1603,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
       memoryInjection?.dispose()
       failureMention?.dispose()
       sessionRecall?.dispose()
+      compactionPolicy?.dispose()
       proactiveRecall?.dispose()
       proactiveMentions?.close()
       taskReminder?.dispose()
