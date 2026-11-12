@@ -39,10 +39,23 @@ const CONSTRAINTS = ['代号 ALPHA-7391', '颜色 靛蓝', '日期 周四', '通
 const NEEDLES = ['ALPHA-7391', '靛蓝', '周四', '备用管', '7.5']
 
 const keyPath = 'C:/prts-data/secrets/deepseek.key'
-const apiKey = readFileSync(keyPath, 'utf8').trim()
+// 本地 Strata（V108_LOCAL=1）：`max_context` 由服务端配置决定（本次用 16384），
+// 无需 key（`/health` 报 `api_key: false`）。这样 V1-08 能零 API 成本跑，
+// 而且窗口是真的 16K——不像 deepseek 那样「配置窗口小、模型真窗口 1M」，
+// 让「超窗口 3 倍」这条判据名不副实。
+const LOCAL = process.env.V108_LOCAL === '1'
+const LOCAL_BASE = process.env.V108_BASE ?? 'http://127.0.0.1:8080/v1'
+const LOCAL_MODEL = process.env.V108_MODEL ?? 'qwen3.8-flash-next-iq3_xxs'
+const apiKey = LOCAL ? 'strata-local' : readFileSync(keyPath, 'utf8').trim()
 if (apiKey === '') {
-  console.error(`需要 ${keyPath} 里的 API key`)
+  console.error(`需要 ${keyPath} 里的 API key（或用 V108_LOCAL=1 走本地 Strata）`)
   process.exit(2)
+}
+if (LOCAL) {
+  process.env.DEEPSEEK_BASE_URL = LOCAL_BASE
+  process.env.PRTS_LLM_MODEL = LOCAL_MODEL
+  // 模型真实窗口与 PRTS 的计算窗口必须一致，否则压缩基准与注入预算都错位。
+  if (process.env.DSH_CONTEXT_WINDOW === undefined) process.env.DSH_CONTEXT_WINDOW = '16384'
 }
 
 // 必须在 startRuntime 之前设：`config/prts.yml:20` 在装配时读它。
