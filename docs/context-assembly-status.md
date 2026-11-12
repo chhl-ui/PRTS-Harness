@@ -21,6 +21,21 @@
 | ⑦ | **跨会话连续**：新会话从任务账本、意图库、近期情景记忆与关系记忆重建「上次聊到哪里」，不整体塞上一段聊天 | `src/runtime/session-recall.ts`（`attachSessionRecall`），接在 `start.ts` 的 pre-step 链末位。三源：未结任务（draft/active/paused/blocked/verifying，按 `updatedAt` 倒序，下一步取 `resume.next`，为空退回末条 step 名）、待触发意图（`listIntents({status:'pending'})`）、近期情景（新增 `store.recentTurns`，跨会话按发生时刻倒序，排除当前会话）。每会话只开一次场；三段各自 try/catch，全空则不注入。**关系记忆未做**——它属 V1-05（`docs/design-memory-v1.md:58` 已定「不做」），只留接口位 | ✅ 三源已完成，第四源待 V1-05 |
 | ⑧ | **上下文清单**：每轮记录装入的材料、版本与预算用量，用于事后解释「她当时为什么这么说」 | 无。`agent/assistant-stream` 与 `agent/inbox/claimed` 有会话事件，但没有装配清单 | ❌ 缺 |
 
+### 压缩相关环境变量（2026-11-12 补记）
+
+| 变量 | 默认 | 含义 |
+|---|---|---|
+| `PRTS_COMPACT_RATIO` | 未设 → 沿用 DSH 默认 `0.8` | 压缩触发比例。判定式：`已用 >= min(窗口 × 比例, 窗口 − 输出预留 − 安全余量)` 时为 `compact`。**`0` 是合法值**（明确要「任何占用都算超限」）；非数 / 负数判为 `config-invalid`，不悄悄退回默认。实现在 `src\runtime\compaction-policy.ts` 的 `resolveThresholdRatio` 与 `decideCompaction`。 |
+| `PRTS_COMPACT_POLICY` | 未设 → 观测层开启 | 设成 `off`（只有严格等于这个字符串才算）时决策恒为 `skip` / `disabled`。它只关掉 PRTS 的决策观测与压缩后回填的触发，**不关 DSH 自己的压缩**。接线见 `src\runtime\start.ts:1208`。 |
+
+默认值 `0.8` 来自 `dsh-compaction-basic\lib\index.js:15` 的 `DEFAULT_THRESHOLD_RATIO`——**它是上游默认，不是 PRTS 的决定**：§5.3 第④条只写「超限时压缩」，没定义超限是多少。启动时会打印实际生效值与来源：
+
+```
+[prts] 压缩阈值 0.8 来源 DSH 默认（未做 PRTS 决定）
+```
+
+偏离 `0.8` 需要真实长会话的 token 分布作依据，目前没有——生产会话记录里从未触发过压缩（57 个 `session.v4.jsonl`，含 `compaction/summary` 的 0 个）。
+
 ---
 
 ## 二、② 与现状的冲突是怎么回事
