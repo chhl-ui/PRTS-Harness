@@ -32,6 +32,7 @@ import { attachTaskReminder } from './task-reminder.ts'
 import { createSubtaskTool } from './subtask.ts'
 import { resolveTokenBudget, DEFAULT_OUTPUT_RESERVE, DEFAULT_SAFETY_MARGIN } from './token-budget.ts'
 import { attachCompactionPolicy } from './compaction-policy-attach.ts'
+import { resolveThresholdRatio } from './compaction-policy.ts'
 import { ToolLoopGuard } from './tool-loop-guard.ts'
 import { attachToolLoopAudit } from './tool-loop-audit.ts'
 import { isSandboxDenial } from './tool-denial.ts'
@@ -1182,18 +1183,26 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
   // 落点说明：这里只写 stderr，不写装配清单也不写审计链。两处语义都是为别的用途定的
   // （前者「材料装入」、后者「核心变更与拒绝」），硬塞会让读的人误解谁在说什么。
   // 可查询的压缩账本应与 §5.3 ⑧ 的上下文清单一起设计，不在这里临时造一张。
-  const compactionRatio = (() => {
-    const raw = Number(process.env.PRTS_COMPACT_RATIO ?? '0.8')
-    // 与 `decideCompaction` 的分工：这里只负责「读得到一个数」，判定合法性是它的事。
-    return Number.isFinite(raw) ? raw : 0.8
-  })()
+  // 阈值比例：0.8 是 **DSH 的默认**（`dsh-compaction-basic/lib/index.js:15`），
+  // 不是 PRTS 决定的。架构需求 §5.3 第④条只说「超限时压缩」，没定义超限是多少——
+  // 所以这里如实区分「配的」与「沿用的」，并在启动时打印一次：默认值冒充策略
+  // 却没人察觉，正是 `docs/context-assembly-status.md` 记的那种缺失。
+  // 非法配置传 NaN 下去，由 `decideCompaction` 判成 `config-invalid`（它才是判定方）。
+  const compactionRatio = resolveThresholdRatio(process.env.PRTS_COMPACT_RATIO)
+  console.error(
+    `[prts] 压缩阈值 ${compactionRatio.ratio === undefined ? '（配置不成立）' : String(compactionRatio.ratio)}`
+    + ` 来源 ${
+      compactionRatio.source === 'config' ? 'PRTS_COMPACT_RATIO'
+        : compactionRatio.source === 'dsh-default' ? 'DSH 默认（未做 PRTS 决定）' : '非法配置'
+    }`,
+  )
   const compactionPolicy = attachCompactionPolicy(
     ctx as unknown as {
       on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
     },
     {
       config: {
-        thresholdRatio: compactionRatio,
+        thresholdRatio: compactionRatio.ratio ?? Number.NaN,
         outputReserve: DEFAULT_OUTPUT_RESERVE,
         safetyMargin: DEFAULT_SAFETY_MARGIN,
         enabled: process.env.PRTS_COMPACT_POLICY !== 'off',

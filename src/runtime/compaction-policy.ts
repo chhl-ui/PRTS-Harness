@@ -32,6 +32,39 @@
  * 三者语义互不借用，调用方从理由就能分辨「该去找模型窗口」「该去修配置」还是「确实不用压」。
  */
 
+/**
+ * DSH 的默认阈值比例（`dsh-compaction-basic/lib/index.js:15`
+ * `const DEFAULT_THRESHOLD_RATIO = .8`）。
+ *
+ * 写成常量而不是内联字面量，是为了让「我们在沿用上游默认」这件事可被引用、可被测试
+ * 钉住（`compaction-ratio-config.test.ts` RT6）。**它不是 PRTS 的决定**——架构需求
+ * §5.3 第④条只说「超限时压缩」，没定义超限是多少。等有观测数据再决定要不要偏离。
+ */
+export const DSH_DEFAULT_RATIO = 0.8
+
+/** 阈值配置的来源。`invalid` 表示配了但不是可用的数，由上层报 `config-invalid`。 */
+export type ThresholdRatioSource = 'config' | 'dsh-default' | 'invalid'
+
+/**
+ * 解析阈值配置，并如实报出它从哪来。
+ *
+ * 分出「来源」是因为缺省与显式在语义上不同：前者是 PRTS 没有自己的策略、沿用上游，
+ * 后者是 PRTS 做的决定。混成一个数字，调用方（和日志里读它的人）就分不清了。
+ *
+ * 空白串按未配置处理（`''` 与未设等价）。`0` 是合法值，表示「任何占用都算超限」。
+ */
+export function resolveThresholdRatio(raw: string | undefined): {
+  ratio: number | undefined
+  source: ThresholdRatioSource
+} {
+  if (raw === undefined || raw.trim() === '') {
+    return { ratio: DSH_DEFAULT_RATIO, source: 'dsh-default' }
+  }
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed < 0) return { ratio: undefined, source: 'invalid' }
+  return { ratio: parsed, source: 'config' }
+}
+
 /** 确定不压的两种理由：关闭是明确表态，低于阈值是算得出来的结论。 */
 export type CompactionSkipReason = 'disabled' | 'below-threshold'
 
