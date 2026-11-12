@@ -1132,6 +1132,11 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     { emotion, ledger },
   )
 
+  // 压缩后回填（§5.3 ④ 的落地端）：上下文到压缩线时，允许记忆注入带回本会话
+  // 自己的 turn。默认关闭——正常情况下它们已在上下文里，重复注入口径会变。
+  // 由下面的 `compactionPolicy` 在决策为 `compact` 时置位（只升不降：压缩过的
+  // 会话不会因为后续测量变小就又能看见早期内容了）。
+  let compactPressure = false
   const memoryInjection = memory === undefined ? undefined : attachMemoryInjection(
     ctx as unknown as {
       on(name: string, fn: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
@@ -1139,6 +1144,7 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
     {
       store: memory, limit: injectLimit,
       budget: { maxTokens: injectBudgetTokens },
+      includeOwnSession: () => compactPressure,
       ...(embedderResolver === undefined ? {} : { embedder: embedderResolver }),
       ...(reranker === undefined ? {} : { reranker }),
       // M→E「想起」（DESIGN-07）：注入成功 → 旧事实进上下文 → 轻微暖意。
@@ -1215,6 +1221,9 @@ export async function startRuntime(o: StartRuntimeOptions): Promise<{
         } catch { return undefined }
       },
       record: (row) => {
+        // 决策为 `compact` = 上下文已过阈值 → 打开记忆注入的本会话通道。
+        // 只升不降：压缩过的会话不会因为后续测量变小就又能看见早期内容。
+        if (row.action === 'compact') compactPressure = true
         // 正常态不刷屏：`below-threshold` 每轮都会出现，`disabled` 是明确关掉。
         if (row.action === 'skip') return
         console.error(

@@ -80,6 +80,20 @@ export interface MemoryInjectionDeps {
    * 新失败面。调用点仍兜一层——与 recordOnce 的独立 try/catch 同一理由。
    */
   onHits?(hits: readonly MemoryHit[], ctx: { sessionId: string; nowMs: number }): void
+  /**
+   * 是否允许本会话自己的 turn 进入注入面；默认 `false`（保持既有行为）。
+   *
+   * 为什么需要这个开关：默认过滤的依据是「已在上下文里」，而**会话被 DSH 压缩后
+   * 这个前提就不成立**——早期内容已被移出上下文，过滤却还在，两层叠加等于早期
+   * 约束彻底消失，只能靠模型主动调 `prts_memory_recall`（V1-18 实测自管侧 0/100，
+   * 指望不上）。
+   *
+   * 由调用方判断「上下文是否已到压缩线」后传入（`start.ts` 用压缩决策驱动）。
+   * 打开后仍保留「本轮原话」那条兜底过滤，不会把刚说的重复带回来。
+   *
+   * 求值处已包 try/catch：开关抛错按 `false` 处理，不让它成为装配的新失败面。
+   */
+  includeOwnSession?: () => boolean
 }
 
 export interface MemoryInjection {
@@ -216,6 +230,13 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
       // 真机实测见过注入里第 2 条就是本轮原话。（保留作兜底：本会话 turn 过滤已覆盖它。）
       const queryKey = normalizeText(query)
       const seen = injectedHitIds.get(sessionId) ?? new Set<string>()
+      // 压缩后回填开关：默认关（本会话 turn 已在上下文里）。上下文到压缩线时由
+      // `start.ts` 打开，让被压掉的早期内容重新可注入。抛错按关闭处理——
+      // 它不能成为装配的新失败面。
+      let includeOwnSession = false
+      if (deps.includeOwnSession !== undefined) {
+        try { includeOwnSession = deps.includeOwnSession() === true } catch { includeOwnSession = false }
+      }
       // 三层过滤：1) 本会话自己的 turn（已在上下文里；代价：会话被 DSH 压缩后，
       //   早期同会话内容只能靠 prts_memory_recall 工具找回，注入不再带回——工具侧
       //   不做此过滤）2) 本会话已注入过的命中 id 3) 本轮原话（兜底）。
@@ -237,7 +258,7 @@ export function attachMemoryInjection(hookCtx: HookContext, deps: MemoryInjectio
           summaryQuota: 2,
           ...(queryVector === undefined ? {} : { queryVector, semanticTopK: limit * 3, semanticMinSim }),
         })
-        .filter((h) => h.kind !== 'turn' || h.sessionId !== sessionId)
+        .filter((h) => h.kind !== 'turn' || h.sessionId !== sessionId || includeOwnSession)
         .filter((h) => !seen.has(h.id))
         .filter((h) => h.kind !== 'turn' || normalizeText(h.text) !== queryKey)
       // 精排（交叉编码器）：只重排 ranked，更正钉住（pinned）永远保持最前。
