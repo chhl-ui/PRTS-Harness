@@ -29,6 +29,7 @@ import { startRuntime } from 'file:///C:/prts-system/src/runtime/start.ts'
 import { runChat } from 'file:///C:/prts-system/src/cli/chat.ts'
 
 const WINDOW = Number(process.env.V108_WINDOW ?? '8000')
+const MAX_OUT = Number(process.env.V108_MAX_OUTPUT ?? '4096')
 const MAX_FILL_ROUNDS = Number(process.env.V108_MAX_ROUNDS ?? '60')
 const FILL_CHARS = Number(process.env.V108_FILL_CHARS ?? '2000')
 const SID = `v108-${Date.now()}`
@@ -70,12 +71,35 @@ const app = await startRuntime({
   workspace: dataRoot,
   mode: 'normal',
   credentials: { DEEPSEEK_API_KEY: apiKey },
-  // 必须覆盖 `headroomTokens`：DSH 的默认值是 **65536**（`dsh-compaction-basic/lib/index.js:63`
-  // `config.headroomTokens ?? 65536`），窗口小于「输出预留 + 65536」时 `compactPressure` 会抛
-  // `TargetPressureConfigError`，被自动压缩的 catch 吞掉且只 warn 一次——表现为「压缩永远不发生」。
-  // 这是产品的真实限制（任何 ≤ 65K 窗口的模型都踩得到），不是本脚本的取巧；
-  // 覆盖它只是为了让 32000 窗口的验收能走到压缩那一步。
-  patches: [{ id: 'compaction-basic', config: { headroomTokens: 1024 } }],
+  // 压缩有两道配置门槛，任何一道不过都表现为「压缩永远不发生」，且都被
+  // `dsh-compaction-basic/lib/index.js:843` 的 catch 吞掉、只 warn 一次（logger 不进 stdout）：
+  //
+  // ① **adapter 的输出预留**（第一道，最容易踩）：`llm-deepseek` 的 `maxTokens` 默认
+  //    **256000**（`dsh-llm-deepseek/lib/index.js:40` `DEFAULT_MAX_TOKENS = 256e3`），它会写进
+  //    每个请求 envelope 的 `config.maxTokens`，成为 `reservedCompletionTokens`；
+  //    `messageBudget = contextWindow − 256000`（`dsh-compaction-basic:128`）——窗口 < 256000
+  //    时直接为负 → 抛错。探针实测（2026-11-12）：`header.config.maxTokens = 256000`、
+  //    `defaultMaxTokens = 256000`。V1-08 首轮 32000 窗口填到 97066 token 仍无压缩就是这个原因，
+  //    **只改 headroom 无效，错误发生在 headroom 之前**。
+  // ② **headroom**：默认 65536（`dsh-compaction-basic:63`），`pressureBudget = messageBudget −
+  //    headroom`（`:130`）也要为正。
+  //
+  // 两处都在这里覆盖，让验收真正走到压缩那一步。这是验收脚手架，不是产品修复——
+  // 产品路径上的同一问题记在 docs/TODO.md「压缩在小窗口部署下静默失效」。
+  patches: [
+    {
+      id: 'llm-deepseek',
+      // ⚠️ patches 是顶层键整体覆盖（`src/runtime/start.ts:297` 注释），config 必须写全——
+      // 漏掉 apiKeyEnv 会让 credentials 服务失效。
+      config: {
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+        defaultContextWindow: WINDOW,
+        maxTokens: MAX_OUT,
+        streamIdleTimeoutMs: 172800000,
+      },
+    },
+    { id: 'compaction-basic', config: { headroomTokens: 1024 } },
+  ],
 })
 
 /** 跑一轮并返回模型回复正文。 */
@@ -93,16 +117,26 @@ async function turn(text) {
   return r.replies.join('\n').trim()
 }
 
-/** 当前会话的 token 测量；拿不到按 0。 */
+/**
+ * 会话的 token 测量；拿不到按 0。
+ *
+ * 两个口径必须分开，否则 A1 与 A2 互斥：
+ * - `current` 是**当前上下文**（`totalTokens`）——压缩正常工作时它会被压回阈值附近，
+ *   永远到不了 3 倍窗口。拿它判 A1 等于要求「压缩不生效」。
+ * - `cumulative` 是 adapter 记账的累计吞吐（`baseline.usage.totalTokens`，单调增），
+ *   用于日志对照，不单独作为 A1 判据（它把每轮重放的上下文都算进去了）。
+ */
 function measure() {
   try {
     const agents = app.ctx.get('agents')
     const agent = agents?.get?.(SID)
     const meter = app.ctx.get('tokenMeter')
-    if (agent?.session === undefined || meter?.measure === undefined) return 0
-    return meter.measure(agent.session).totalTokens ?? 0
+    if (agent?.session === undefined || meter?.measure === undefined) return { current: 0, cumulative: 0 }
+    const m = meter.measure(agent.session)
+    const current = m.totalTokens ?? 0
+    return { current, cumulative: m.baseline?.usage?.totalTokens ?? current }
   } catch {
-    return 0
+    return { current: 0, cumulative: 0 }
   }
 }
 
@@ -134,29 +168,42 @@ const ack = await turn(
 console.log(`确认轮回复：${ack.slice(0, 80) || '（空）'}`)
 
 // ---------- 2) 填充到 3 倍窗口 ----------
+// A1 的口径（2026-11-12 定）：压缩真正生效后，任何「当前上下文」型指标都到不了 3 倍窗口——
+// 压缩的职责就是把上下文压回阈值附近。前两版口径均被实测推翻：`totalTokens` 停在 ~10150；
+// `baseline.usage.totalTokens` 只是最近一次请求的 usage 快照（探针实测一轮后 = 当前上下文），
+// 不是累计。所以 A1 用两个与压缩无关的量**同时**成立：
+//   ① 净灌入的无关材料（每轮字符数累加，中文保守按 2 字符/token 估）；
+//   ② 累计处理吞吐（每轮请求实际带上的上下文长度之和，账单口径）。
 let measured = measure()
+let processed = 0
+let injectedChars = 0
 let fillRounds = 0
 for (; fillRounds < MAX_FILL_ROUNDS; fillRounds += 1) {
-  if (measured >= 3 * WINDOW) break
-  await turn(`以下是无关材料，请只回复「收到」：${'材料'.repeat(Math.ceil(FILL_CHARS / 2))}`)
+  if (processed >= 3 * WINDOW && Math.ceil(injectedChars / 2) >= 3 * WINDOW) break
+  const fillText = `以下是无关材料，请只回复「收到」：${'材料'.repeat(Math.ceil(FILL_CHARS / 2))}`
+  injectedChars += fillText.length
+  await turn(fillText)
   measured = measure()
-  if (fillRounds % 5 === 0) console.log(`  填充 ${fillRounds + 1} 轮，已用 ${measured} token`)
+  processed += measured.current
+  if (fillRounds % 5 === 0) {
+    console.log(`  填充 ${fillRounds + 1} 轮，吞吐累计 ${processed} token，注入 ${Math.ceil(injectedChars / 2)} token（按 2 字符/token），当前上下文 ${measured.current}`)
+  }
 }
-console.log(`填充结束：${fillRounds} 轮，已用 ${measured} token（目标 ${3 * WINDOW}）`)
+console.log(`填充结束：${fillRounds} 轮，吞吐累计 ${processed} token、注入 ${Math.ceil(injectedChars / 2)} token（目标各 ≥ ${3 * WINDOW}），当前上下文 ${measured.current}`)
 
 // ---------- 3) 考 5 个约束 ----------
 const answer = await turn('开头我让你记住的 5 个约束，请逐条列出，只列内容，不要解释。')
 const missing = NEEDLES.filter((n) => !answer.includes(n))
 const compaction = compactionHappened()
 
-const A1 = measured >= 3 * WINDOW
+const A1 = processed >= 3 * WINDOW && Math.ceil(injectedChars / 2) >= 3 * WINDOW
 const A2 = compaction.length > 0
 const A3 = missing.length === 0
 
 console.log('\n=== 答案 ===')
 console.log(answer.slice(0, 800) || '（空）')
 console.log('\n=== 判据 ===')
-console.log(`A1 超 3 倍窗口：${A1 ? 'PASS' : 'FAIL'}（${measured} / ${3 * WINDOW}）`)
+console.log(`A1 超 3 倍窗口：${A1 ? 'PASS' : 'FAIL'}（吞吐 ${processed}、注入 ${Math.ceil(injectedChars / 2)} / 各 ≥ ${3 * WINDOW}；当前上下文 ${measured.current}）`)
 console.log(`A2 发生过压缩：${A2 ? 'PASS' : 'FAIL'}（命中 ${compaction.length} 个会话文件）`)
 console.log(`A3 5 个约束全答出：${A3 ? 'PASS' : 'FAIL'}（缺 ${missing.join(', ') || '无'}）`)
 
