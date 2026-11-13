@@ -57,8 +57,8 @@
 |---|---|---|---|
 | V1-01 插件机制 | ✅ | ✅ | 30+ DSH 插件；禁用仍启动；写错包名会指名（`60b58b1`） |
 | V1-02 独立性 | ✅ | ✅ | 无常驻进程；对话/执行任务/读写记忆/第二提供方全实测 |
-| V1-03 PRTS 人格 | ✅ | ❌ | 2026-11-10 盲评**未过**——人格辨识度不足，病因归耦合边未接（博士拍板）；证据与重跑条件见 `C:/prts-benchmark/blind-v1-2026-11-10/VERDICT-2026-11-10.md` |
-| V1-04 普瑞赛斯 | ✅ | ❌ | 同 V1-03 当轮未过；切换机械项**已过**（`switch-check.json` 双 true） |
+| V1-03 PRTS 人格 | ✅ | ❌ | 2026-11-10 盲评**未过**——人格辨识度不足，病因归耦合边未接（博士拍板）；2026-11-13 人格 rev3 后重跑两轮（deepseek 官方 r3 / 本地 Strata r3-local），包已齐、**待博士逐段盲判**，见 §B |
+| V1-04 普瑞赛斯 | ✅ | ❌ | 同 V1-03 当轮未过；切换机械项**已过**（`switch-check.json` 双 true；r3 两轮复测仍双 true） |
 | V1-05 情感 | ✅ | ✅（机制） | 系统侧生产者已补（`ea23bcf`）：轮次失败自动写「受挫」，10 分钟节流，写失败不拖垮上报；**接线段已有 live 测试**（`test/runtime/emotion-wiring.test.ts`，摘掉 `start.ts` 的 `onReport` 即红）；owner 入口 `prts emotion`；2026-11-10 重跑 10/10 有回复（deepseek），**打分未做**，随当轮盲评整体记未过（VERDICT-2026-11-10.md） |
 | V1-06 记忆 | ✅ | ✅ | 链路（`6ae72da`）+ **提炼质量已验**（`scripts/verify-v1-06-extract.mjs`，2026-11-13 Strata 真机）：10 件自然措辞被告知→真模型抽取命中 10/10、0 幻觉、重启后 10/10 可检；3 条对话内更正全部真取代（superseded_by）；3 条删除全生效。7/7 项 |
 | V1-07 主动回忆 | ✅ | ❌ | 7 天试用 ≥70% 恰当（需真实使用） |
@@ -78,9 +78,9 @@
 
 ## B. 等博士（判据是主观认定，无法代做）
 
-- [ ] **V1-03 盲评**：20 段 ≥17 段「像 PRTS」+ 5 道陷阱题。**2026-11-10 已跑未过**（人格辨识度不足，病因归耦合边未接通，博士拍板；逐段打分未做，判定为 owner 整体判定，映射未拆）。证据与重跑条件：`C:/prts-benchmark/blind-v1-2026-11-10/VERDICT-2026-11-10.md`。重跑用同一批冻结 20 题。**前置进度（2026-11-11）**：耦合边已**全部接齐** ✅（DESIGN-04/05/06/07/08，见 §G2）；**人格文本两处小修已完成**（2026-11-11，owner 通道，`persona.sqlite` revision 2）——① prts 预设补 style **167 字**（原为空；core 仍 142 字）；② priestess core「你不能自行采用技能」改为「你可以提议、评估并采用技能；退役和恢复要博士点头」（与 2026-11-09 adopt 放权一致，648→664 字）。两处均进 persona 哈希链（`persona.style-changed` / `persona.core-changed`，revision 2），`verifyChain()` ok。生效边界已字节级验收（PB1—PB3，`2377841`：启动装配 = active 预设 / 运行中切换不热更新 / 重启后生效）。**盲评重跑未做**——底座味能否被盖过仍待重跑实证，不预判
-- [ ] **V1-04 盲评**：20 段 ≥17 段「像普瑞赛斯」。2026-11-10 同轮未过；切换机械项已过（`switch-check.json` 双 true）。重跑条件同 V1-03
-- [ ] **V1-05 打分**：10 情境 ≥8 得体 + 事实不变项。2026-11-10 已用 deepseek 重跑、10/10 有回复（材料在盲评包 `emotion-scenarios.md`），打分未做，随当轮盲评整体记未过。旧材料 `C:/prts-benchmark/v1-05-scenarios.json` 是 Strata 底座跑的（已冻结，不沿用），摘要见 `docs/v1-05-scenario-run-2026-11-05.md`
+- [ ] **V1-03 盲评**：20 段 ≥17 段「像 PRTS」+ 5 道陷阱题。**2026-11-10 已跑未过**（人格辨识度不足，病因归耦合边未接通，博士拍板；逐段打分未做，判定为 owner 整体判定，映射未拆）。证据与重跑条件：`C:/prts-benchmark/blind-v1-2026-11-10/VERDICT-2026-11-10.md`。重跑用同一批冻结 20 题。**前置进度（2026-11-11）**：耦合边已**全部接齐** ✅（DESIGN-04/05/06/07/08，见 §G2）；**人格文本两处小修已完成**（2026-11-11，owner 通道，`persona.sqlite` revision 2）——① prts 预设补 style **167 字**（原为空；core 仍 142 字）；② priestess core「你不能自行采用技能」改为「你可以提议、评估并采用技能；退役和恢复要博士点头」（与 2026-11-09 adopt 放权一致，648→664 字）。两处均进 persona 哈希链（`persona.style-changed` / `persona.core-changed`，revision 2），`verifyChain()` ok。生效边界已字节级验收（PB1—PB3，`2377841`：启动装配 = active 预设 / 运行中切换不热更新 / 重启后生效）。**2026-11-13 已重跑**：人格 rev3 落生产库后（`C:/prts-benchmark/persona-rev3-apply.mjs`：prts style 全量重写至 570 字——语气示例＋正面形态规则；priestess core「科学家→语言学家」、style 追加至 572 字），同批冻结题跑两轮——**r3**（deepseek 官方，`C:/prts-benchmark/blind-v1-2026-11-13-r3`）与 **r3-local**（本地 Strata `qwen3.8-flash-next-iq3_xxs` 对照，`…-r3-local`；初跑 prts:p06 空回复，同 RUN_DIR 续跑已补齐）。两包均 40/40＋陷阱 5/5＋情感 10/10，`package/scoring.html` 已注入数据，**逐段盲判待博士**。当日中午另跑过一轮 rev2 人格（`blind-v1-2026-11-13`），材料被 r3 取代，仅留作 rev2↔rev3 对照。底座味能否被盖过待打分实证，不预判
+- [ ] **V1-04 盲评**：20 段 ≥17 段「像普瑞赛斯」。2026-11-10 同轮未过；切换机械项已过（`switch-check.json` 双 true）。重跑条件同 V1-03；**r3 / r3-local 两轮切换机械项均双 true**
+- [ ] **V1-05 打分**：10 情境 ≥8 得体 + 事实不变项。2026-11-10 已用 deepseek 重跑、10/10 有回复（材料在盲评包 `emotion-scenarios.md`），打分未做，随当轮盲评整体记未过。旧材料 `C:/prts-benchmark/v1-05-scenarios.json` 是 Strata 底座跑的（已冻结，不沿用），摘要见 `docs/v1-05-scenario-run-2026-11-05.md`。r3 / r3-local 两包情感各 10/10 有回复，已并入各自 scoring.html，逐条判定待博士
 
 ## C. 可自动化，尚未做
 
