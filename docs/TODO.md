@@ -60,7 +60,7 @@
 | V1-03 PRTS 人格 | ✅ | ❌ | 2026-11-10 盲评**未过**——人格辨识度不足，病因归耦合边未接（博士拍板）；证据与重跑条件见 `C:/prts-benchmark/blind-v1-2026-11-10/VERDICT-2026-11-10.md` |
 | V1-04 普瑞赛斯 | ✅ | ❌ | 同 V1-03 当轮未过；切换机械项**已过**（`switch-check.json` 双 true） |
 | V1-05 情感 | ✅ | ✅（机制） | 系统侧生产者已补（`ea23bcf`）：轮次失败自动写「受挫」，10 分钟节流，写失败不拖垮上报；**接线段已有 live 测试**（`test/runtime/emotion-wiring.test.ts`，摘掉 `start.ts` 的 `onReport` 即红）；owner 入口 `prts emotion`；2026-11-10 重跑 10/10 有回复（deepseek），**打分未做**，随当轮盲评整体记未过（VERDICT-2026-11-10.md） |
-| V1-06 记忆 | ✅ | ✅（链路） | 机制层 10/10；**真实链路已验**（`6ae72da`）：10 条对话 turn → `consolidateFacts` → 重启后 ≥9 可检索，含反证（stub 返回空则测试红）。提炼**质量**（真模型抽得准不准）未验 |
+| V1-06 记忆 | ✅ | ✅ | 链路（`6ae72da`）+ **提炼质量已验**（`scripts/verify-v1-06-extract.mjs`，2026-11-13 Strata 真机）：10 件自然措辞被告知→真模型抽取命中 10/10、0 幻觉、重启后 10/10 可检；3 条对话内更正全部真取代（superseded_by）；3 条删除全生效。7/7 项 |
 | V1-07 主动回忆 | ✅ | ❌ | 7 天试用 ≥70% 恰当（需真实使用） |
 | V1-08 上下文 | ✅ | ❌ | 超窗口 3 倍 + 跨天未完成事项（成本最高的自动化项） |
 | V1-09 进化 | ✅ | ✅ | propose→evaluate→adopt→retire→restore + 人格核心守卫（验收脚本 7 项） |
@@ -74,7 +74,7 @@
 | V1-17 公开基准 | ✅ | ✅ | 基线 45.09%；`npm run verify:memory` 是硬门禁（下降即退出码 1） |
 | V1-18 宿主 vs 自管 | ✅ | ❌ | 冻结（host 74/100、self 0/100） |
 
-**小结**：V1-11 移出后，初版 17 项**全部有实现**；验收完成 **10 项**（+V1-05 机制）、部分 2 项（V1-12 停机权 / V1-16 费用）、待博士或外部条件 5 项。
+**小结**：V1-11 移出后，初版 17 项**全部有实现**；验收全过 **8 项**、机制级 1 项（V1-05）、部分 2 项（V1-12 停机权 / V1-16 费用）、待博士或外部条件 6 项。
 
 ## B. 等博士（判据是主观认定，无法代做）
 
@@ -90,8 +90,11 @@
   **「切档 → 模型真写 → 被拒 → 审计留痕」整段也已验**（同日）：真机 `/sandbox view` 后让模型调 write，文件未创建、模型正确报因，审计链出现 `tool.denied`（actor `model`，`reason: sandbox-mode:read-only`，`tool: write`）。
   这一条**原先不成立**——sandbox 拒绝由 DSH 的 fs 后端自己拒、不经过 `Authority.guard`，所以 K4 一条记录都没有。修法：新增 `src\runtime\tool-denial.ts`（判定纯函数）+ `start.ts` 的 `tools/result` 钩子补写审计。回归 `test\runtime\tool-denial.test.ts`（TD1—TD4）
 - [ ] **V1-08 上下文**：超模型窗口 3 倍仍答对开头 5 个约束；跨天新会话说出未完成事项（成本最高）
-- [ ] **V1-06 的提炼质量**：链路已验（`6ae72da`），但用的是 stub generator；真实模型抽得准不准未验
-  （要真实模型 + 标注集，属 LongMemEval 的 fact 抽取范畴）
+- [x] **V1-06 的提炼质量（2026-11-13，Strata 真机）**：`scripts/verify-v1-06-extract.mjs` 全判据走完——
+  12 turn（10 事实 + 2 噪声）→ `OpenAIGenerator`→Strata `consolidateFacts` → 命中 10/10（判据 ≥9）、
+  多余抽取 0 条、重启后 10/10 可检；3 条带更正标记的对话 turn 经**真实抽取**触发 `supersedeSameSlot`
+  （slot 复用全对：宠物名/咖啡/实验室）；`deleteFact` 3 条后索引与 active facts 均消失。
+  局限：标注集是人工构造的干净样本（每 turn 一条事实、措辞规整），噪声/混排/长对话下的抽取退化未测
 
 ## D. 冻结
 
