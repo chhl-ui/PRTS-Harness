@@ -296,3 +296,37 @@ warm 日志符合预期。五分钟，不算使用，算体检。
    D4（不降级只读）实际不可测——`mode` 是测试入参，且第 2/4/7 天无写操作。
    「7 次 2.09s 全绿」是近空库上的数字，不能外推真实体量。
 4. **崩溃/强杀后的 WAL 恢复**未覆盖——soak 走的是 `dispose()` 正常关闭路径。
+
+---
+
+## 九、2026-11-13 现状校准（五模块对账表更新）
+
+第二节的对账表写于 11-03，其中三处「未建设 / 半成品」已经落地，重写一遍。
+判定规则同原表：✅ 已实现、🟡 半成品、❌ 未建设。所有落点都给代码或测试位置。
+
+| Super-agent 模块 | 11-03 判定 | 11-13 实况 | 判定 |
+|---|---|---|---|
+| ① 双层 Router/Worker | ❌ 未建设 | 机制探针已固化为 `test/acceptance/subagent-session.test.ts`；`prts_subtask` 落地（`src/runtime/subtask.ts`：先注册后 create、只回摘要、dispose、派生闸在工具内）；`/dispatch` 分派器 + `session-table` + `/sessions` `/switch` `/new` 落地（`src/runtime/dispatcher.ts`，并发上限 1..5 默认 3，`test/runtime/dispatcher.test.ts`）。**常驻 Router 仍无：`agent-loop` 的 `agents: []` 为空** | 🟡 Worker 派生链完整，Router 层缺席 |
+| ② 事件驱动 | 🟡 只有时间触发 | 维持：时间触发（V1-14）+ 任务事件提醒已接线（`src/runtime/task-reminder.ts`，W3）。Slow Path 不做是否决项不变；外部事件源（IM/邮件/CI）仍无 | 🟡 按 PRTS 场景裁剪后的形态，不变 |
+| ③ 面向人的异步交互 | 🟡 卸载与停止有 | `src/spill`、`jobs`、`StopController` 不变；**新增**：客户端寿命与运行时寿命解耦（`terminal-server.ts` 会话代际，`chat-serve.ts` accept 循环，`test/runtime/terminal-reconnect.test.ts`）。仍缺：真·后台任务不阻塞前台（`/dispatch` 等收敛才返回）、投机执行 | 🟡 |
+| ④ 计算/状态/环境分离 | ✅ 已达成 | 维持，且 BYOM 从「适配器可换」升级为**实测可换**：`model-profile.json` 双 profile（deepseek ↔ strata），`PRTS_LLM_MODEL`/`DEEPSEEK_BASE_URL`/`DSH_CONTEXT_WINDOW` 随 profile 注入（`src/runtime/model-profile.ts`）；2026-11-12 Strata 下全链路实测过 | ✅ |
+| ⑤ 外部 Watchdog | 🟡 只答「进程活着吗」 | `supervisor`（进程外 Job、崩溃重启、心跳）不变；**新增**：`tool-loop-guard`（连续同工具同参→疑似循环，`src/runtime/tool-loop-guard.ts`）+ `tool-loop-audit` 已接线（`start.ts:723-740`），W1 落地。**停机权仍未接**——只检测+审计不干预，等真实误报率数据；「偏离目标」的模型研判无 | 🟡 有检测无处置 |
+
+### 与 super-agent 的设计取向差异（本节新增，原对账表没有这一维）
+
+| 维度 | Super-agent | PRTS |
+|---|---|---|
+| 会话观 | 「Session 是系统实现细节，不是用户认知负担」——Router 替用户管 | `/sessions` `/switch` 把会话暴露给博士——个人系统可见性优先于自动化 |
+| 模型分层 | Router 轻模型、Worker 最强模型 | 全栈单一 `PRTS_LLM_MODEL`，无模型分层 |
+| 权限模型 | 原型层面无对应物 | K2a grant + actor 固定 `{kind:'model'}` + `MODEL_OPS` 白名单 + 审计哈希链；**后果**：父会话持久 grant 会静默漏给子会话（第三节 ① 已实测），子会话授权不能照抄继承 |
+| 递归预算 | `delegationDepth` 框架只管格式校验 | 工具层自设派生闸：子会话不可再派生（`subtask.ts`） |
+| 召回 | 链式召回 | 记忆注入 + 跨会话重建（`attachSessionRecall`）+ 压缩后回填（`compactPressure`） |
+
+### 剩余真缺口（R 第二步，需要真实负载才能验收）
+
+- 常驻 Router：`agents: []` 留空，多入口并发与 Router 自身上下文预算无负载数据可验。
+- 真异步后台任务：`/dispatch` 等 worker 收敛才返回，任务不阻塞前台对话的形态不存在。
+- Watchdog 处置权：循环检测有审计无停机（W1 注释写明等真实误报率）。
+
+以上三条性质相同——**正确性判定依赖真实使用数据，离线单测封顶**。
+与第四节 R1/R2 的划分一致：属 R2（验收完工）之后的事。
