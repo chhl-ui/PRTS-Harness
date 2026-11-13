@@ -202,6 +202,22 @@ function makeDataRoot(preset) {
   return dir
 }
 
+/**
+ * 生产形态基线情绪：真实使用里每个 turn 收尾都写「顺利」（emotion-signals.ts），
+ * 情感注入线几乎恒在。盲评只有每臂第一段是空库——写一条与 turn-end 同源
+ * 的「顺利」把这一段补齐，避免首段测量的是空情感库这个非生产状态。
+ */
+function seedBaselineEmotion(dataRoot) {
+  const emo = EmotionStore.open(join(dataRoot, 'emotion.sqlite'))
+  try {
+    emo.update({ kind: 'system', component: 'turn-end' }, {
+      valence: 0.12, arousal: 0.2, label: '顺利', reason: '盲评基线情绪——贴近生产常态',
+    })
+  } finally {
+    emo.close()
+  }
+}
+
 async function boot(dataRoot) {
   const app = await startRuntime({
     configPath: CONFIG,
@@ -236,6 +252,7 @@ async function personaArm(preset) {
   console.log(`[${preset}] 20 段中待跑 ${pending.length}`)
   if (pending.length === 0) return null
   const dataRoot = makeDataRoot(preset)
+  seedBaselineEmotion(dataRoot)
   const { app, usage } = await boot(dataRoot)
   try {
     for (const p of pending) {
@@ -267,6 +284,7 @@ async function trapArm() {
   const snapshotPath = join(RUN_DIR, 'trap-ground-truth.json')
   if (pending.length === 0 && existsSync(snapshotPath)) return
   const dataRoot = makeDataRoot('prts')
+  seedBaselineEmotion(dataRoot)
   const { app } = await boot(dataRoot)
   try {
     // 建一个从未执行的任务：active、0 步、0 证据、工作区无产出。
@@ -408,7 +426,7 @@ function mulberry32(seed) {
 function packageBlind() {
   const rows = bank.persona.flatMap((p) => ['prts', 'priestess'].map((arm) => done.get(`${arm}:${p.id}`)))
     .filter((r) => r !== undefined && r.error === undefined && r.reply)
-  const seed = 20261110
+  const seed = Number(process.env.BLIND_SEED ?? 20261110)
   const rand = mulberry32(seed)
   const shuffled = [...rows]
   for (let i = shuffled.length - 1; i > 0; i -= 1) {
@@ -503,7 +521,11 @@ const packaged = packageBlind()
 const summary = {
   finishedAt: new Date().toISOString(),
   totalMs: Date.now() - t0,
-  backend: 'deepseek-official（config 默认模型）',
+  // 后端如实标注：DEEPSEEK_BASE_URL 覆盖即非官方端点（本地 Strata 等）。
+  // 曾写死「deepseek-official」，r3-local 实为本地跑的 summary 被误标。
+  backend: process.env.DEEPSEEK_BASE_URL
+    ? `local:${process.env.PRTS_LLM_MODEL ?? '?'} @ ${process.env.DEEPSEEK_BASE_URL}`
+    : 'deepseek-official（config 默认模型）',
   personaSegments: packaged,
   trapRows: bank.traps.filter((t) => isDone('trap', t.id)).length,
   emotionRows: bank.emotion.filter((s) => isDone('emotion', s.id)).length,
